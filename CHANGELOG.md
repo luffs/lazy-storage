@@ -2,7 +2,11 @@
 
 All notable changes to lazy-storage are documented here. The format follows Keep a Changelog; versions follow Semantic Versioning.
 
-## [Unreleased]
+## [0.5.0] - 2026-09-03
+
+TypeScript declarations, a Node server, examples, a benchmark, and the
+two costs the benchmark found. No protocol or storage-format change;
+0.4.0 servers and clients interoperate.
 
 ### Added
 
