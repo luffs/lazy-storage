@@ -6,6 +6,36 @@ All notable changes to lazy-storage are documented here. The format follows Keep
 
 ### Added
 
+- **Authentication and authorization hooks.** `serve` / `createHandlers`
+  take `authenticate(req)` (the user for a request; null answers 401) and
+  `authorize(user, storeId, store)` (before any session exists: 403 on a
+  per-store URL, a `closed` message with code `forbidden` for one store on
+  a hub). Both may return promises; a hub queues a store's messages while
+  its authorization is in flight. The user rides on the session
+  (`store.session({ send, user, onEvict })`, `createHub(..., { user, authorize })`)
+- **Eviction.** `store.closeSessions(predicate, message)` ends the
+  sessions a predicate selects with a `closed` message (code `evicted`) and
+  tells their transport through `onEvict` (the Bun adapter closes the
+  socket on a per-store route and drops the hub entry on a hub). The client
+  gains a `closed` event and `db.closed`, goes offline for that store
+  without reconnecting on its own, and rejoins on `connect()`. Terminal
+  hub refusals (`unknown-store`, `invalid-store`, `forbidden`) now arrive
+  as `closed` too, instead of `error`; server errors carry a `code`
+- **Presence.** Stores broadcast the distinct users with a live session
+  when one joins or leaves (and hand the list to a new anonymous session);
+  `db.presence` and the `presence` event on the client, `store.presence()`
+  on the server, `presenceKey` to change how users are deduplicated
+  (default: by `id`)
+- **Embedding.** `createHandlers` returns `{ upgrade(req, server), websocket }`
+  to mount lazy-storage's sockets inside an existing `Bun.serve`; `serve`
+  is now a wrapper over it
+- **Keepalive.** A connection pings every 30 s while open (`keepalive`
+  option; `false` disables), so idle sockets survive proxies and server
+  idle timeouts; the timer never keeps a Node process alive
+- **Wildcard registers.** A `*` segment in a register path matches one
+  segment (`tasks/*/subtaskOrder`), declaring a register per record;
+  `registerSet` is now a matcher and `expandRegisters` walks the diff
+
 - **Many stores over one socket.** `createConnection({ transport })` is a
   shared, multiplexed connection that several clients attach to, one per
   store (`createClient({ connection, store })`); messages are tagged with

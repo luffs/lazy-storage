@@ -11,6 +11,11 @@
 // `initial` acts as the skeleton (the containers an app expects to exist)
 // and rows carry the data.
 //
+// Sessions may carry a `user` (whatever the transport authenticated). The
+// store broadcasts PRESENCE, the distinct users with a live session, when
+// sessions with a user open and close, and `closeSessions` evicts sessions
+// by predicate with a `closed` message the client treats as final.
+//
 // Protocol (client -> server):
 //   { t: 'hello', replicaId, ops: [op...] }   connect or reconnect: the
 //       client's whole outbox; the server merges it and replies with a
@@ -27,7 +32,10 @@
 //       replica, the receiving one included)
 //   { t: 'ack', seq, ts, correction }           `correction` is a diff with
 //       the server's values at the leaves the op lost, or null
-//   { t: 'error', seq?, message }
+//   { t: 'presence', users }                    distinct users with a live session
+//   { t: 'closed', code, message }              this session is over
+//       (code 'evicted'; hubs also send 'forbidden', 'unknown-store', 'invalid-store')
+//   { t: 'error', seq?, code?, message }
 //   { t: 'pong' }
 import { LazyWatch } from 'lazy-watch';
 import { createClock, isTimestamp } from '../core/hlc.js';
@@ -49,16 +57,22 @@ function rebuild(initial, rows) {
   return state;
 }
 
+/** Users are distinct by `id` when they have one, else by value */
+const defaultPresenceKey = user =>
+  (user !== null && typeof user === 'object' && user.id != null ? String(user.id) : JSON.stringify(user));
+
 /**
  * @param {Object} [options]
  * @param {Object} [options.initial] - the skeleton: state when nothing is
  *   persisted, and the base persisted rows are applied onto
  * @param {Array<string|string[]>} [options.registers] - paths whose value
- *   is one unit (arrays live only here)
+ *   is one unit (arrays live only here); `*` matches one segment
  * @param {Object} [options.storage] - a storage adapter (default: memory)
+ * @param {(user: any) => string} [options.presenceKey] - how presence
+ *   dedupes users (default: by `id`)
  * @param {() => number} [options.now] - wall clock (injectable for tests)
  */
-export function createStore({ initial = {}, registers = [], storage = memoryStorage(), now } = {}) {
+export function createStore({ initial = {}, registers = [], storage = memoryStorage(), presenceKey = defaultPresenceKey, now } = {}) {
   const regs = registerSet(registers);
   const saved = storage.load();
   const state = new LazyWatch(rebuild(initial, saved ? saved.rows : []));
@@ -71,6 +85,20 @@ export function createStore({ initial = {}, registers = [], storage = memoryStor
 
   function broadcast(message) {
     for (const s of sessions) s.send(message);
+  }
+
+  function presence() {
+    const seen = new Map();
+    for (const s of sessions) {
+      if (s.user === undefined) continue;
+      const key = presenceKey(s.user);
+      if (!seen.has(key)) seen.set(key, s.user);
+    }
+    return [...seen.values()];
+  }
+
+  function broadcastPresence() {
+    broadcast({ t: 'presence', users: presence() });
   }
 
   /**
@@ -146,11 +174,17 @@ export function createStore({ initial = {}, registers = [], storage = memoryStor
   /**
    * Attach a session. `send` receives message objects; feed the session
    * parsed client messages with `receive`, and `close` it when the
-   * connection ends.
+   * connection ends. `user` is whatever the transport authenticated
+   * (counted in presence when present); `onEvict` is called after
+   * `closeSessions` closed this session, so the transport can drop the
+   * socket or the hub its entry.
    */
-  function session({ send }) {
+  function session({ send, user, onEvict } = {}) {
+    if (typeof send !== 'function') throw new TypeError('A session needs a send function');
     const s = {
       send,
+      user,
+      onEvict,
       replicaId: null,
       receive(msg) {
         if (!Utils.isPlainObject(msg)) return send({ t: 'error', message: 'Expected a message object' });
@@ -182,11 +216,37 @@ export function createStore({ initial = {}, registers = [], storage = memoryStor
         }
       },
       close() {
-        sessions.delete(s);
+        if (!sessions.delete(s)) return;
+        if (user !== undefined) broadcastPresence();
       }
     };
     sessions.add(s);
+    // A user joining changes the list for everyone; an anonymous session
+    // still needs to see who is here
+    if (user !== undefined) broadcastPresence();
+    else send({ t: 'presence', users: presence() });
     return s;
+  }
+
+  /**
+   * Evict every session the predicate selects: it receives a `closed`
+   * message (code 'evicted') and is closed; its transport is told through
+   * `onEvict`. Returns how many were closed.
+   * @param {(session: {user: any, replicaId: string|null}) => boolean} predicate
+   * @param {string} [message]
+   */
+  function closeSessions(predicate, message = 'Your session was closed by the server') {
+    let closed = 0;
+    for (const s of [...sessions]) {
+      if (!predicate(s)) continue;
+      try {
+        s.send({ t: 'closed', code: 'evicted', message });
+      } catch { /* the transport may already be gone */ }
+      s.close();
+      s.onEvict?.();
+      closed++;
+    }
+    return closed;
   }
 
   /** Apply a change from the server itself, timestamped now */
@@ -202,6 +262,9 @@ export function createStore({ initial = {}, registers = [], storage = memoryStor
     apply,
     patch,
     session,
+    closeSessions,
+    /** Distinct users with a live session */
+    presence,
     snapshot: () => LazyWatch.snapshot(state),
     /** Subscribe to accepted changes (a LazyWatch listener on the state) */
     on: (listener, options) => LazyWatch.on(state, listener, options),

@@ -4,9 +4,15 @@
 // session (receive/close) but every incoming message names a `store`, and
 // the hub keeps one real session per store on this socket, tagging what
 // the sessions send back with the store id. Store sessions are created
-// lazily on the first message for a store and closed by `leave` or when
+// lazily on the first message for a store, after `authorize(user, id,
+// store)` allowed it (synchronously or through a promise; messages for
+// that store queue meanwhile), and closed by `leave`, by eviction, or when
 // the connection closes. The per-store protocol is untouched, so a store
 // cannot tell a hub session from a direct one.
+//
+// Terminal conditions for one store are reported with a `closed` message
+// carrying a code — 'invalid-store', 'unknown-store', 'forbidden' — which
+// the client treats as final for that store.
 import { LazyWatch } from 'lazy-watch';
 import { isStoreId } from './registry.js';
 
@@ -14,37 +20,87 @@ const { Utils } = LazyWatch;
 
 /**
  * @param {(id: string) => Object|null} resolveStore - store for an id, or null
- * @param {{ send: (message: Object) => void }} options
+ * @param {Object} options
+ * @param {(message: Object) => void} options.send
+ * @param {any} [options.user] - the authenticated user, attached to every
+ *   store session opened on this connection
+ * @param {(user: any, storeId: string, store: Object) => boolean|Promise<boolean>} [options.authorize]
  */
-export function createHub(resolveStore, { send }) {
+export function createHub(resolveStore, { send, user, authorize } = {}) {
+  if (typeof send !== 'function') throw new TypeError('A hub needs a send function');
   const sessions = new Map();
+  const pending = new Map(); // store id -> messages queued while authorization is in flight
+  let closed = false;
+
+  const refuse = (id, code, message) => send({ t: 'closed', store: id, code, message });
+
+  function open(id, store) {
+    const session = store.session({
+      send: message => send({ ...message, store: id }),
+      user,
+      onEvict: () => sessions.delete(id)
+    });
+    sessions.set(id, session);
+    return session;
+  }
+
+  function deliver(id, msg) {
+    const { store: _store, ...inner } = msg;
+    sessions.get(id)?.receive(inner);
+  }
 
   return {
     receive(msg) {
+      if (closed) return;
       if (!Utils.isPlainObject(msg)) return send({ t: 'error', message: 'Expected a message object' });
       if (msg.t === 'ping') return send({ t: 'pong' });
       const id = msg.store;
-      if (!isStoreId(id)) return send({ t: 'error', store: typeof id === 'string' ? id : undefined, message: 'A message on a multiplexed connection needs a valid store id' });
+      if (!isStoreId(id)) {
+        return refuse(typeof id === 'string' ? id : undefined, 'invalid-store', 'A message on a multiplexed connection needs a valid store id');
+      }
       if (msg.t === 'leave') {
         sessions.get(id)?.close();
         sessions.delete(id);
+        pending.delete(id);
         return;
       }
-      let session = sessions.get(id);
-      if (!session) {
-        const store = resolveStore(id);
-        if (!store) return send({ t: 'error', store: id, message: `Unknown store "${id}"` });
-        session = store.session({ send: message => send({ ...message, store: id }) });
-        sessions.set(id, session);
+      if (sessions.has(id)) return deliver(id, msg);
+      if (pending.has(id)) return void pending.get(id).push(msg);
+
+      const store = resolveStore(id);
+      if (!store) return refuse(id, 'unknown-store', `Unknown store "${id}"`);
+      const forbidden = () => refuse(id, 'forbidden', `Not allowed to access store "${id}"`);
+      const verdict = authorize ? authorize(user, id, store) : true;
+      if (verdict && typeof verdict.then === 'function') {
+        pending.set(id, [msg]);
+        verdict.then(
+          ok => {
+            const queued = pending.get(id) ?? [];
+            pending.delete(id);
+            if (closed) return;
+            if (!ok) return forbidden();
+            open(id, store);
+            for (const m of queued) deliver(id, m);
+          },
+          err => {
+            pending.delete(id);
+            if (!closed) refuse(id, 'forbidden', err?.message || `Not allowed to access store "${id}"`);
+          }
+        );
+        return;
       }
-      const { store: _store, ...inner } = msg;
-      session.receive(inner);
+      if (!verdict) return forbidden();
+      open(id, store);
+      deliver(id, msg);
     },
     /** Store ids with a live session on this connection */
     get stores() { return [...sessions.keys()]; },
+    get user() { return user; },
     close() {
+      closed = true;
       for (const session of sessions.values()) session.close();
       sessions.clear();
+      pending.clear();
     }
   };
 }

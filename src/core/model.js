@@ -10,8 +10,12 @@
 // A diff is flattened into LEAVES, [path, value], for the merge: objects
 // recurse, `null` is a deletion leaf, primitives and register values are
 // leaves. The merge decides per leaf and rebuilds the accepted diff.
+//
+// `registers` everywhere below is the matcher from registerSet(): patterns
+// may contain `*` segments, so 'tasks/*/subtaskOrder' declares one
+// register per task.
 import { LazyWatch } from 'lazy-watch';
-import { pathKey, setAt, valueAt } from './paths.js';
+import { setAt, valueAt } from './paths.js';
 
 const { Utils } = LazyWatch;
 
@@ -31,7 +35,7 @@ export const isArrayish = value =>
  * Flatten a diff into leaves. Throws a ModelError for an array outside a
  * register, or an array fragment at a register (registers are whole values).
  * @param {Object} diff
- * @param {Set<string>} registers - register path keys
+ * @param {{ matches: (path: string[]) => boolean }} registers - from registerSet()
  * @param {string[]} [path]
  * @param {Array} [out]
  * @returns {Array<[string[], any]>}
@@ -43,7 +47,7 @@ export function leaves(diff, registers, path = [], out = []) {
   for (const key of Object.keys(diff)) {
     const value = diff[key];
     const p = [...path, key];
-    if (registers.has(pathKey(p))) {
+    if (registers.matches(p)) {
       if (Utils.isPlainObject(value) && Utils.hasArrayMarker(value)) {
         throw new ModelError(`Register "${p.join('/')}" must be written as a whole value, not an array fragment`, p);
       }
@@ -74,19 +78,27 @@ export function assertModel(diff, registers) {
  * diff touches with a deep copy of the register's current value from the
  * live state (`null` when it was deleted).
  * @param {Object} diff
- * @param {Set<string>} registers
+ * @param {{ matches: (path: string[]) => boolean, size: number }} registers
  * @param {Object} state - live state (a LazyWatch proxy or plain object)
  */
 export function expandRegisters(diff, registers, state) {
   if (registers.size === 0) return diff;
-  const out = structuredClone(diff);
-  for (const key of registers) {
-    const path = JSON.parse(key);
-    if (valueAt(out, path) === undefined) continue;
-    const live = valueAt(LazyWatch.isProxy(state) ? LazyWatch.snapshot(state) : state, path);
-    setAt(out, path, live === undefined ? null : structuredClone(live));
-  }
-  return out;
+  const live = LazyWatch.isProxy(state) ? LazyWatch.snapshot(state) : state;
+  const walk = (node, path) => {
+    if (!Utils.isPlainObject(node)) return node;
+    const out = {};
+    for (const key of Object.keys(node)) {
+      const p = [...path, key];
+      if (registers.matches(p)) {
+        const value = valueAt(live, p);
+        out[key] = value === undefined ? null : structuredClone(value);
+      } else {
+        out[key] = walk(node[key], p);
+      }
+    }
+    return out;
+  };
+  return walk(diff, []);
 }
 
 /** Rebuild a nested diff from accepted leaves */

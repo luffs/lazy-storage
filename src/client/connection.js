@@ -23,8 +23,11 @@ const { Utils } = LazyWatch;
  *   backoff after an unexpected close; false disables automatic reconnects
  * @param {boolean} [options.multiplex=true] - tag and route messages by
  *   store id (false for a private connection to a single-store endpoint)
+ * @param {number|false} [options.keepalive=30000] - ping interval in ms while
+ *   open, so idle sockets survive proxies and server idle timeouts; false
+ *   disables it
  */
-export function createConnection({ transport, reconnect = { min: 500, max: 10_000 }, multiplex = true } = {}) {
+export function createConnection({ transport, reconnect = { min: 500, max: 10_000 }, multiplex = true, keepalive = 30_000 } = {}) {
   if (typeof transport !== 'function') throw new TypeError('createConnection requires a transport factory');
   const handlers = new Map();
   const statusListeners = new Set();
@@ -33,6 +36,22 @@ export function createConnection({ transport, reconnect = { min: 500, max: 10_00
   let closedByUser = true;
   let retryDelay = reconnect ? reconnect.min : 0;
   let retryTimer = null;
+  let keepaliveTimer = null;
+
+  function startKeepalive() {
+    stopKeepalive();
+    if (!keepalive) return;
+    keepaliveTimer = setInterval(() => {
+      if (conn && status === 'open') conn.send({ t: 'ping' });
+    }, keepalive);
+    // Never keep a Node process alive just for pings
+    if (typeof keepaliveTimer?.unref === 'function') keepaliveTimer.unref();
+  }
+
+  function stopKeepalive() {
+    clearInterval(keepaliveTimer);
+    keepaliveTimer = null;
+  }
 
   function setStatus(next) {
     if (status === next) return;
@@ -54,6 +73,7 @@ export function createConnection({ transport, reconnect = { min: 500, max: 10_00
       if (conn !== c) return;
       retryDelay = reconnect ? reconnect.min : 0;
       setStatus('open');
+      startKeepalive();
       for (const { handler, link } of [...handlers.values()]) handler.onOpen(link);
     };
     c.onmessage = msg => {
@@ -70,6 +90,7 @@ export function createConnection({ transport, reconnect = { min: 500, max: 10_00
     c.onclose = () => {
       if (conn !== c) return;
       conn = null;
+      stopKeepalive();
       setStatus('offline');
       for (const { handler } of [...handlers.values()]) handler.onClose();
       if (!closedByUser && reconnect) scheduleRetry();
@@ -105,6 +126,7 @@ export function createConnection({ transport, reconnect = { min: 500, max: 10_00
     close() {
       closedByUser = true;
       clearTimeout(retryTimer);
+      stopKeepalive();
       const c = conn;
       conn = null;
       c?.close();

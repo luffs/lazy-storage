@@ -27,7 +27,7 @@ import { createConnection } from './connection.js';
 const { Utils } = LazyWatch;
 const REMOTE = { origin: 'remote' };
 const HISTORY = new Set(['undo', 'redo']);
-const EVENTS = ['status', 'error', 'sync'];
+const EVENTS = ['status', 'error', 'sync', 'closed', 'presence'];
 
 /**
  * @param {Object} options
@@ -78,6 +78,8 @@ export function createClient({
   let link = null;        // attachment to the connection while connected
   let synced = false;     // this store's snapshot has landed on this socket
   let lastStatus = 'offline';
+  let presence = [];      // distinct users with a live session on this store
+  let ended = null;       // { code, message } after the server closed this store for us
 
   // Own batches (meta undefined) and undo/redo replays are history; remote
   // and rejected batches are not
@@ -104,6 +106,12 @@ export function createClient({
     emit('status', next);
   }
   const stopStatus = connection.on('status', refreshStatus);
+
+  function setPresence(users) {
+    if (users.length === 0 && presence.length === 0) return;
+    presence = users;
+    emit('presence', presence);
+  }
 
   function persistOutbox() {
     storage.save({ replicaId, seq, ops: outbox });
@@ -158,8 +166,28 @@ export function createClient({
         if (msg.correction) LazyWatch.patch(state, msg.correction, REMOTE);
         emit('sync');
         return;
+      case 'presence':
+        setPresence(Array.isArray(msg.users) ? msg.users : []);
+        return;
+      case 'closed': {
+        // Final for this store: evicted, forbidden, or unknown. Detach and
+        // stay offline until connect() is called again
+        ended = { code: msg.code, message: msg.message };
+        if (link) {
+          link.detach();
+          link = null;
+        }
+        synced = false;
+        if (ownsConnection) connection.close();
+        setPresence([]);
+        refreshStatus();
+        emit('closed', ended);
+        return;
+      }
       case 'error': {
-        emit('error', new Error(msg.message));
+        const err = new Error(msg.message);
+        if (msg.code) err.code = msg.code;
+        emit('error', err);
         // The server refused an op we already applied locally: drop it and
         // resync from a snapshot so this replica falls back in line
         if (Number.isInteger(msg.seq)) {
@@ -184,11 +212,13 @@ export function createClient({
     onMessage: handle,
     onClose() {
       synced = false;
+      setPresence([]);
       refreshStatus();
     }
   };
 
   function connect() {
+    ended = null;
     if (!link) link = connection.attach(storeId ?? '', handler);
     connection.connect();
     refreshStatus();
@@ -202,6 +232,7 @@ export function createClient({
     }
     if (ownsConnection) connection.close();
     synced = false;
+    setPresence([]);
     refreshStatus();
   }
 
@@ -249,12 +280,20 @@ export function createClient({
     get status() { return status(); },
     /** Unacknowledged local ops */
     get pending() { return outbox.length; },
+    /** Distinct users with a live session on this store (empty while offline) */
+    get presence() { return presence; },
+    /** Why the server closed this store for us ({ code, message }), or null */
+    get closed() { return ended; },
     connect,
     disconnect,
     collection,
     /** Subscribe to state changes (a LazyWatch listener; meta.origin tells remote from local) */
     watch: (listener, options) => LazyWatch.on(state, listener, options),
-    /** Lifecycle events: 'status' (string), 'error' (Error), 'sync' (outbox changed) */
+    /**
+     * Lifecycle events: 'status' (string), 'error' (Error, with `code` when
+     * the server gave one), 'sync' (outbox changed), 'presence' (users),
+     * 'closed' ({ code, message }: the server ended this store for us)
+     */
     on(event, fn) {
       if (!listeners[event]) throw new TypeError(`Unknown event "${event}"`);
       listeners[event].add(fn);

@@ -101,17 +101,20 @@ test('disconnecting one client leaves the socket up for the others, and it can r
   assert.equal(stores.get('team-y').state.tasks.later.title, 'while detached');
 });
 
-test('an unknown store gets an error on that client only and never goes online', async () => {
+test('an unknown store is closed for that client only; the other stays online', async () => {
   const { net, connect, attach } = setup(id => (id.startsWith('team-') ? createStore({ initial: INITIAL, now: fakeTime() }) : null));
   const shared = connect();
   const ok = attach(shared, 'team-x', 'x1');
   const nope = attach(shared, 'other', 'o1');
-  const errors = [];
-  nope.on('error', err => errors.push(err.message));
+  const closed = [];
+  nope.on('closed', info => closed.push(info));
   await net.settle();
   assert.equal(ok.status, 'online');
-  assert.equal(nope.status, 'connecting');
-  assert.deepEqual(errors, ['Unknown store "other"']);
+  assert.equal(nope.status, 'offline');
+  assert.deepEqual(closed, [{ code: 'unknown-store', message: 'Unknown store "other"' }]);
+  assert.deepEqual(nope.closed, closed[0]);
+  assert.equal(shared.attached, 1, 'the refused client detached; the socket stays for the other');
+  assert.equal(shared.status, 'open');
 });
 
 test('one client per store per connection', () => {
@@ -128,6 +131,6 @@ test('a hub refuses messages without a valid store id and answers pings', () => 
   hub.receive({ t: 'ping' });
   hub.receive({ t: 'hello', replicaId: 'r' });
   hub.receive({ t: 'hello', store: 'bad id', replicaId: 'r' });
-  assert.deepEqual(sent.map(m => m.t), ['pong', 'error', 'error']);
+  assert.deepEqual(sent.map(m => [m.t, m.code]), [['pong', undefined], ['closed', 'invalid-store'], ['closed', 'invalid-store']]);
   assert.deepEqual(hub.stores, []);
 });

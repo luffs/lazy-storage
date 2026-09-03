@@ -30,8 +30,12 @@ export function createNetwork(store) {
       throw new Error('network did not settle');
     },
 
-    /** A link for one client: a transport factory plus offline/online control */
-    link() {
+    /**
+     * A link for one client: a transport factory plus offline/online control.
+     * `user` is attached to the sessions this link opens (as an authenticated
+     * transport would); eviction closes the link's connection.
+     */
+    link({ user } = {}) {
       const link = { online: true, current: null };
       link.factory = () => {
         let session = null;
@@ -50,13 +54,21 @@ export function createNetwork(store) {
         };
         queue.push(() => {
           if (!link.online) { t.onclose?.(); return; }
-          session = store.session({
-            send: message => {
-              const copy = structuredClone(message);
-              queue.push(() => { if (t.open) t.onmessage?.(copy); });
-            }
-          });
+          // Open before the session exists: a real socket can send from the
+          // moment the server's open handler runs (presence goes out there)
           t.open = true;
+          session = store.session({
+            // Gate at send time, not delivery: like a real socket, messages
+            // written before a close are still delivered, in order, ahead of
+            // the close event (an eviction's `closed` message relies on it)
+            send: message => {
+              if (!t.open) return;
+              const copy = structuredClone(message);
+              queue.push(() => t.onmessage?.(copy));
+            },
+            user,
+            onEvict: () => t.close()
+          });
           link.current = t;
           t.onopen?.();
         });
@@ -68,8 +80,8 @@ export function createNetwork(store) {
     },
 
     /** A connected client on its own link; `reconnect` is off so tests drive it */
-    client(options = {}) {
-      const link = net.link();
+    client(options = {}, linkOptions = {}) {
+      const link = net.link(linkOptions);
       const client = createClient({ transport: link.factory, reconnect: false, ...options });
       client.link = link;
       client.connect();

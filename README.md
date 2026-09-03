@@ -39,7 +39,14 @@ const stores = createStores(id => createStore({
   registers: ['order'],
   storage: sqlite.store(id)
 }));
-serve({ stores, port: 3200 }); // clients connect to ws://host:3200/ws/<storeId>
+serve({
+  stores,
+  port: 3200,
+  authenticate: req => userForToken(new URL(req.url).searchParams.get('token')), // null → 401
+  authorize: (user, storeId) => user.teams.includes(storeId)                     // false → 403 / closed
+});
+// clients: ws://host:3200/ws/<storeId>?token=... for one store,
+//          ws://host:3200/ws?token=...           for many stores over one socket
 ```
 
 For a single store, `createStore` with `jsonFileStorage('data/todo.json')`
@@ -55,8 +62,10 @@ replica still lands on the record it meant.
 
 Arrays are allowed only at declared **registers**: paths whose value is one
 unit, written wholesale and resolved as a whole (an ordering of ids, a set
-of tags). Anywhere else an array write is reverted on the client and
-reported through the `error` event, and refused by the server.
+of tags). A `*` segment matches any one segment, so `tasks/*/subtaskOrder`
+declares one register per task. Anywhere else an array write is reverted
+on the client and reported through the `error` event, and refused by the
+server.
 
 ## How conflicts resolve
 
@@ -153,7 +162,58 @@ is the socket's. `client.disconnect()` on a shared connection leaves only
 that store (the socket stays up for the others), and `connection.close()`
 drops the socket for all of them. A client created with its own
 `transport` gets a private, untagged connection, which is what the
-per-store URL and a single-store server speak.
+per-store URL and a single-store server speak. While open, a connection
+pings every 30 seconds (`keepalive`, or `false`) so idle sockets survive
+proxies and server idle timeouts.
+
+## Authentication, presence, and eviction
+
+Two hooks on the Bun adapter decide who gets a session on which store:
+
+- `authenticate(req)` runs at upgrade and returns the user for the request
+  (a token in the query string is the usual carrier, since browsers cannot
+  set headers on a WebSocket; `webSocketTransport` takes a function URL for
+  that). `null` or `undefined` answers 401.
+- `authorize(user, storeId, store)` runs before a session exists: at
+  upgrade for a per-store URL (403), and per store on a hub, where a
+  refusal arrives as a `closed` message with code `forbidden` and only that
+  store is affected. Both hooks may return promises.
+
+The user rides on the session (`store.session({ send, user })` if you drive
+sessions yourself), which powers two more features:
+
+- **Presence.** The store broadcasts the distinct users with a live
+  session whenever one joins or leaves; `db.presence` holds the list,
+  `db.on('presence', users => ...)` follows it, and `store.presence()`
+  answers on the server. Users are distinct by `id` (or by value; override
+  with `presenceKey`), so a user on two devices counts once.
+- **Eviction.** `store.closeSessions(user => ..., message)` ends the
+  sessions a predicate selects — say, everyone who was just removed from a
+  team. The client receives a `closed` event with `{ code: 'evicted',
+  message }`, goes offline for that store, and does not reconnect on its
+  own; `db.closed` keeps the reason until `db.connect()` is called again,
+  at which point authorization runs afresh. On a shared connection the
+  socket stays up for the other stores.
+
+## Embedding in your own server
+
+`createHandlers` returns the two pieces `serve` is built from, so the
+sockets can live inside a server that already has routes:
+
+```js
+import { createHandlers } from 'lazy-storage/server/bun';
+
+const lazy = createHandlers({ stores, authenticate, authorize });
+Bun.serve({
+  port: 3200,
+  async fetch(req, server) {
+    const res = await lazy.upgrade(req, server); // null: not a lazy-storage URL
+    if (res !== null) return res;
+    return app.fetch(req);                        // your routes
+  },
+  websocket: lazy.websocket
+});
+```
 
 ## Undo
 
@@ -169,33 +229,37 @@ replaced by a leaf) drops the affected steps.
 **Client** (`lazy-storage`)
 
 - `createClient({ transport | connection + store, initial, registers, replicaId, storage, undo, undoLimit, reconnect, now })`
-- `createConnection({ transport, reconnect, multiplex })` → `connect()`, `close()`, `status`, `attached`, `on('status', fn)` — a socket shared by clients
+- `createConnection({ transport, reconnect, multiplex, keepalive })` → `connect()`, `close()`, `status`, `attached`, `on('status', fn)` — a socket shared by clients
 - `db.state` — the mirror (a lazy-watch proxy). Read and write it directly
 - `db.store`, `db.connection` — the store id on a shared connection, and the connection itself
+- `db.presence` — users with a live session on this store; `db.closed` — `{ code, message }` after the server ended this store for us, else null
 - `db.collection(name)` — `add(record) → id`, `update(id, fields)`, `remove(id)`, `get(id)`, `has(id)`, `ids()`, `all()`
 - `db.connect()`, `db.disconnect()`, `db.status` (`'offline' | 'connecting' | 'online'`), `db.pending`
 - `db.watch(listener)` — state changes; `meta?.origin === 'remote'` marks the server's
-- `db.on('status' | 'error' | 'sync', fn)` — lifecycle events
+- `db.on('status' | 'error' | 'sync' | 'presence' | 'closed', fn)` — lifecycle events; server errors carry a `code`
 - `db.undo()`, `db.redo()`, `db.canUndo`, `db.canRedo`, `db.checkpoint()`, `db.group(fn)`, `db.clearHistory()`
 - `webSocketTransport(url)`, `memoryOutbox()`, `localStorageOutbox(key)`
 
 **Server** (`lazy-storage/server`)
 
-- `createStore({ initial, registers, storage, now })`
-- `store.session({ send })` → `{ receive(message), close() }` — one per connection, transport-agnostic
+- `createStore({ initial, registers, storage, presenceKey, now })`
+- `store.session({ send, user, onEvict })` → `{ receive(message), close(), user, replicaId }` — one per connection, transport-agnostic
+- `store.closeSessions(predicate, message)` — evict sessions; `store.presence()` — distinct users with a live session
 - `store.patch(diff)` — a server-side change, timestamped and broadcast
 - `store.on(listener)`, `store.snapshot()`, `store.state`, `store.version`
 - `store.compactTombstones(olderThan)`, `store.flush()`, `store.dispose()`
 - `memoryStorage()`, `jsonFileStorage(path, { debounce })`
 - `createStores(factory)` → `get(id)`, `has(id)`, `ids()`, `release(id)`, `dispose()`; `isStoreId(id)`
-- `createHub(resolveStore, { send })` → `{ receive(message), close(), stores }` — the server side of a multiplexed connection, session-shaped
+- `createHub(resolveStore, { send, user, authorize })` → `{ receive(message), close(), stores, user }` — the server side of a multiplexed connection, session-shaped
 
 **SQLite** (`lazy-storage/server/sqlite`, Bun): `sqliteStorage(file, { wal })` →
 `store(id)`, `ids()`, `remove(id)`, `db`, `close()`.
 
-**Bun adapter** (`lazy-storage/server/bun`): `serve({ store, stores, port, path, fetch })` —
+**Bun adapter** (`lazy-storage/server/bun`): `serve({ store, stores, port, path, fetch, authenticate, authorize })` —
 with a single `store`, a plain session at `path`; with `stores` (a registry or
 `id => store|null`), a hub at `path` and plain per-store sessions at `path/<id>`.
+`createHandlers({ store, stores, path, authenticate, authorize })` → `{ upgrade(req, server), websocket }`
+for mounting inside your own `Bun.serve`.
 
 **Core** (`lazy-storage/core`): the pieces both sides share — `createClock`,
 `compareTs`, `mergeOp`, `leaves`, `expandRegisters`, `registerSet`,
@@ -209,7 +273,9 @@ plain lazy-watch diff.
 
 Server to client: `{ t: 'snapshot', state, ts, version, seq }`,
 `{ t: 'patch', diff, ts, version }`, `{ t: 'ack', seq, ts, correction }`,
-`{ t: 'error', seq?, message }`, `{ t: 'pong' }`.
+`{ t: 'presence', users }`, `{ t: 'closed', code, message }` (final for the
+store: `evicted`, `forbidden`, `unknown-store`, `invalid-store`),
+`{ t: 'error', seq?, code?, message }`, `{ t: 'pong' }`.
 
 On a multiplexed connection every message except `ping`/`pong` carries a
 `store` field with the store id, and the client sends `{ t: 'leave', store }`
@@ -224,10 +290,9 @@ concurrent edits to the *same* field (the later one wins) and it is not a
 text CRDT. For collaborative documents, embed a purpose-built library for
 the document and keep the surrounding state here.
 
-Authentication and per-user permissions are not part of this version; the
-Bun adapter takes a `fetch` handler for anything beside the socket, and
-`store.session` is transport-agnostic so an authenticated wrapper can
-decide who gets a session on which store.
+Authentication is a hook, not a system: lazy-storage asks you who a request
+is and whether they may open a store, and stores the answer on the session.
+Users, tokens, and memberships stay in your application.
 
 ## Testing
 

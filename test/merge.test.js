@@ -19,6 +19,25 @@ test('leaves flattens objects, keeps null as a deletion, and rejects arrays outs
   assert.throws(() => leaves({ order: { 1: 'a', $length: 2 } }, regs), ModelError, 'a register must travel whole');
 });
 
+test('register patterns may use * for one segment, declaring a register per record', () => {
+  const regs = registerSet(['tasks/*/subtaskOrder', 'order']);
+  assert.equal(regs.matches(['tasks', 'a', 'subtaskOrder']), true);
+  assert.equal(regs.matches(['tasks', 'subtaskOrder']), false, 'the depth must match');
+  assert.equal(regs.matches(['tasks', 'a', 'title']), false);
+  assert.equal(regs.matches(['order']), true);
+  assert.deepEqual(
+    leaves({ tasks: { a: { subtaskOrder: ['s2', 's1'], title: 'A' } }, order: ['a'] }, regs),
+    [[['tasks', 'a', 'subtaskOrder'], ['s2', 's1']], [['tasks', 'a', 'title'], 'A'], [['order'], ['a']]]
+  );
+  assert.throws(() => leaves({ tasks: { a: { tags: ['x'] } } }, regs), ModelError, 'an array at a non-matching path is still refused');
+  const state = { tasks: { a: { subtaskOrder: ['s1', 's2', 's3'] } } };
+  assert.deepEqual(
+    expandRegisters({ tasks: { a: { subtaskOrder: { 2: 's3', $length: 3 }, title: 'A' } } }, regs, state),
+    { tasks: { a: { subtaskOrder: ['s1', 's2', 's3'], title: 'A' } } }
+  );
+  assert.throws(() => registerSet(['tasks//x']), TypeError);
+});
+
 test('expandRegisters replaces a register fragment with the live whole value', () => {
   const regs = registerSet(['order']);
   const state = { order: ['a', 'b', 'c'], tasks: {} };

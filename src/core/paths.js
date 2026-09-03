@@ -12,15 +12,32 @@ export const parsePathKey = key => JSON.parse(key);
 /** Prefix shared by the keys of every strict descendant of `path` */
 export const descendantPrefix = path => pathKey(path).slice(0, -1) + ',';
 
-/** Normalize a register spec ('order', 'a/b', or ['a', 'b']) to a key */
+/**
+ * Normalize a register spec to segments: 'order', 'tasks/*\/subtaskOrder',
+ * or ['tasks', '*', 'subtaskOrder']. A `*` segment matches any one segment.
+ */
 export function registerKey(spec) {
-  if (Array.isArray(spec)) return pathKey(spec.map(String));
-  if (typeof spec === 'string' && spec.length > 0) return pathKey(spec.split('/'));
-  throw new TypeError(`Invalid register path: ${JSON.stringify(spec)}`);
+  const segments = Array.isArray(spec) ? spec.map(String) : typeof spec === 'string' ? spec.split('/') : null;
+  if (!segments || segments.length === 0 || segments.some(s => s.length === 0)) {
+    throw new TypeError(`Invalid register path: ${JSON.stringify(spec)}`);
+  }
+  return segments;
 }
 
+/**
+ * The set of register paths, as a matcher: `matches(path)` is true when
+ * some pattern has the path's length and every segment equals the path's
+ * or is `*`.
+ */
 export function registerSet(specs = []) {
-  return new Set(specs.map(registerKey));
+  const patterns = specs.map(registerKey);
+  return {
+    patterns,
+    size: patterns.length,
+    matches(path) {
+      return patterns.some(p => p.length === path.length && p.every((seg, i) => seg === '*' || seg === path[i]));
+    }
+  };
 }
 
 /** Set `value` at `path` inside a nested plain-object diff, creating levels */
