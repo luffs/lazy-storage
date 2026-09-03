@@ -21,10 +21,25 @@ test('a fresh adapter loads null and a committed one loads its rows, replicas, a
   assert.deepEqual(storage.load(), {
     rows: [['["tasks","a","title"]', { value: 'A', ts: T(10) }]],
     replicas: { r1: { seq: 3, seen: 500 }, r2: { seq: 1, seen: 600 } },
-    version: 2
+    version: 2,
+    epoch: null
   });
-  storage.commit({ upserts: [], deletes: [], forgetReplicas: ['r1'], version: 3 });
+  storage.commit({ upserts: [], deletes: [], forgetReplicas: ['r1'], version: 3, epoch: 'e1' });
   assert.deepEqual(storage.load().replicas, { r2: { seq: 1, seen: 600 } });
+  assert.equal(storage.load().epoch, 'e1');
+});
+
+test('a store mints an epoch once and keeps it across reopens; a wiped storage gets a new one', () => {
+  const storage = memoryStorage();
+  const one = createStore({ initial: INITIAL, storage });
+  assert.match(one.epoch, /^[0-9a-z]+$/i);
+  one.patch({ tasks: { a: { id: 'a' } } });
+  one.dispose();
+  assert.equal(storage.load().epoch, one.epoch);
+  const two = createStore({ initial: INITIAL, storage });
+  assert.equal(two.epoch, one.epoch);
+  const fresh = createStore({ initial: INITIAL, storage: memoryStorage() });
+  assert.notEqual(fresh.epoch, one.epoch);
 });
 
 test('a store reads a document from before replica progress carried `seen`', () => {

@@ -34,13 +34,17 @@ try {
         ['["tasks","y"]', { ts: T(11), deleted: true }]
       ],
       replicas: { r1: { seq: 2, seen: 500 } },
-      version: 1
+      version: 1,
+      epoch: null
     });
-    a.commit({ upserts: [], deletes: ['["tasks","y"]'], replica: { id: 'r2', seq: 1, seen: 600 }, version: 2 });
+    a.commit({ upserts: [], deletes: ['["tasks","y"]'], replica: { id: 'r2', seq: 1, seen: 600 }, version: 2, epoch: 'e1' });
     const loaded = a.load();
     assert.equal(loaded.rows.length, 2);
     assert.deepEqual(loaded.replicas, { r1: { seq: 2, seen: 500 }, r2: { seq: 1, seen: 600 } });
     assert.equal(loaded.version, 2);
+    assert.equal(loaded.epoch, 'e1');
+    a.commit({ upserts: [], deletes: [], version: 3 });
+    assert.equal(a.load().epoch, 'e1', 'a commit without an epoch keeps the stored one');
     a.commit({ upserts: [], deletes: [], forgetReplicas: ['r1'], version: 3 });
     assert.deepEqual(a.load().replicas, { r2: { seq: 1, seen: 600 } });
     assert.deepEqual(sqlite.ids(), ['a']);
@@ -91,11 +95,14 @@ try {
 
     const sqlite = sqliteStorage(old);
     assert.deepEqual(sqlite.store('t').load().replicas, { r1: { seq: 7, seen: null } }, 'unknown until the replica is heard from again');
+    assert.equal(sqlite.store('t').load().epoch, null);
     const store = createStore({ initial: INITIAL, storage: sqlite.store('t'), now: () => 5_000_000 });
     assert.deepEqual(store.snapshot().tasks, { a: { id: 'a' } });
+    store.patch({ marker: 1 });
+    assert.equal(sqlite.store('t').load().epoch, store.epoch, 'the minted epoch is stored with the next commit');
     assert.equal(store.apply({ replicaId: 'r1', seq: 7, ts: T(10, 'r1'), diff: { tasks: { a: { id: 'z' } } } }).duplicate, true);
     store.apply({ replicaId: 'r1', seq: 8, ts: T(4_999_000, 'r1'), diff: { tasks: { a: { done: true } } } });
-    assert.deepEqual(sqlite.store('t').load().replicas, { r1: { seq: 8, seen: 5_000_000 } });
+    assert.deepEqual(sqlite.store('t').load().replicas.r1, { seq: 8, seen: 5_000_000 });
     store.dispose();
     sqlite.close();
   });

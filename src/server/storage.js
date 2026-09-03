@@ -16,13 +16,15 @@
 // The interface is incremental so a row-oriented backend (SQLite) writes
 // only what an op touched:
 //
-//   load()  -> null | { rows: Array<[pathKey, row]>, replicas: { replicaId: { seq, seen } }, version }
+//   load()  -> null | { rows: Array<[pathKey, row]>, replicas: { replicaId: { seq, seen } }, version, epoch }
 //   commit({ upserts: Array<[pathKey, row]>, deletes: pathKey[],
-//            replica?: { id, seq, seen }, forgetReplicas?: replicaId[], version })
+//            replica?: { id, seq, seen }, forgetReplicas?: replicaId[], version, epoch })
 //   flush() -> void   (write out anything buffered; called on dispose)
 //
 // `seen` is the store's clock (ms) when the replica's op arrived; a
 // `seen` of null means unknown (a document from before it was recorded).
+// `epoch` is a random id the store mints once per storage life, so a
+// client can tell whether its cached version means anything here.
 // The store also accepts the older `seqs: { replicaId: seq }` from load.
 // `null` from load means "never seen": the store starts from `initial`.
 // Document-oriented adapters (memory, JSON file) apply commits to an
@@ -40,9 +42,10 @@ function document(initial = null) {
       : Object.entries(initial.seqs ?? {}).map(([id, seq]) => [id, { seq, seen: null }]))
     : {};
   let version = initial ? initial.version : 0;
+  let epoch = initial?.epoch ?? null;
   let seen = initial !== null;
   return {
-    load: () => (seen ? { rows: [...rows].map(([k, r]) => [k, structuredClone(r)]), replicas: structuredClone(replicas), version } : null),
+    load: () => (seen ? { rows: [...rows].map(([k, r]) => [k, structuredClone(r)]), replicas: structuredClone(replicas), version, epoch } : null),
     commit(change) {
       seen = true;
       for (const key of change.deletes) rows.delete(key);
@@ -50,8 +53,9 @@ function document(initial = null) {
       if (change.replica) replicas[change.replica.id] = { seq: change.replica.seq, seen: change.replica.seen ?? null };
       for (const id of change.forgetReplicas ?? []) delete replicas[id];
       version = change.version;
+      if (change.epoch !== undefined) epoch = change.epoch;
     },
-    serialize: () => ({ rows: [...rows], replicas, version })
+    serialize: () => ({ rows: [...rows], replicas, version, epoch })
   };
 }
 

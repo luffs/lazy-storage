@@ -32,20 +32,28 @@
 // by predicate with a `closed` message the client treats as final.
 //
 // Protocol (client -> server):
-//   { t: 'hello', replicaId, ops: [op...] }   connect or reconnect: the
-//       client's whole outbox; the server merges it and replies with a
-//       snapshot that already contains the merged result
+//   { t: 'hello', replicaId, ops: [op...], since? }   connect or reconnect:
+//       the client's whole outbox, and the store version it last saw; the
+//       server merges the ops and replies with what the client is missing
 //   { t: 'op', op }                           one live batch
 //   { t: 'ping' }
 // where op = { replicaId, seq, ts, diff }.
 //
 // Server -> client:
-//   { t: 'snapshot', state, ts, seq, registers }  full state; `seq` is the
-//       last op of this replica the server holds, so the client can drop
-//       acknowledged outbox entries; `registers` are the server's register
-//       patterns, for the client to check against its own
-//   { t: 'patch', diff, ts }                    an accepted diff (from any
-//       replica, the receiving one included)
+//   { t: 'snapshot', state, ts, seq, registers, v }  full state; `seq` is
+//       the last op of this replica the server holds, so the client can
+//       drop acknowledged outbox entries; `registers` are the server's
+//       register patterns, for the client to check against its own; `v` is
+//       the store version the state reflects
+//   { t: 'delta', patches, ts, seq, registers, v }  instead of a snapshot
+//       when the client's `since` is recent enough: the accepted diffs
+//       since then, in order, followed by corrections for the hello's own
+//       ops. The store keeps the last `deltaLog` accepted diffs for this
+//       (in memory: after a restart the first reconnect is a snapshot), and
+//       answers with a snapshot when a hello op was refused, since the
+//       client then holds an edit the server never will
+//   { t: 'patch', diff, ts, v }                 an accepted diff (from any
+//       replica, the receiving one included) and the version it made
 //   { t: 'ack', seq, ts, correction }           `correction` is a diff with
 //       the server's values at the leaves the op lost, or null
 //   { t: 'presence', users }                    distinct users with a live session
@@ -61,6 +69,8 @@ import { registerSet, pathKey, parsePathKey, setAt, valueAt, deleteAt } from '..
 import { leaves, assertModel } from '../core/model.js';
 import { mergeOp, compactTombstones } from '../core/merge.js';
 import { memoryStorage } from './storage.js';
+import { toJSON } from './wire.js';
+import { randomId } from '../core/ids.js';
 
 const { Utils } = LazyWatch;
 
@@ -131,6 +141,9 @@ const defaultPresenceKey = user =>
  *   this is refused with code 'expired'. `Infinity` keeps everything
  * @param {number} [options.compactEvery=3600000] - how often (ms of store
  *   time) compaction runs on its own, checked as ops arrive
+ * @param {number} [options.deltaLog=1000] - how many accepted diffs to keep
+ *   for answering a reconnect with a delta instead of a snapshot; 0 always
+ *   sends snapshots
  * @param {Object} [options.storage] - a storage adapter (default: memory)
  * @param {(user: any) => string} [options.presenceKey] - how presence
  *   dedupes users (default: by `id`)
@@ -144,6 +157,7 @@ export function createStore({
   maxSkew = 5 * MINUTE,
   retention = 30 * DAY,
   compactEvery = HOUR,
+  deltaLog = 1000,
   storage = memoryStorage(),
   presenceKey = defaultPresenceKey,
   now
@@ -157,14 +171,26 @@ export function createStore({
   const clocks = new Map(saved ? saved.rows.map(([key, row]) => [key, row.deleted ? { ts: row.ts, deleted: true } : { ts: row.ts }]) : []);
   const replicas = loadReplicas(saved, time());
   let version = saved ? saved.version : 0;
+  // Versions count from 0 for the life of a store's storage. The epoch
+  // tells one life from the next, so a client whose cache remembers a
+  // version of storage that has since been wiped gets a snapshot, not a
+  // delta computed against a different history
+  const epoch = typeof saved?.epoch === 'string' && saved.epoch ? saved.epoch : randomId();
   const clock = createClock('server', now);
   const sessions = new Set();
   let serverSeq = replicas.get('server')?.seq ?? 0;
   let lastCompaction = -Infinity;
+  const log = [];  // the last `deltaLog` accepted diffs, as { v, diff }
   let self;
 
   function broadcast(message) {
+    toJSON(message);  // encoded once, however many sessions there are
     for (const s of sessions) s.send(message);
+  }
+
+  /** Every commit carries the version and epoch alongside its rows */
+  function commit(change) {
+    storage.commit({ ...change, version, epoch });
   }
 
   function presence() {
@@ -283,14 +309,17 @@ export function createStore({
     if (accepted) {
       LazyWatch.patch(state, accepted);
       version++;
+      if (deltaLog > 0) {
+        log.push({ v: version, diff: accepted });
+        if (log.length > deltaLog) log.splice(0, log.length - deltaLog);
+      }
     }
-    storage.commit({
+    commit({
       upserts: won.map(([path, value]) => [pathKey(path), value === null ? { ts: op.ts, deleted: true } : { value, ts: op.ts }]),
       deletes: dropped,
-      replica: { id: op.replicaId, seq: op.seq, seen },
-      version
+      replica: { id: op.replicaId, seq: op.seq, seen }
     });
-    if (accepted) broadcast({ t: 'patch', diff: accepted, ts: op.ts });
+    if (accepted) broadcast({ t: 'patch', diff: accepted, ts: op.ts, v: version });
     const lost = [...rejected, ...stripped];
     return { duplicate: false, accepted, rejected: lost, correction: lost.length ? correction(lost) : null };
   }
@@ -313,7 +342,7 @@ export function createStore({
         forgotten.push(id);
       }
     }
-    if (removed.length || forgotten.length) storage.commit({ upserts: [], deletes: removed, forgetReplicas: forgotten, version });
+    if (removed.length || forgotten.length) commit({ upserts: [], deletes: removed, forgetReplicas: forgotten });
     return { tombstones: removed.length, replicas: forgotten.length };
   }
 
@@ -326,7 +355,30 @@ export function createStore({
   const registerPatterns = regs.patterns.map(p => p.join('/'));
 
   function snapshotMessage(replicaId) {
-    return { t: 'snapshot', state: LazyWatch.snapshot(state), ts: clock.peek(), seq: replicas.get(replicaId)?.seq ?? 0, registers: registerPatterns };
+    return { t: 'snapshot', state: LazyWatch.snapshot(state), ts: clock.peek(), seq: replicas.get(replicaId)?.seq ?? 0, registers: registerPatterns, v: version, epoch };
+  }
+
+  /**
+   * The accepted diffs after version `since`, in order, or null when the
+   * log no longer reaches back that far (or `since` is not one of ours).
+   */
+  function deltaSince(since) {
+    if (!Number.isInteger(since) || since < 0 || since > version) return null;
+    if (since === version) return [];
+    const start = log.findIndex(entry => entry.v > since);
+    if (start === -1 || log[start].v !== since + 1) return null;
+    return log.slice(start).map(entry => entry.diff);
+  }
+
+  /**
+   * The answer to a hello: a delta when the client's `since` is recent and
+   * every op it sent was merged (accepted or rejected leaf by leaf, both
+   * of which the delta and the corrections express), else a snapshot.
+   */
+  function catchUp(replicaId, since, sinceEpoch, refused, corrections) {
+    const patches = refused || sinceEpoch !== epoch ? null : deltaSince(since);
+    if (patches === null) return snapshotMessage(replicaId);
+    return { t: 'delta', patches: [...patches, ...corrections], ts: clock.peek(), seq: replicas.get(replicaId)?.seq ?? 0, registers: registerPatterns, v: version, epoch };
   }
 
   /** The error message for an op the store did not merge */
@@ -357,14 +409,18 @@ export function createStore({
           case 'hello': {
             if (typeof msg.replicaId !== 'string' || !msg.replicaId) return send({ t: 'error', message: 'hello requires a replicaId' });
             s.replicaId = msg.replicaId;
+            let refused = false;
+            const corrections = [];
             for (const op of Array.isArray(msg.ops) ? msg.ops : []) {
               try {
-                apply(op, s);
+                const result = apply(op, s);
+                if (result.correction) corrections.push(result.correction);
               } catch (err) {
+                refused = true;
                 send(refusal(op, err));
               }
             }
-            return send(snapshotMessage(msg.replicaId));
+            return send(catchUp(msg.replicaId, msg.since, msg.epoch, refused, corrections));
           }
           case 'op': {
             try {
@@ -423,6 +479,8 @@ export function createStore({
     /** The live state; read freely, write through `patch` so clocks stay right */
     state,
     get version() { return version; },
+    /** Identifies this life of the store's storage; changes when storage is wiped */
+    epoch,
     get sessions() { return sessions.size; },
     /** Replica ids the store remembers progress for (pruned by compaction) */
     get replicas() { return [...replicas.keys()]; },
@@ -440,7 +498,7 @@ export function createStore({
     /** Forget tombstones older than a timestamp; returns how many */
     compactTombstones(olderThan) {
       const removed = compactTombstones(clocks, olderThan);
-      if (removed.length) storage.commit({ upserts: [], deletes: removed, version });
+      if (removed.length) commit({ upserts: [], deletes: removed });
       return removed.length;
     },
     flush: () => storage.flush(),

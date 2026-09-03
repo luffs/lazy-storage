@@ -15,6 +15,7 @@
 // the client treats as final for that store.
 import { LazyWatch } from 'lazy-watch';
 import { isStoreId } from './registry.js';
+import { tagStore } from './wire.js';
 
 const { Utils } = LazyWatch;
 
@@ -36,7 +37,7 @@ export function createHub(resolveStore, { send, user, authorize } = {}) {
 
   function open(id, store) {
     const session = store.session({
-      send: message => send({ ...message, store: id }),
+      send: message => send(tagStore(message, id)),
       user,
       onEvict: () => sessions.delete(id)
     });

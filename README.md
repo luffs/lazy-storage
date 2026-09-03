@@ -108,13 +108,26 @@ the **last state** next to the outbox, so a client restarted while offline,
 or before its first snapshot has landed, starts from what it last saw with
 its pending edits already applied (`db.restored` says so) rather than from
 `initial`; the snapshot on reconnect then brings it up to date. Pass
-`cache: false` to keep only the outbox. On (re)connect the client
-sends the whole outbox in one `hello`; the server merges it and answers
-with a snapshot that already contains the result. Edits made while that
-was in flight are re-applied on top and sent. Nothing is lost on a
-reload while offline: the replica id, sequence numbers, and pending ops
-are restored with the outbox, and the server ignores an op it has already
-seen.
+`cache: false` to keep only the outbox. The outbox is small and written
+with every op; the state is written debounced, since it costs a
+serialization of everything, and a restore replays the outbox over it, so
+a state a few ops behind still comes up current.
+
+On (re)connect the client sends the whole outbox in one `hello`, together
+with the store version it last saw (`db.version`). The server merges the
+ops and answers with a **delta**: the accepted diffs since that version,
+in order, followed by corrections for whatever the hello's own ops lost.
+A reconnect after a network blip therefore costs a few small messages,
+and a reconnect that missed nothing costs one empty one. The server keeps
+the last `deltaLog` accepted diffs (default 1000) in memory for this, and
+falls back to a full snapshot when the log does not reach back far
+enough, after a restart that emptied it, when the client's cached version
+belongs to another life of the storage (storage wiped and re-seeded), or
+when one of the hello's ops was refused. Edits made while the hello was
+in flight are re-applied on top and sent. Nothing is lost on a reload
+while offline: the replica id, sequence numbers, pending ops, and the
+version are restored with the outbox, and the server ignores an op it
+has already seen.
 
 ## Persistence
 
@@ -150,9 +163,12 @@ a month ago offline could not be kept. `retention: Infinity` keeps
 everything and accepts ops of any age.
 
 An adapter records a replica's progress as `{ seq, seen }`, where `seen`
-is the store's clock when its last op arrived; a database from before
-0.3.0 opens as is (SQLite gains the column on open) and its replicas get a
-full window before they are pruned.
+is the store's clock when its last op arrived, and the store's `epoch`, a
+random id minted once per life of the storage (it is how a client's cached
+version is told apart from one that belongs to storage since wiped). A
+database from before 0.3.0 opens as is (SQLite gains the columns on open),
+its replicas get a full window before they are pruned, and the store
+mints its epoch on the first commit.
 
 ## Multiple stores
 
@@ -267,7 +283,7 @@ replaced by a leaf) drops the affected steps.
 
 **Client** (`lazy-storage`)
 
-- `createClient({ store, connection | transport, initial, registers, replicaId, storage, cache, undo, undoLimit, reconnect, now })`; `db.restored` — started from the cached state
+- `createClient({ store, connection | transport, initial, registers, replicaId, storage, cache, undo, undoLimit, reconnect, now })`; `db.restored` — started from the cached state; `db.version` — the store version this client has seen everything up to
 - `createConnection({ transport, reconnect, keepalive })` → `connect()`, `close()`, `status`, `attached`, `on('status', fn)` — a socket shared by clients
 - `db.state` — the mirror (a lazy-watch proxy). Read and write it directly
 - `db.store`, `db.connection` — the store id and the connection
@@ -277,11 +293,11 @@ replaced by a leaf) drops the affected steps.
 - `db.watch(listener)` — state changes; `meta?.origin === 'remote'` marks the server's
 - `db.on('status' | 'error' | 'sync' | 'presence' | 'closed', fn)` — lifecycle events; a refused op is an error with a `code` (`forbidden`, `expired`, `invalid`; `clock-skew` is handled without one)
 - `db.undo()`, `db.redo()`, `db.canUndo`, `db.canRedo`, `db.checkpoint()`, `db.group(fn)`, `db.clearHistory()`
-- `webSocketTransport(url)`, `memoryOutbox()`, `localStorageOutbox(key)`
+- `webSocketTransport(url)`, `memoryOutbox()`, `localStorageOutbox(key)` — a storage adapter is `{ load(), save(outbox), saveState(cache) }`; without `saveState` the state rides inside `save`
 
 **Server** (`lazy-storage/server`)
 
-- `createStore({ initial, registers, readOnly, validate, maxSkew, retention, compactEvery, storage, presenceKey, now })`
+- `createStore({ initial, registers, readOnly, validate, maxSkew, retention, compactEvery, deltaLog, storage, presenceKey, now })`; `store.epoch` — this life of the storage
 - `store.session({ send, user, onEvict })` → `{ receive(message), close(), user, replicaId }` — one per connection, transport-agnostic
 - `store.closeSessions(predicate, message)` — evict sessions; `store.presence()` — distinct users with a live session
 - `store.patch(diff)` — a server-side change, timestamped and broadcast; `store.apply(op)` — a trusted op, gates skipped
@@ -290,6 +306,7 @@ replaced by a leaf) drops the affected steps.
 - `memoryStorage()`, `jsonFileStorage(path, { debounce })`
 - `createStores(factory)` → `get(id)`, `has(id)`, `ids()`, `release(id)`, `dispose()`; `isStoreId(id)`
 - `createHub(resolveStore, { send, user, authorize })` → `{ receive(message), close(), stores, user }` — the server side of a multiplexed connection, session-shaped
+- `toJSON(message)` — a message's JSON, encoded once however many sockets it goes to; use it in a transport of your own so a broadcast is not re-encoded per socket (`tagStore(message, id)` is what a hub does)
 
 **SQLite** (`lazy-storage/server/sqlite`, Bun): `sqliteStorage(file, { wal })` →
 `store(id)`, `ids()`, `remove(id)`, `db`, `close()`.
@@ -305,13 +322,18 @@ hub listens at `path`. `createHandlers({ stores, path, authenticate, authorize }
 
 ## Wire protocol
 
-Client to server: `{ t: 'hello', replicaId, ops }`, `{ t: 'op', op }`,
-`{ t: 'ping' }`, where `op = { replicaId, seq, ts, diff }` and `diff` is a
-plain lazy-watch diff.
+Client to server: `{ t: 'hello', replicaId, ops, since, epoch }` (the
+store version the client has seen everything up to, and the epoch it
+belongs to), `{ t: 'op', op }`, `{ t: 'ping' }`, where
+`op = { replicaId, seq, ts, diff }` and `diff` is a plain lazy-watch diff.
 
-Server to client: `{ t: 'snapshot', state, ts, seq, registers }` (the
-server's register patterns, so a client can detect a declaration that
-differs from its own), `{ t: 'patch', diff, ts }`,
+Server to client: `{ t: 'snapshot', state, ts, seq, registers, v, epoch }`
+(`registers` are the server's register patterns, so a client can detect a
+declaration that differs from its own; `v` the store version the state
+reflects) or, when the hello's `since` is recent enough,
+`{ t: 'delta', patches, ts, seq, registers, v, epoch }` (the accepted diffs
+since then, in order, then corrections for the hello's own ops);
+`{ t: 'patch', diff, ts, v }`,
 `{ t: 'ack', seq, ts, correction }`, `{ t: 'presence', users }`,
 `{ t: 'closed', code, message }` (final for the store: `evicted`,
 `forbidden`, `unknown-store`, `invalid-store`),

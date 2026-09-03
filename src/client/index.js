@@ -38,6 +38,7 @@ import { createConnection } from './connection.js';
 
 const { Utils } = LazyWatch;
 const REMOTE = { origin: 'remote' };
+const RESTORE = { origin: 'restore' };
 const HISTORY = new Set(['undo', 'redo']);
 const EVENTS = ['status', 'error', 'sync', 'closed', 'presence'];
 
@@ -89,14 +90,19 @@ export function createClient({
   const continuing = saved?.replicaId === replicaId;
   let seq = continuing ? saved.seq : 0;
   let outbox = continuing ? saved.ops : [];
-  // The cached state already reflects the pending ops (it is saved with
-  // them), so it is the right starting point as long as it is this
-  // replica's. `initial` underneath supplies any container added since
+  // The cached state is the right starting point as long as it is this
+  // replica's; `initial` underneath supplies any container added since.
+  // It is written debounced, so it may predate the last few pending ops:
+  // replaying the outbox over it (idempotent for diffs) brings it current
   const restored = cache && continuing && Utils.isPlainObject(saved.state);
   const state = new LazyWatch(
     restored ? { ...structuredClone(initial), ...structuredClone(saved.state) } : structuredClone(initial),
     { inverse: true }
   );
+  if (restored) for (const op of outbox) LazyWatch.patch(state, op.diff, RESTORE);
+  // The store version (and the store's epoch) the state reflects, so a
+  // reconnect can ask for what happened since rather than everything
+  let known = { epoch: restored && typeof saved.epoch === 'string' ? saved.epoch : null, v: restored && Number.isInteger(saved.version) ? saved.version : 0 };
   // The clock runs on local time plus an offset the server corrects when
   // it refuses an op for running ahead (see 'clock-skew' below)
   const wall = now ?? Date.now;
@@ -142,19 +148,29 @@ export function createClient({
     emit('presence', presence);
   }
 
-  // The outbox is written synchronously with every local op, together
-  // with the state it produced; remote batches refresh the cached state
-  // shortly after, coalesced
-  let persistTimer = null;
+  // The outbox is small and written synchronously whenever it changes. The
+  // state cache costs a serialization of everything, so it is written
+  // debounced after any change to the state (and flushed on dispose); the
+  // replay on restore covers the ops it may be behind by. An adapter
+  // without saveState gets the state inside the outbox document instead
+  const splitCache = cache && typeof storage.saveState === 'function';
+  let stateTimer = null;
   function persist() {
-    clearTimeout(persistTimer);
-    persistTimer = null;
-    storage.save(cache ? { replicaId, seq, ops: outbox, state: LazyWatch.snapshot(state) } : { replicaId, seq, ops: outbox });
+    if (cache && !splitCache) return persistState();
+    storage.save({ replicaId, seq, ops: outbox });
   }
-  function persistSoon() {
-    if (!cache || persistTimer) return;
-    persistTimer = setTimeout(persist, 50);
-    if (typeof persistTimer?.unref === 'function') persistTimer.unref();
+  function persistState() {
+    clearTimeout(stateTimer);
+    stateTimer = null;
+    if (!cache) return;
+    const snapshot = LazyWatch.snapshot(state);
+    if (splitCache) storage.saveState({ state: snapshot, version: known.v, epoch: known.epoch });
+    else storage.save({ replicaId, seq, ops: outbox, state: snapshot, version: known.v, epoch: known.epoch });
+  }
+  function persistStateSoon() {
+    if (!cache || stateTimer) return;
+    stateTimer = setTimeout(persistState, 50);
+    if (typeof stateTimer?.unref === 'function') stateTimer.unref();
   }
 
   // Every local batch becomes an op. A batch that breaks the model is
@@ -162,7 +178,7 @@ export function createClient({
   // recorded) and reported.
   LazyWatch.on(state, (diff, inverse, meta) => {
     if (meta && !HISTORY.has(meta.origin)) {
-      persistSoon();
+      persistStateSoon();
       return;
     }
     let expanded;
@@ -177,39 +193,62 @@ export function createClient({
     const op = { replicaId, seq: ++seq, ts: clock.now(), diff: expanded };
     outbox.push(op);
     persist();
+    persistStateSoon();
     if (status() === 'online') link.send({ t: 'op', op });
     emit('sync');
   });
 
+  /** The (re)connect message: the outbox, and where our knowledge of the store ends */
+  function hello() {
+    link?.send({ t: 'hello', replicaId, ops: outbox, since: known.v, epoch: known.epoch });
+  }
+
+  function checkRegisters(theirs) {
+    if (!Array.isArray(theirs)) return;
+    const sorted = [...theirs].sort();
+    if (JSON.stringify(sorted) !== JSON.stringify(declared)) {
+      const err = new Error(`Register paths differ: this client declares [${declared.join(', ')}], the server [${sorted.join(', ')}]`);
+      err.code = 'registers-mismatch';
+      emit('error', err);
+    }
+  }
+
+  /**
+   * The server's answer to a hello has arrived: a snapshot to overwrite
+   * with, or a delta of diffs to apply. Either way the acknowledged ops
+   * leave the outbox, edits made since the hello went out go back on top
+   * and off to the server, and this store is online
+   */
+  function caughtUp(msg, applyServerState) {
+    clock.receive(msg.ts);
+    checkRegisters(msg.registers);
+    outbox = outbox.filter(op => op.seq > msg.seq);
+    for (const seq of restamped.keys()) if (seq <= msg.seq) restamped.delete(seq);
+    applyServerState();
+    for (const op of outbox) {
+      LazyWatch.patch(state, op.diff, REMOTE);
+      link.send({ t: 'op', op });
+    }
+    if (Number.isInteger(msg.v)) known = { epoch: typeof msg.epoch === 'string' ? msg.epoch : null, v: msg.v };
+    persist();
+    persistStateSoon();
+    synced = true;
+    refreshStatus();
+    emit('sync');
+  }
+
   function handle(msg) {
     switch (msg.t) {
-      case 'snapshot': {
-        clock.receive(msg.ts);
-        if (Array.isArray(msg.registers)) {
-          const theirs = [...msg.registers].sort();
-          if (JSON.stringify(theirs) !== JSON.stringify(declared)) {
-            const err = new Error(`Register paths differ: this client declares [${declared.join(', ')}], the server [${theirs.join(', ')}]`);
-            err.code = 'registers-mismatch';
-            emit('error', err);
-          }
-        }
-        outbox = outbox.filter(op => op.seq > msg.seq);
-        for (const seq of restamped.keys()) if (seq <= msg.seq) restamped.delete(seq);
-        LazyWatch.overwrite(state, msg.state, REMOTE);
-        // Edits made since the hello went out: back on top, and off to the server
-        for (const op of outbox) {
-          LazyWatch.patch(state, op.diff, REMOTE);
-          link.send({ t: 'op', op });
-        }
-        persist();
-        synced = true;
-        refreshStatus();
-        emit('sync');
-        return;
-      }
+      case 'snapshot':
+        return caughtUp(msg, () => LazyWatch.overwrite(state, msg.state, REMOTE));
+      case 'delta':
+        return caughtUp(msg, () => {
+          for (const diff of Array.isArray(msg.patches) ? msg.patches : []) LazyWatch.patch(state, diff, REMOTE);
+        });
       case 'patch':
         clock.receive(msg.ts);
         LazyWatch.patch(state, msg.diff, REMOTE);
+        if (Number.isInteger(msg.v)) known.v = msg.v;
         return;
       case 'ack':
         clock.receive(msg.ts);
@@ -248,6 +287,8 @@ export function createClient({
         if (Number.isInteger(msg.seq)) {
           outbox = outbox.filter(op => op.seq > msg.seq);
           persist();
+          // Ask for a snapshot, not a delta: the delta would leave the
+          // refused edit in place
           if (synced) link?.send({ t: 'hello', replicaId, ops: outbox });
         }
         return;
@@ -288,7 +329,7 @@ export function createClient({
     onOpen(attached) {
       link = attached;
       synced = false;
-      link.send({ t: 'hello', replicaId, ops: outbox });
+      hello();
       refreshStatus();
     },
     onMessage: handle,
@@ -361,6 +402,8 @@ export function createClient({
     get status() { return status(); },
     /** Unacknowledged local ops */
     get pending() { return outbox.length; },
+    /** The store version this client has seen everything up to */
+    get version() { return known.v; },
     /** Distinct users with a live session on this store (empty while offline) */
     get presence() { return presence; },
     /** Why the server closed this store for us ({ code, message }), or null */
@@ -391,7 +434,7 @@ export function createClient({
     restored,
     dispose() {
       disconnect();
-      if (persistTimer) persist();
+      if (stateTimer) persistState();
       stopStatus();
       undoManager?.dispose();
       LazyWatch.dispose(state);

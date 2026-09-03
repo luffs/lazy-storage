@@ -4,9 +4,11 @@ All notable changes to lazy-storage are documented here. The format follows Keep
 
 ## [Unreleased]
 
-Three guards a deployed store needs. Servers and clients should upgrade
-together: an old client still syncs, but is dropped from every conflict
-once its clock runs ahead, since it cannot correct itself.
+Three guards a deployed store needs, and three costs that no longer grow
+with the size of the state or the number of sockets. Servers and clients
+should upgrade together: an old client still syncs (it gets snapshots), but
+is dropped from every conflict once its clock runs ahead, since it cannot
+correct itself.
 
 ### Added
 
@@ -35,9 +37,34 @@ once its clock runs ahead, since it cannot correct itself.
   it might resurrect may already be forgotten; the client drops it and
   resyncs. `retention: Infinity` keeps everything. `store.replicas` lists
   the replicas still remembered
+- **Deltas on reconnect.** A hello carries the store version the client
+  last saw (`since`, with the store's `epoch`), and the server answers
+  with `{ t: 'delta', patches }`: the accepted diffs since then, in order,
+  followed by corrections for what the hello's own ops lost. The store
+  keeps the last `deltaLog` accepted diffs (default 1000) in memory for
+  it, and sends a snapshot when the log does not reach back far enough,
+  when the epoch differs (the client's cache remembers storage since
+  wiped), or when a hello op was refused. A reconnect that missed nothing
+  costs one empty delta. `db.version` is the client's position; `store.epoch`
+  identifies a life of the storage and is minted on the first commit
+- `toJSON(message)` and `tagStore(message, id)` (`lazy-storage/server`):
+  a broadcast is encoded once for every socket it reaches, and a hub
+  splices its store id into the encoded JSON instead of encoding the
+  payload again. The Bun adapter uses them; a transport of your own can too
 
 ### Changed
 
+- **The client no longer serializes its whole state on every local op.**
+  The outbox is written synchronously as before, but the state cache is
+  written debounced (50 ms after the last change, flushed on dispose), and
+  a restore replays the outbox over the cached state so the few ops it may
+  be behind by still show. Client storage adapters gain `saveState(cache)`
+  for the state (`localStorageOutbox` keeps it under `key:state`; a
+  document from before still loads); an adapter without it gets the state
+  inside `save` as before. The cache also records `version` and `epoch`
+- `snapshot` and `patch` messages carry the store version (`v`); the
+  storage interface carries `epoch` in `load()` and `commit()` (SQLite adds
+  the column on open, the JSON document a field)
 - Storage adapters record a replica's progress as `{ seq, seen }` (`seen`:
   the store's clock when its last op arrived) under `replicas` in `load()`,
   and `commit` may carry `forgetReplicas`. Documents and databases written

@@ -28,7 +28,8 @@ const SCHEMA = `
   ) WITHOUT ROWID;
   CREATE TABLE IF NOT EXISTS stores (
     store   TEXT    PRIMARY KEY,
-    version INTEGER NOT NULL DEFAULT 0
+    version INTEGER NOT NULL DEFAULT 0,
+    epoch   TEXT
   ) WITHOUT ROWID;
   CREATE TABLE IF NOT EXISTS replicas (
     store   TEXT    NOT NULL,
@@ -39,10 +40,11 @@ const SCHEMA = `
   ) WITHOUT ROWID;
 `;
 
-/** Databases from before 0.3.0 lack `replicas.seen`; NULL there means unknown */
+/** Databases from before 0.3.0 lack `replicas.seen` (NULL: unknown) and `stores.epoch` (NULL: the store mints one) */
 function migrate(db) {
-  const columns = db.query('PRAGMA table_info(replicas)').all().map(c => c.name);
-  if (!columns.includes('seen')) db.exec('ALTER TABLE replicas ADD COLUMN seen INTEGER');
+  const columns = table => db.query(`PRAGMA table_info(${table})`).all().map(c => c.name);
+  if (!columns('replicas').includes('seen')) db.exec('ALTER TABLE replicas ADD COLUMN seen INTEGER');
+  if (!columns('stores').includes('epoch')) db.exec('ALTER TABLE stores ADD COLUMN epoch TEXT');
 }
 
 /**
@@ -66,8 +68,10 @@ export function sqliteStorage(file = ':memory:', { wal = true } = {}) {
         ts_replica = excluded.ts_replica, deleted = excluded.deleted`),
     del: db.prepare('DELETE FROM leaves WHERE store = ? AND path = ?'),
     rows: db.prepare('SELECT path, value, ts_ms, ts_count, ts_replica, deleted FROM leaves WHERE store = ?'),
-    version: db.prepare('SELECT version FROM stores WHERE store = ?'),
-    setVersion: db.prepare('INSERT INTO stores (store, version) VALUES (?, ?) ON CONFLICT (store) DO UPDATE SET version = excluded.version'),
+    version: db.prepare('SELECT version, epoch FROM stores WHERE store = ?'),
+    setVersion: db.prepare(`
+      INSERT INTO stores (store, version, epoch) VALUES (?, ?, ?)
+      ON CONFLICT (store) DO UPDATE SET version = excluded.version, epoch = COALESCE(excluded.epoch, stores.epoch)`),
     replicas: db.prepare('SELECT replica, seq, seen FROM replicas WHERE store = ?'),
     setReplica: db.prepare(`
       INSERT INTO replicas (store, replica, seq, seen) VALUES (?, ?, ?, ?)
@@ -86,7 +90,7 @@ export function sqliteStorage(file = ':memory:', { wal = true } = {}) {
     }
     if (change.replica) q.setReplica.run(id, change.replica.id, change.replica.seq, change.replica.seen ?? null);
     for (const replica of change.forgetReplicas ?? []) q.forgetReplica.run(id, replica);
-    q.setVersion.run(id, change.version);
+    q.setVersion.run(id, change.version, change.epoch ?? null);
   });
 
   const remove = db.transaction(id => {
@@ -114,7 +118,7 @@ export function sqliteStorage(file = ':memory:', { wal = true } = {}) {
               : { value: JSON.parse(r.value), ts: [r.ts_ms, r.ts_count, r.ts_replica] }
           ]);
           const replicas = Object.fromEntries(q.replicas.all(id).map(r => [r.replica, { seq: r.seq, seen: r.seen ?? null }]));
-          return { rows, replicas, version: meta.version };
+          return { rows, replicas, version: meta.version, epoch: meta.epoch ?? null };
         },
         commit(change) {
           commit(id, change);

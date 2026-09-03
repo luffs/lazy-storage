@@ -12,6 +12,7 @@
 // the convenience wrapper that does it for you.
 import { LazyWatch } from 'lazy-watch';
 import { createHub } from './hub.js';
+import { toJSON } from './wire.js';
 
 /**
  * @param {Object} options
@@ -42,7 +43,8 @@ export function createHandlers({ stores, path = '/ws', authenticate, authorize }
 
   const websocket = {
     open(ws) {
-      hubs.set(ws, createHub(resolveStore, { send: message => ws.send(JSON.stringify(message)), user: ws.data.user, authorize }));
+      // A broadcast is encoded once for every socket it reaches (see wire.js)
+      hubs.set(ws, createHub(resolveStore, { send: message => ws.send(toJSON(message)), user: ws.data.user, authorize }));
     },
     message(ws, raw) {
       let msg;
