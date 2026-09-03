@@ -2,7 +2,10 @@
 
 All notable changes to lazy-storage are documented here. The format follows Keep a Changelog; versions follow Semantic Versioning.
 
-## [Unreleased]
+## [0.2.1] - 2026-09-03
+
+A client restarted while offline now starts from the state it last saw.
+No protocol or storage-format change; 0.2.0 servers and clients interoperate.
 
 ### Added
 
