@@ -217,6 +217,47 @@ test('an outbox persisted before a reload is sent on the next connect, and dupli
   assert.equal(store.state.tasks[id].title, 'Survives reload');
 });
 
+test('a client restarted offline starts from its cached state with pending edits, and converges once back online', async () => {
+  const { store, net } = setup();
+  const storage = memoryOutbox();
+  const link = net.link();
+  const { createClient } = await import('../src/client/index.js');
+  const first = createClient({ transport: link.factory, reconnect: false, store: 'main', initial: INITIAL, registers: REGISTERS, storage, replicaId: 'a' });
+  first.connect();
+  await net.settle();
+  assert.equal(first.restored, false);
+  const id = first.collection('tasks').add({ title: 'Synced', done: false });
+  first.state.order.push(id);
+  await net.settle();
+
+  link.goOffline();
+  await net.settle();
+  first.collection('tasks').update(id, { done: true });      // stays pending
+  await net.settle();
+  assert.equal(first.pending, 1);
+  first.dispose();                                            // the tab is reloaded while offline
+  store.patch({ tasks: { [id]: { title: 'Renamed while away' } } });  // a teammate edits meanwhile
+
+  const second = createClient({ transport: link.factory, reconnect: false, store: 'main', initial: INITIAL, registers: REGISTERS, storage });
+  assert.equal(second.restored, true);
+  assert.equal(second.status, 'offline');
+  assert.deepEqual({ ...second.collection('tasks').get(id) }, { title: 'Synced', done: true, id }, 'the cached state includes the pending edit');
+  assert.deepEqual([...second.state.order], [id], 'registers are cached too');
+  assert.equal(second.pending, 1, 'the pending op survived with it');
+
+  link.goOnline();
+  second.connect();
+  await net.settle();
+  assert.equal(second.status, 'online');
+  assert.equal(second.pending, 0);
+  assert.deepEqual({ ...second.collection('tasks').get(id) }, { title: 'Renamed while away', done: true, id }, 'both sides\' edits merged');
+  assert.deepEqual(snap(second), store.snapshot());
+
+  const uncached = createClient({ transport: link.factory, reconnect: false, store: 'main', initial: INITIAL, registers: REGISTERS, storage, cache: false });
+  assert.equal(uncached.restored, false, 'cache: false starts from initial even with a cached state present');
+  assert.deepEqual(snap(uncached), INITIAL);
+});
+
 test('the server persists state and clocks through its storage adapter', async () => {
   const storage = memoryStorage();
   const one = createStore({ initial: INITIAL, registers: REGISTERS, storage });

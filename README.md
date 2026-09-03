@@ -99,7 +99,12 @@ conflict for as long as its clock is off.
 
 Local edits go into an **outbox** first, persisted through a storage
 adapter (`localStorageOutbox` in browsers, `memoryOutbox` for tests or
-throwaway sessions), and are sent when online. On (re)connect the client
+throwaway sessions), and are sent when online. The same adapter caches
+the **last state** next to the outbox, so a client restarted while offline,
+or before its first snapshot has landed, starts from what it last saw with
+its pending edits already applied (`db.restored` says so) rather than from
+`initial`; the snapshot on reconnect then brings it up to date. Pass
+`cache: false` to keep only the outbox. On (re)connect the client
 sends the whole outbox in one `hello`; the server merges it and answers
 with a snapshot that already contains the result. Edits made while that
 was in flight are re-applied on top and sent. Nothing is lost on a
@@ -228,7 +233,7 @@ replaced by a leaf) drops the affected steps.
 
 **Client** (`lazy-storage`)
 
-- `createClient({ store, connection | transport, initial, registers, replicaId, storage, undo, undoLimit, reconnect, now })`
+- `createClient({ store, connection | transport, initial, registers, replicaId, storage, cache, undo, undoLimit, reconnect, now })`; `db.restored` — started from the cached state
 - `createConnection({ transport, reconnect, keepalive })` → `connect()`, `close()`, `status`, `attached`, `on('status', fn)` — a socket shared by clients
 - `db.state` — the mirror (a lazy-watch proxy). Read and write it directly
 - `db.store`, `db.connection` — the store id and the connection

@@ -2,6 +2,18 @@
 
 All notable changes to lazy-storage are documented here. The format follows Keep a Changelog; versions follow Semantic Versioning.
 
+## [Unreleased]
+
+### Added
+
+- **Cached state across restarts.** The client's storage adapter now
+  keeps the last state next to the outbox (written synchronously with
+  every local op, coalesced after remote batches), and a client whose
+  storage holds a state for its replica starts from it — pending edits
+  already applied — instead of from `initial`. A tab reloaded while
+  offline shows its data; the snapshot on reconnect brings it up to date
+  as before. `db.restored` reports it; `cache: false` keeps only the outbox
+
 ## [0.2.0] - 2026-09-03
 
 The first published version. Since 0.1.0 (never published) the API was
