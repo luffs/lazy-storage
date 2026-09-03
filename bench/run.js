@@ -160,7 +160,7 @@ bench('client: local op, row adapter (IndexedDB-like), 1k-task state', {
 
 // --- Reconnects -----------------------------------------------------------------------------
 
-bench('hello: answered with a snapshot, 10k-task store (encoded)', {
+bench('hello: answered with a snapshot after an op, 10k-task store (encoded)', {
   unit: 'hello',
   setup: () => {
     const c = seeded(10_000);
@@ -168,6 +168,23 @@ bench('hello: answered with a snapshot, 10k-task store (encoded)', {
     return c;
   },
   iterations: 20,
+  run: (c, n) => {
+    for (let i = 0; i < n; i++) {
+      c.store.patch({ tasks: { [c.ids[i]]: { title: `edit ${i}` } } });   // the cached encoding is stale
+      c.session.receive({ t: 'hello', replicaId: `r${i}`, ops: [] });
+    }
+  }
+});
+
+bench('hello: answered with a snapshot while the store is quiet (cached encoding)', {
+  unit: 'hello',
+  setup: () => {
+    const c = seeded(10_000);
+    c.session = c.store.session({ send: message => { toJSON(message); } });
+    c.session.receive({ t: 'hello', replicaId: 'warm', ops: [] });
+    return c;
+  },
+  iterations: 200,
   run: (c, n) => {
     for (let i = 0; i < n; i++) c.session.receive({ t: 'hello', replicaId: `r${i}`, ops: [] });
   }

@@ -2,6 +2,23 @@
 
 All notable changes to lazy-storage are documented here. The format follows Keep a Changelog; versions follow Semantic Versioning.
 
+## [Unreleased]
+
+### Changed
+
+- **Snapshots cost a fraction of what they did.** A snapshot message is
+  now encoded straight from the state's plain target instead of a deep
+  copy through the proxy, and the encoding is kept until the next
+  accepted op and spliced into every snapshot sent meanwhile; the
+  message's `state` is decoded only for a consumer that reads the object.
+  On a 10 000-task store a snapshot after an op went from 13 ms to 3 ms,
+  and one on a quiet store to a few microseconds, so a burst of first
+  connections pays for one encoding. `tagStore` copies a message's
+  properties as they are declared, getters included
+- The README's wire protocol section is restructured: a session in
+  order, one table per direction, and the refusal and closed codes with
+  what the client does about each
+
 ## [0.5.0] - 2026-09-03
 
 TypeScript declarations, a Node server, examples, a benchmark, and the

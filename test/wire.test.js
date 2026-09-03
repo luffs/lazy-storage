@@ -58,3 +58,37 @@ test('through a hub, every socket receives the same JSON for a broadcast, produc
   assert.deepEqual(patches[0], { t: 'patch', diff: { tasks: { a: { id: 'a', title: 'to everyone' } } }, ts: patches[0].ts, v: 1, store: 'main' });
   assert.equal(payloads, 1, 'three sockets, one encoding of the patch');
 });
+
+test('a snapshot is encoded from the cached state, spliced into the message, and decoded only when something reads it', () => {
+  const original = JSON.stringify;
+  let encodings = 0;
+  const seen = [];
+  JSON.stringify = value => { if (value && typeof value === 'object' && value.tasks) encodings++; seen.push(value); return original(value); };
+  try {
+    const store = createStore({ initial: { tasks: {} } });
+    store.patch({ tasks: { a: { id: 'a', title: 'one' } } });
+    const sent = [];
+    const session = store.session({ send: m => sent.push(m) });
+    session.receive({ t: 'hello', replicaId: 'r1', ops: [] });
+    session.receive({ t: 'hello', replicaId: 'r2', ops: [] });
+    const snapshots = sent.filter(m => m.t === 'snapshot');
+    assert.equal(snapshots.length, 2);
+    assert.equal(encodings, 1, 'two hellos on a quiet store: the state was encoded once');
+
+    const tagged = tagStore(snapshots[1], 'main');
+    const json = toJSON(tagged);
+    assert.equal(encodings, 1, 'sending never re-encodes the state');
+    assert.equal(seen.includes(snapshots[1]), false, 'nor the message');
+    assert.deepEqual(JSON.parse(json), { t: 'snapshot', store: 'main', state: { tasks: { a: { id: 'a', title: 'one' } } }, ts: snapshots[1].ts, seq: 0, registers: [], v: 1, epoch: store.epoch });
+    assert.deepEqual(snapshots[1].state, { tasks: { a: { id: 'a', title: 'one' } } }, 'reading the object decodes it');
+    assert.equal(Object.getOwnPropertyDescriptor(tagged, 'state').get !== undefined, true, 'tagStore kept the getter');
+
+    store.patch({ tasks: { a: { title: 'two' } } });
+    session.receive({ t: 'hello', replicaId: 'r3', ops: [] });
+    assert.equal(encodings, 2, 'an op drops the cache; the next hello encodes again');
+    assert.equal(sent.at(-1).state.tasks.a.title, 'two');
+    assert.deepEqual(snapshots[1].state.tasks.a.title, 'one', 'an earlier message keeps the state it carried');
+  } finally {
+    JSON.stringify = original;
+  }
+});

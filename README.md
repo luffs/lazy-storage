@@ -139,7 +139,9 @@ the SQLite and memory adapters so a restart or a deploy still answers
 with deltas, and falls back to a full snapshot when the log does not
 reach back far enough, when the client's cached version belongs to
 another life of the storage (storage wiped and re-seeded), or when one
-of the hello's ops was refused. Edits made while the hello was
+of the hello's ops was refused. A snapshot is encoded straight from the
+state and the encoding kept until the next accepted op, so a burst of
+first connections pays for one encoding, not one per client. Edits made while the hello was
 in flight are re-applied on top and sent. Nothing is lost on a reload
 while offline: the replica id, sequence numbers, pending ops, and the
 version are restored with the outbox, and the server ignores an op it
@@ -439,29 +441,86 @@ the Node entry's need `@types/node`.
 
 ## Wire protocol
 
-Client to server: `{ t: 'hello', replicaId, ops, since, epoch }` (the
-store version the client has seen everything up to, and the epoch it
-belongs to), `{ t: 'op', op }`, `{ t: 'ping' }`, where
-`op = { replicaId, seq, ts, diff }` and `diff` is a plain lazy-watch diff.
+Messages are JSON objects named by a `t` field. Any number of stores
+travel over one socket, so every message except `ping` and `pong` also
+carries `store`, the store id; `leave` closes one store's session and
+keeps the socket for the others. The shapes are declared as
+`ClientMessage` and `ServerMessage` in the typings.
 
-Server to client: `{ t: 'snapshot', state, ts, seq, registers, v, epoch }`
-(`registers` are the server's register patterns, so a client can detect a
-declaration that differs from its own; `v` the store version the state
-reflects) or, when the hello's `since` is recent enough,
-`{ t: 'delta', patches, ts, seq, registers, v, epoch }` (the accepted diffs
-since then, in order, then corrections for the hello's own ops);
-`{ t: 'patch', diff, ts, v }`,
-`{ t: 'ack', seq, ts, correction }`, `{ t: 'presence', users }`,
-`{ t: 'closed', code, message }` (final for the store: `evicted`,
-`forbidden`, `unknown-store`, `invalid-store`),
-`{ t: 'error', seq?, code?, message, now?, ts?, retryAfter? }` (a refused
-op names its `seq` and a code: `invalid`, `forbidden`, `expired`,
-`too-large`, `rate-limited` with `retryAfter` in ms, or `clock-skew` with
-the server's wall time `now` and the refused stamp `ts`), `{ t: 'pong' }`.
+An **op** is one client batch:
 
-Every message except `ping`/`pong` carries a `store` field with the store
-id, and the client sends `{ t: 'leave', store }` to close one store's
-session without dropping the socket.
+```
+{ replicaId, seq, ts, diff }
+```
+
+`seq` counts the replica's ops from 1, and the server ignores one it has
+already merged, so a resend is safe. `ts` is a hybrid-logical-clock
+timestamp `[ms, count, replicaId]`. `diff` is a plain lazy-watch diff:
+nested objects, `null` for a deletion, arrays only at register paths.
+
+### A session, in order
+
+1. The client opens a store with `hello`: its whole outbox, and where its
+   knowledge of the store ends.
+2. The server merges those ops, then answers with a `snapshot` or a
+   `delta` (chosen as described under [Offline](#offline)). Either one
+   acknowledges the hello's ops through `seq`.
+3. From then on each client batch goes out as an `op`. The server answers
+   every op with an `ack` or an `error`, and broadcasts every accepted
+   diff as a `patch` to every session on the store, the sender included.
+4. `presence` arrives whenever the users with a live session change, and
+   a `closed` message ends the store for this client.
+
+### Client to server
+
+| Message | Fields | Meaning |
+|---|---|---|
+| `hello` | `replicaId`, `ops`, `since?`, `epoch?` | Connect or reconnect. `ops` is the outbox (its first 1000 ops); `since` is the store version the client has seen everything up to and `epoch` the storage life it belongs to, asking for a delta |
+| `op` | `op` | One batch, live |
+| `leave` | | Close this store's session; the socket stays up |
+| `ping` | | Keepalive; answered with `pong` |
+
+### Server to client
+
+| Message | Fields | Meaning |
+|---|---|---|
+| `snapshot` | `state`, `ts`, `seq`, `registers`, `v`, `epoch` | The whole state, to overwrite with |
+| `delta` | `patches`, `ts`, `seq`, `registers`, `v`, `epoch` | The accepted diffs since the client's `since`, in order, followed by corrections for what the hello's own ops lost; applied as patches |
+| `patch` | `diff`, `ts`, `v` | An accepted diff from any replica, and the version it made |
+| `ack` | `seq`, `ts`, `correction` | The op was merged; `correction` is a diff with the server's values at the leaves it lost, or null |
+| `error` | `seq?`, `code?`, `message`, `now?`, `ts?`, `retryAfter?` | With `seq`: that op was refused, for the reason in `code` (below). Without: the message itself was bad (not JSON, an unknown type, a hello without a replica id) |
+| `presence` | `users` | The distinct users with a live session |
+| `closed` | `code`, `message` | Final for this store on this socket; the client goes offline for it and does not reconnect on its own |
+| `pong` | | |
+
+Across these: `ts` is the server's clock on `snapshot`, `delta`, and
+`ack`, and the op's own timestamp on `patch`; `seq` on `snapshot` and
+`delta` is the last op of this replica the server holds, so the client
+can drop acknowledged outbox entries; `registers` are the server's
+register patterns, for the client to check against its own; `v` is the
+store version the message brings the client up to, and `epoch` the life
+of the storage it counts in.
+
+### Refusal codes
+
+An `error` with a `seq` names one of these, and the client acts on it
+without help from the app, which only hears an `error` event:
+
+| Code | Why | What the client does |
+|---|---|---|
+| `invalid` | The op breaks the model: an array outside a register, a malformed op | Drops the op and resyncs from a snapshot |
+| `forbidden` | A leaf under a read-only path, or `validate` refused | Same |
+| `expired` | Stamped before the retention window | Same |
+| `too-large` | More leaves than `maxLeaves` | Same |
+| `rate-limited` | Beyond the replica's token bucket; `retryAfter` says how long in ms | Keeps the op and resends its outbox in a hello after `retryAfter` |
+| `clock-skew` | Stamped more than `maxSkew` ahead of the server's clock; `now` is the server's time, `ts` the refused stamp | Adopts the server's time, re-stamps the pending ops, sends them again; no error reaches the app |
+
+### Closed codes
+
+`evicted` (`closeSessions` on the server), `forbidden` (`authorize`
+refused the store), `unknown-store` (the resolver returned null, or the
+store factory threw), and `invalid-store` (an id outside the allowed
+alphabet, or a message without one).
 
 ## Scope
 

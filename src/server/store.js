@@ -70,7 +70,7 @@ import { leaves, assertModel, rebuild } from '../core/model.js';
 import { mergeOp, compactTombstones } from '../core/merge.js';
 import { ClockMap } from '../core/clocks.js';
 import { memoryStorage } from './storage.js';
-import { toJSON } from './wire.js';
+import { toJSON, presetJSON } from './wire.js';
 import { randomId } from '../core/ids.js';
 
 const { Utils } = LazyWatch;
@@ -208,7 +208,19 @@ export function createStore({
   const log = restoreLog(saved?.log, version, deltaLog);
   const buckets = new Map();  // replicaId -> { tokens, at }, for the rate limit
   const observers = { op: new Set(), refused: new Set(), session: new Set() };
+  // The state as JSON, encoded straight from the proxy's plain target (a
+  // deep copy through the proxy costs several times more) and kept until
+  // the next accepted op, so a burst of reconnects pays for one encoding
+  let stateJSON = null;
   let self;
+
+  function encodedState() {
+    if (stateJSON === null) {
+      const plain = typeof LazyWatch.resolveIfProxy === 'function' ? LazyWatch.resolveIfProxy(state) : LazyWatch.snapshot(state);
+      stateJSON = JSON.stringify(plain);
+    }
+    return stateJSON;
+  }
 
   function notify(event, payload) {
     for (const fn of observers[event]) {
@@ -372,6 +384,7 @@ export function createStore({
     const { accepted, rejected, won, dropped } = mergeOp(clocks, op.ts, diff, regs);
     if (accepted) {
       LazyWatch.patch(state, accepted);
+      stateJSON = null;
       version++;
       if (deltaLog > 0) {
         log.push({ v: version, diff: accepted });
@@ -425,8 +438,21 @@ export function createStore({
   // detect a declaration that differs from its own
   const registerPatterns = regs.patterns.map(p => p.join('/'));
 
+  /**
+   * A snapshot message whose JSON is assembled around the cached encoding
+   * of the state, so sending it to a socket never decodes or re-encodes
+   * the state; `state` is decoded lazily for a consumer that reads the
+   * object (a test, an in-process transport)
+   */
   function snapshotMessage(replicaId) {
-    return { t: 'snapshot', state: LazyWatch.snapshot(state), ts: clock.peek(), seq: replicas.get(replicaId)?.seq ?? 0, registers: registerPatterns, v: version, epoch };
+    const json = encodedState();
+    const ts = clock.peek();
+    const seq = replicas.get(replicaId)?.seq ?? 0;
+    const message = { t: 'snapshot', ts, seq, registers: registerPatterns, v: version, epoch };
+    let decoded;
+    Object.defineProperty(message, 'state', { enumerable: true, configurable: true, get: () => (decoded ??= JSON.parse(json)) });
+    return presetJSON(message,
+      `{"t":"snapshot","state":${json},"ts":${JSON.stringify(ts)},"seq":${seq},"registers":${JSON.stringify(registerPatterns)},"v":${version},"epoch":${JSON.stringify(epoch)}}`);
   }
 
   /**
@@ -614,6 +640,10 @@ export function createStore({
       LazyWatch.dispose(state);
     }
   };
+
+  // A write on `state` that bypassed `patch` still drops the cached
+  // encoding, on the batch's microtask
+  LazyWatch.on(state, () => { stateJSON = null; });
 
   // Rows loaded from disk may hold deletions and replicas the window has
   // outlived; the first op after that runs compaction again on schedule
