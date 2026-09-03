@@ -11,6 +11,21 @@
 // `initial` acts as the skeleton (the containers an app expects to exist)
 // and rows carry the data.
 //
+// Client ops pass three gates before the merge sees them, in this order:
+// - the clock guard: an op stamped more than `maxSkew` ahead of the
+//   server's clock is refused (code 'clock-skew', with the server's time
+//   so the client can correct itself), since a fast clock would otherwise
+//   win every conflict and drag the server's clock along
+// - retention: an op older than `retention` is refused (code 'expired'),
+//   because deletions older than that may have been compacted away and
+//   the op could resurrect what they removed
+// - write authorization: a leaf at or under a `readOnly` path refuses the
+//   op, and `validate(diff, { user, replicaId, store })` may refuse it or
+//   hand back a trimmed diff to accept instead (code 'forbidden')
+// The server's own writes (`patch`, and `apply` called without a session)
+// skip all three. Compaction of old tombstones and idle replicas runs by
+// itself once an hour of store time has passed since the last one.
+//
 // Sessions may carry a `user` (whatever the transport authenticated). The
 // store broadcasts PRESENCE, the distinct users with a live session, when
 // sessions with a user open and close, and `closeSessions` evicts sessions
@@ -36,16 +51,32 @@
 //   { t: 'presence', users }                    distinct users with a live session
 //   { t: 'closed', code, message }              this session is over
 //       (code 'evicted'; hubs also send 'forbidden', 'unknown-store', 'invalid-store')
-//   { t: 'error', seq?, code?, message }
+//   { t: 'error', seq?, code?, message, now?, ts? }  a refused op carries its
+//       seq and a code: 'invalid' (breaks the model), 'clock-skew' (with
+//       the server's `now` and the op's `ts`), 'expired', 'forbidden'
 //   { t: 'pong' }
 import { LazyWatch } from 'lazy-watch';
 import { createClock, isTimestamp } from '../core/hlc.js';
 import { registerSet, pathKey, parsePathKey, setAt, valueAt, deleteAt } from '../core/paths.js';
-import { assertModel } from '../core/model.js';
+import { leaves, assertModel } from '../core/model.js';
 import { mergeOp, compactTombstones } from '../core/merge.js';
 import { memoryStorage } from './storage.js';
 
 const { Utils } = LazyWatch;
+
+const MINUTE = 60_000;
+const HOUR = 60 * MINUTE;
+const DAY = 24 * HOUR;
+
+/** A client op the store would not merge; `code` travels to the client */
+export class RefusedError extends Error {
+  constructor(code, message, extra) {
+    super(message);
+    this.name = 'RefusedError';
+    this.code = code;
+    Object.assign(this, extra);
+  }
+}
 
 /** `initial` with the persisted rows applied on top, shallow paths first */
 function rebuild(initial, rows) {
@@ -58,6 +89,22 @@ function rebuild(initial, rows) {
   return state;
 }
 
+/**
+ * Replica progress from a saved document: `{ replicas: { id: { seq, seen } } }`,
+ * or the older `{ seqs: { id: seq } }` shape. A replica with no `seen` is
+ * treated as seen now, so it gets a full retention window before pruning.
+ */
+function loadReplicas(saved, now) {
+  const replicas = new Map();
+  if (!saved) return replicas;
+  if (saved.replicas) {
+    for (const [id, r] of Object.entries(saved.replicas)) replicas.set(id, { seq: r.seq, seen: r.seen ?? now });
+  } else {
+    for (const [id, seq] of Object.entries(saved.seqs ?? {})) replicas.set(id, { seq, seen: now });
+  }
+  return replicas;
+}
+
 /** Users are distinct by `id` when they have one, else by value */
 const defaultPresenceKey = user =>
   (user !== null && typeof user === 'object' && user.id != null ? String(user.id) : JSON.stringify(user));
@@ -68,21 +115,53 @@ const defaultPresenceKey = user =>
  *   persisted, and the base persisted rows are applied onto
  * @param {Array<string|string[]>} [options.registers] - paths whose value
  *   is one unit (arrays live only here); `*` matches one segment
+ * @param {Array<string|string[]>} [options.readOnly] - paths clients may
+ *   not write, same syntax as registers; a client op touching a leaf at or
+ *   under one is refused whole. The server's own `patch` is not bound
+ * @param {(diff: Object, context: { user: any, replicaId: string, store: Object }) => boolean|Object|void} [options.validate]
+ *   - judges every client op after the read-only check: return `false` or
+ *   throw to refuse it (the error's message reaches the client), return a
+ *   diff to accept that instead (leaves it leaves out are corrected on the
+ *   client), or `true` / nothing to accept it as is. Synchronous
+ * @param {number} [options.maxSkew=300000] - how far ahead of the server's
+ *   clock (ms) a client op may be stamped; further is refused with code
+ *   'clock-skew'. `Infinity` disables the guard
+ * @param {number} [options.retention=2592000000] - how long (ms, default 30
+ *   days) deletions and idle replicas are remembered; an op older than
+ *   this is refused with code 'expired'. `Infinity` keeps everything
+ * @param {number} [options.compactEvery=3600000] - how often (ms of store
+ *   time) compaction runs on its own, checked as ops arrive
  * @param {Object} [options.storage] - a storage adapter (default: memory)
  * @param {(user: any) => string} [options.presenceKey] - how presence
  *   dedupes users (default: by `id`)
  * @param {() => number} [options.now] - wall clock (injectable for tests)
  */
-export function createStore({ initial = {}, registers = [], storage = memoryStorage(), presenceKey = defaultPresenceKey, now } = {}) {
+export function createStore({
+  initial = {},
+  registers = [],
+  readOnly = [],
+  validate,
+  maxSkew = 5 * MINUTE,
+  retention = 30 * DAY,
+  compactEvery = HOUR,
+  storage = memoryStorage(),
+  presenceKey = defaultPresenceKey,
+  now
+} = {}) {
+  if (validate !== undefined && typeof validate !== 'function') throw new TypeError('validate must be a function');
+  const time = now ?? Date.now;
   const regs = registerSet(registers);
+  const locked = registerSet(readOnly);
   const saved = storage.load();
   const state = new LazyWatch(rebuild(initial, saved ? saved.rows : []));
   const clocks = new Map(saved ? saved.rows.map(([key, row]) => [key, row.deleted ? { ts: row.ts, deleted: true } : { ts: row.ts }]) : []);
-  const seqs = new Map(saved ? Object.entries(saved.seqs) : []);
+  const replicas = loadReplicas(saved, time());
   let version = saved ? saved.version : 0;
   const clock = createClock('server', now);
   const sessions = new Set();
-  let serverSeq = seqs.get('server') ?? 0;
+  let serverSeq = replicas.get('server')?.seq ?? 0;
+  let lastCompaction = -Infinity;
+  let self;
 
   function broadcast(message) {
     for (const s of sessions) s.send(message);
@@ -141,19 +220,66 @@ export function createStore({ initial = {}, registers = [], storage = memoryStor
     if (!Utils.isPlainObject(op.diff)) throw new TypeError('op.diff must be a plain object');
   }
 
+  /** True when some read-only pattern matches the path or one of its ancestors */
+  function underReadOnly(path) {
+    for (let i = 1; i <= path.length; i++) if (locked.matches(path.slice(0, i))) return true;
+    return false;
+  }
+
+  /**
+   * The gates a client op passes before the merge (see the header). Returns
+   * the diff to merge and the leaves of the original the validator left
+   * out, which the client is corrected on.
+   */
+  function admit(op, session) {
+    const entries = leaves(op.diff, regs);
+    const wall = time();
+    if (op.ts[0] > wall + maxSkew) {
+      throw new RefusedError('clock-skew',
+        `The op is stamped ${Math.round((op.ts[0] - wall) / 1000)} s ahead of the server's clock`, { now: wall, ts: op.ts });
+    }
+    if (op.ts[0] < wall - retention) {
+      throw new RefusedError('expired',
+        `The op is ${Math.round((wall - op.ts[0]) / DAY)} days old, older than the store keeps history for`);
+    }
+    const lockedLeaf = entries.find(([path]) => underReadOnly(path));
+    if (lockedLeaf) throw new RefusedError('forbidden', `"${lockedLeaf[0].join('/')}" is read-only`);
+    if (!validate) return { diff: op.diff, stripped: [] };
+
+    let verdict;
+    try {
+      verdict = validate(op.diff, { user: session.user, replicaId: op.replicaId, store: self });
+    } catch (err) {
+      throw new RefusedError('forbidden', err?.message || 'The op was refused');
+    }
+    if (verdict === false) throw new RefusedError('forbidden', 'The op was refused');
+    if (verdict === true || verdict === undefined || verdict === op.diff) return { diff: op.diff, stripped: [] };
+    if (!Utils.isPlainObject(verdict)) throw new TypeError('validate must return true, false, or a diff');
+    const kept = new Set(leaves(verdict, regs).map(([path]) => pathKey(path)));
+    return { diff: verdict, stripped: entries.filter(([path]) => !kept.has(pathKey(path))).map(([path]) => path) };
+  }
+
   /**
    * Merge one op. Idempotent per (replicaId, seq): a resent op is ignored.
+   * With a `session` the op is a client's and passes the gates first; the
+   * server's own ops are trusted.
    * @returns {{ duplicate: boolean, accepted: Object|null, rejected: string[][], correction: Object|null }}
    */
-  function apply(op) {
+  function apply(op, session) {
     assertOp(op);
-    assertModel(op.diff, regs);
-    const last = seqs.get(op.replicaId) ?? 0;
+    maybeCompact();
+    const last = replicas.get(op.replicaId)?.seq ?? 0;
     if (op.seq <= last) return { duplicate: true, accepted: null, rejected: [], correction: null };
-    seqs.set(op.replicaId, op.seq);
+    let diff = op.diff;
+    let stripped = [];
+    if (session) ({ diff, stripped } = admit(op, session));
+    else assertModel(diff, regs);
+
+    const seen = time();
+    replicas.set(op.replicaId, { seq: op.seq, seen });
     clock.receive(op.ts);
 
-    const { accepted, rejected, won, dropped } = mergeOp(clocks, op.ts, op.diff, regs);
+    const { accepted, rejected, won, dropped } = mergeOp(clocks, op.ts, diff, regs);
     if (accepted) {
       LazyWatch.patch(state, accepted);
       version++;
@@ -161,11 +287,38 @@ export function createStore({ initial = {}, registers = [], storage = memoryStor
     storage.commit({
       upserts: won.map(([path, value]) => [pathKey(path), value === null ? { ts: op.ts, deleted: true } : { value, ts: op.ts }]),
       deletes: dropped,
-      replica: { id: op.replicaId, seq: op.seq },
+      replica: { id: op.replicaId, seq: op.seq, seen },
       version
     });
     if (accepted) broadcast({ t: 'patch', diff: accepted, ts: op.ts });
-    return { duplicate: false, accepted, rejected, correction: rejected.length ? correction(rejected) : null };
+    const lost = [...rejected, ...stripped];
+    return { duplicate: false, accepted, rejected: lost, correction: lost.length ? correction(lost) : null };
+  }
+
+  /**
+   * Forget tombstones older than the retention window and replicas not
+   * heard from within it. Safe because an op older than the window is
+   * refused, so nothing can arrive that the forgotten entries would have
+   * had to judge. Returns how many of each were removed.
+   */
+  function compact() {
+    lastCompaction = time();
+    if (!Number.isFinite(retention)) return { tombstones: 0, replicas: 0 };
+    const horizon = lastCompaction - retention;
+    const removed = compactTombstones(clocks, [horizon, 0, '']);
+    const forgotten = [];
+    for (const [id, r] of replicas) {
+      if (id !== 'server' && r.seen < horizon) {
+        replicas.delete(id);
+        forgotten.push(id);
+      }
+    }
+    if (removed.length || forgotten.length) storage.commit({ upserts: [], deletes: removed, forgetReplicas: forgotten, version });
+    return { tombstones: removed.length, replicas: forgotten.length };
+  }
+
+  function maybeCompact() {
+    if (Number.isFinite(retention) && time() - lastCompaction >= compactEvery) compact();
   }
 
   // The snapshot names the server's register patterns so a client can
@@ -173,16 +326,23 @@ export function createStore({ initial = {}, registers = [], storage = memoryStor
   const registerPatterns = regs.patterns.map(p => p.join('/'));
 
   function snapshotMessage(replicaId) {
-    return { t: 'snapshot', state: LazyWatch.snapshot(state), ts: clock.peek(), seq: seqs.get(replicaId) ?? 0, registers: registerPatterns };
+    return { t: 'snapshot', state: LazyWatch.snapshot(state), ts: clock.peek(), seq: replicas.get(replicaId)?.seq ?? 0, registers: registerPatterns };
+  }
+
+  /** The error message for an op the store did not merge */
+  function refusal(op, err) {
+    const message = { t: 'error', seq: Utils.isPlainObject(op) ? op.seq : undefined, code: err.code ?? 'invalid', message: err.message };
+    if (err.code === 'clock-skew') Object.assign(message, { now: err.now, ts: err.ts });
+    return message;
   }
 
   /**
    * Attach a session. `send` receives message objects; feed the session
    * parsed client messages with `receive`, and `close` it when the
    * connection ends. `user` is whatever the transport authenticated
-   * (counted in presence when present); `onEvict` is called after
-   * `closeSessions` closed this session, so the transport can drop the
-   * socket or the hub its entry.
+   * (counted in presence when present, and handed to `validate`);
+   * `onEvict` is called after `closeSessions` closed this session, so the
+   * transport can drop the socket or the hub its entry.
    */
   function session({ send, user, onEvict } = {}) {
     if (typeof send !== 'function') throw new TypeError('A session needs a send function');
@@ -199,19 +359,19 @@ export function createStore({ initial = {}, registers = [], storage = memoryStor
             s.replicaId = msg.replicaId;
             for (const op of Array.isArray(msg.ops) ? msg.ops : []) {
               try {
-                apply(op);
+                apply(op, s);
               } catch (err) {
-                send({ t: 'error', seq: Utils.isPlainObject(op) ? op.seq : undefined, message: err.message });
+                send(refusal(op, err));
               }
             }
             return send(snapshotMessage(msg.replicaId));
           }
           case 'op': {
             try {
-              const result = apply(msg.op);
+              const result = apply(msg.op, s);
               return send({ t: 'ack', seq: msg.op.seq, ts: clock.peek(), correction: result.correction });
             } catch (err) {
-              return send({ t: 'error', seq: Utils.isPlainObject(msg.op) ? msg.op.seq : undefined, message: err.message });
+              return send(refusal(msg.op, err));
             }
           }
           case 'ping':
@@ -259,11 +419,13 @@ export function createStore({ initial = {}, registers = [], storage = memoryStor
     return apply({ replicaId: 'server', seq: ++serverSeq, ts: clock.now(), diff });
   }
 
-  return {
+  self = {
     /** The live state; read freely, write through `patch` so clocks stay right */
     state,
     get version() { return version; },
     get sessions() { return sessions.size; },
+    /** Replica ids the store remembers progress for (pruned by compaction) */
+    get replicas() { return [...replicas.keys()]; },
     apply,
     patch,
     session,
@@ -273,6 +435,8 @@ export function createStore({ initial = {}, registers = [], storage = memoryStor
     snapshot: () => LazyWatch.snapshot(state),
     /** Subscribe to accepted changes (a LazyWatch listener on the state) */
     on: (listener, options) => LazyWatch.on(state, listener, options),
+    /** Forget what the retention window no longer needs; returns { tombstones, replicas } removed */
+    compact,
     /** Forget tombstones older than a timestamp; returns how many */
     compactTombstones(olderThan) {
       const removed = compactTombstones(clocks, olderThan);
@@ -286,4 +450,9 @@ export function createStore({ initial = {}, registers = [], storage = memoryStor
       LazyWatch.dispose(state);
     }
   };
+
+  // Rows loaded from disk may hold deletions and replicas the window has
+  // outlived; the first op after that runs compaction again on schedule
+  compact();
+  return self;
 }

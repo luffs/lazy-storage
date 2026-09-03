@@ -17,12 +17,19 @@
 // client restarted offline (or before its first snapshot lands) starts
 // from what it last saw, pending edits included, instead of from nothing.
 //
+// An op the server refuses comes back as an error with the op's seq and a
+// code. 'clock-skew' means this device's clock runs ahead: the client
+// adopts the server's time as an offset, re-stamps its pending ops, and
+// sends them again, so nothing is lost. Any other refusal ('forbidden',
+// 'expired', 'invalid') drops the op and resyncs from a snapshot, since
+// the local state already reflects an edit the server will never hold.
+//
 // A client attaches to a connection under its store id. Pass a shared
 // `connection` to carry several stores over one socket, or a `transport`
 // to have the client own a connection of its own; the protocol is the same
 // either way.
 import { LazyWatch } from 'lazy-watch';
-import { createClock } from '../core/hlc.js';
+import { createClock, compareTs } from '../core/hlc.js';
 import { registerSet } from '../core/paths.js';
 import { leaves, expandRegisters } from '../core/model.js';
 import { randomId } from '../core/ids.js';
@@ -90,7 +97,12 @@ export function createClient({
     restored ? { ...structuredClone(initial), ...structuredClone(saved.state) } : structuredClone(initial),
     { inverse: true }
   );
-  const clock = createClock(replicaId, now);
+  // The clock runs on local time plus an offset the server corrects when
+  // it refuses an op for running ahead (see 'clock-skew' below)
+  const wall = now ?? Date.now;
+  let offset = 0;
+  const clock = createClock(replicaId, () => wall() + offset);
+  const restamped = new Map(); // seq -> how many times the op was re-stamped after a skew refusal
   const listeners = Object.fromEntries(EVENTS.map(e => [e, new Set()]));
   let link = null;        // attachment to the connection while connected
   let synced = false;     // this store's snapshot has landed on this socket
@@ -182,6 +194,7 @@ export function createClient({
           }
         }
         outbox = outbox.filter(op => op.seq > msg.seq);
+        for (const seq of restamped.keys()) if (seq <= msg.seq) restamped.delete(seq);
         LazyWatch.overwrite(state, msg.state, REMOTE);
         // Edits made since the hello went out: back on top, and off to the server
         for (const op of outbox) {
@@ -201,6 +214,7 @@ export function createClient({
       case 'ack':
         clock.receive(msg.ts);
         outbox = outbox.filter(op => op.seq > msg.seq);
+        for (const seq of restamped.keys()) if (seq <= msg.seq) restamped.delete(seq);
         persist();
         if (msg.correction) LazyWatch.patch(state, msg.correction, REMOTE);
         emit('sync');
@@ -224,19 +238,48 @@ export function createClient({
         return;
       }
       case 'error': {
+        if (msg.code === 'clock-skew' && correctClock(msg)) return;
         const err = new Error(msg.message);
         if (msg.code) err.code = msg.code;
         emit('error', err);
         // The server refused an op we already applied locally: drop it and
-        // resync from a snapshot so this replica falls back in line
+        // resync from a snapshot so this replica falls back in line (when a
+        // hello is in flight its snapshot is already on the way)
         if (Number.isInteger(msg.seq)) {
           outbox = outbox.filter(op => op.seq > msg.seq);
           persist();
-          link?.send({ t: 'hello', replicaId, ops: outbox });
+          if (synced) link?.send({ t: 'hello', replicaId, ops: outbox });
         }
         return;
       }
     }
+  }
+
+  /**
+   * The server refused an op for being stamped too far ahead of its clock.
+   * Adopt the server's time, re-stamp this op and every pending op after it
+   * (they were stamped by the same clock), and send them again; with a
+   * hello in flight the snapshot handler resends them instead. Returns
+   * false when the error is stale (about a stamp already replaced) or the
+   * correction has failed twice, in which case the op is given up on.
+   */
+  function correctClock(msg) {
+    if (!Number.isInteger(msg.seq) || !Number.isInteger(msg.now)) return false;
+    const refused = outbox.find(op => op.seq === msg.seq);
+    if (!refused) return true;
+    if (Array.isArray(msg.ts) && compareTs(refused.ts, msg.ts) !== 0) return true;
+    const attempts = (restamped.get(refused.seq) ?? 0) + 1;
+    if (attempts > 2) return false;
+    offset = msg.now - wall();
+    clock.rewind();
+    const behind = outbox.filter(op => op.seq >= refused.seq);
+    for (const op of behind) {
+      op.ts = clock.now();
+      restamped.set(op.seq, attempts);
+    }
+    persist();
+    if (synced) for (const op of behind) link.send({ t: 'op', op });
+    return true;
   }
 
   const handler = {

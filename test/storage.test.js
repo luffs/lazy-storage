@@ -8,21 +8,33 @@ import { createStore, memoryStorage, jsonFileStorage } from '../src/server/index
 const T = (ms, id = 'x') => [ms, 0, id];
 const INITIAL = { tasks: {}, order: [], settings: { theme: 'light' } };
 
-test('a fresh adapter loads null and a committed one loads its rows, seqs, and version', () => {
+test('a fresh adapter loads null and a committed one loads its rows, replicas, and version', () => {
   const storage = memoryStorage();
   assert.equal(storage.load(), null);
   storage.commit({
     upserts: [['["tasks","a","title"]', { value: 'A', ts: T(10) }], ['["tasks","b"]', { ts: T(11), deleted: true }]],
     deletes: [],
-    replica: { id: 'r1', seq: 3 },
+    replica: { id: 'r1', seq: 3, seen: 500 },
     version: 1
   });
-  storage.commit({ upserts: [], deletes: ['["tasks","b"]'], replica: { id: 'r2', seq: 1 }, version: 2 });
+  storage.commit({ upserts: [], deletes: ['["tasks","b"]'], replica: { id: 'r2', seq: 1, seen: 600 }, version: 2 });
   assert.deepEqual(storage.load(), {
     rows: [['["tasks","a","title"]', { value: 'A', ts: T(10) }]],
-    seqs: { r1: 3, r2: 1 },
+    replicas: { r1: { seq: 3, seen: 500 }, r2: { seq: 1, seen: 600 } },
     version: 2
   });
+  storage.commit({ upserts: [], deletes: [], forgetReplicas: ['r1'], version: 3 });
+  assert.deepEqual(storage.load().replicas, { r2: { seq: 1, seen: 600 } });
+});
+
+test('a store reads a document from before replica progress carried `seen`', () => {
+  const storage = memoryStorage();
+  storage.load = () => ({ rows: [['["tasks","a","id"]', { value: 'a', ts: T(10, 'old') }]], seqs: { old: 4 }, version: 1 });
+  const store = createStore({ initial: INITIAL, storage, now: () => 5_000_000 });
+  assert.deepEqual(store.snapshot().tasks, { a: { id: 'a' } });
+  assert.deepEqual(store.replicas, ['old']);
+  const dup = store.apply({ replicaId: 'old', seq: 4, ts: T(10, 'old'), diff: { tasks: { a: { id: 'z' } } } });
+  assert.equal(dup.duplicate, true, 'the old sequence numbers still count');
 });
 
 test('the store persists every accepted op as rows and rebuilds state as initial plus rows', () => {
@@ -41,7 +53,7 @@ test('the store persists every accepted op as rows and rebuilds state as initial
     '["order"]': ['a'],
     '["settings","theme"]': 'dark'
   });
-  assert.equal(saved.seqs.server, 3);
+  assert.equal(saved.replicas.server.seq, 3);
   assert.equal(saved.version, 3);
 
   const two = createStore({ initial: INITIAL, registers: ['order'], storage });
@@ -50,7 +62,7 @@ test('the store persists every accepted op as rows and rebuilds state as initial
   const r = two.apply({ replicaId: 'late', seq: 1, ts: T(1, 'late'), diff: { tasks: { a: { done: true } } } });
   assert.equal(r.accepted, null);
   assert.equal(two.version, 3, 'nothing accepted, version unchanged');
-  assert.equal(storage.load().seqs.late, 1, 'the replica\'s progress is still recorded');
+  assert.equal(storage.load().replicas.late.seq, 1, 'the replica\'s progress is still recorded');
 });
 
 test('a skeleton key added to initial appears on load even though no row mentions it', () => {

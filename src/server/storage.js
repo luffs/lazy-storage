@@ -2,8 +2,9 @@
 //
 // A store persists as ROWS, one per leaf path: { value, ts, deleted }.
 // Live rows carry the value and the timestamp that won it; tombstones
-// carry the timestamp only. Alongside the rows: the last sequence number
-// seen from each replica, and the store's version.
+// carry the timestamp only. Alongside the rows: each replica's progress
+// (the last sequence number seen from it, and when), and the store's
+// version.
 //
 // An empty object is a leaf too (`assignees: {}` is one row). When such a
 // container later gains children, its `{}` row stays next to the child
@@ -15,10 +16,14 @@
 // The interface is incremental so a row-oriented backend (SQLite) writes
 // only what an op touched:
 //
-//   load()  -> null | { rows: Array<[pathKey, row]>, seqs: { replicaId: seq }, version }
-//   commit({ upserts: Array<[pathKey, row]>, deletes: pathKey[], replica?: { id, seq }, version })
+//   load()  -> null | { rows: Array<[pathKey, row]>, replicas: { replicaId: { seq, seen } }, version }
+//   commit({ upserts: Array<[pathKey, row]>, deletes: pathKey[],
+//            replica?: { id, seq, seen }, forgetReplicas?: replicaId[], version })
 //   flush() -> void   (write out anything buffered; called on dispose)
 //
+// `seen` is the store's clock (ms) when the replica's op arrived; a
+// `seen` of null means unknown (a document from before it was recorded).
+// The store also accepts the older `seqs: { replicaId: seq }` from load.
 // `null` from load means "never seen": the store starts from `initial`.
 // Document-oriented adapters (memory, JSON file) apply commits to an
 // in-memory copy and write the whole document.
@@ -28,19 +33,25 @@ import { dirname, resolve } from 'node:path';
 /** The in-memory document shared by the memory and JSON-file adapters */
 function document(initial = null) {
   const rows = new Map(initial ? initial.rows : []);
-  const seqs = initial ? { ...initial.seqs } : {};
+  // A document written before `seen` existed holds `seqs`
+  const replicas = initial
+    ? Object.fromEntries(initial.replicas
+      ? Object.entries(initial.replicas).map(([id, r]) => [id, { ...r }])
+      : Object.entries(initial.seqs ?? {}).map(([id, seq]) => [id, { seq, seen: null }]))
+    : {};
   let version = initial ? initial.version : 0;
   let seen = initial !== null;
   return {
-    load: () => (seen ? { rows: [...rows].map(([k, r]) => [k, structuredClone(r)]), seqs: { ...seqs }, version } : null),
+    load: () => (seen ? { rows: [...rows].map(([k, r]) => [k, structuredClone(r)]), replicas: structuredClone(replicas), version } : null),
     commit(change) {
       seen = true;
       for (const key of change.deletes) rows.delete(key);
       for (const [key, row] of change.upserts) rows.set(key, structuredClone(row));
-      if (change.replica) seqs[change.replica.id] = change.replica.seq;
+      if (change.replica) replicas[change.replica.id] = { seq: change.replica.seq, seen: change.replica.seen ?? null };
+      for (const id of change.forgetReplicas ?? []) delete replicas[id];
       version = change.version;
     },
-    serialize: () => ({ rows: [...rows], seqs, version })
+    serialize: () => ({ rows: [...rows], replicas, version })
   };
 }
 

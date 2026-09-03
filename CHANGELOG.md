@@ -2,6 +2,52 @@
 
 All notable changes to lazy-storage are documented here. The format follows Keep a Changelog; versions follow Semantic Versioning.
 
+## [Unreleased]
+
+Three guards a deployed store needs. Servers and clients should upgrade
+together: an old client still syncs, but is dropped from every conflict
+once its clock runs ahead, since it cannot correct itself.
+
+### Added
+
+- **Write authorization.** `createStore` takes `readOnly`, path patterns
+  (register syntax, `*` allowed) clients may not write: an op with a leaf
+  at or under one is refused whole with code `forbidden`. And
+  `validate(diff, { user, replicaId, store })`, asked for every client op
+  after that check: return `false` or throw to refuse (the message reaches
+  the client), return a diff to accept that instead (the client is
+  corrected on the leaves it left out), or `true`/nothing to accept. The
+  server's own `patch` and a bare `apply` skip both; `apply(op, session)`
+  is the client path
+- **A clock guard.** An op stamped more than `maxSkew` (default five
+  minutes) ahead of the server's clock is refused with code `clock-skew`
+  and the server's time, before it can win every conflict or drag the
+  server's clock forward. The client adopts the server's time as an
+  offset, rewinds its hybrid clock (never behind what it has received),
+  re-stamps the refused op and every pending op after it, and sends them
+  again, so nothing is lost and no error reaches the app. The clock gained
+  `rewind()` for this
+- **A retention window.** Tombstones and per-replica progress are kept for
+  `retention` (default 30 days); `store.compact()` forgets what is older
+  and reports `{ tombstones, replicas }`, and runs by itself on load and
+  every `compactEvery` (default one hour) as ops arrive. An op stamped
+  before the window is refused with code `expired`, because the deletion
+  it might resurrect may already be forgotten; the client drops it and
+  resyncs. `retention: Infinity` keeps everything. `store.replicas` lists
+  the replicas still remembered
+
+### Changed
+
+- Storage adapters record a replica's progress as `{ seq, seen }` (`seen`:
+  the store's clock when its last op arrived) under `replicas` in `load()`,
+  and `commit` may carry `forgetReplicas`. Documents and databases written
+  by 0.2.x load as before: the store still reads `seqs`, SQLite adds the
+  `seen` column on open, and a replica without one gets a full window
+  before it is pruned
+- Every refused op now carries a code (`invalid` for one that breaks the
+  model); a client refused during a hello no longer sends a second hello,
+  since the snapshot is already on its way
+
 ## [0.2.2] - 2026-09-03
 
 A server no longer crashes when a store fails to open. No protocol or

@@ -34,9 +34,16 @@ const SCHEMA = `
     store   TEXT    NOT NULL,
     replica TEXT    NOT NULL,
     seq     INTEGER NOT NULL,
+    seen    INTEGER,
     PRIMARY KEY (store, replica)
   ) WITHOUT ROWID;
 `;
+
+/** Databases from before 0.3.0 lack `replicas.seen`; NULL there means unknown */
+function migrate(db) {
+  const columns = db.query('PRAGMA table_info(replicas)').all().map(c => c.name);
+  if (!columns.includes('seen')) db.exec('ALTER TABLE replicas ADD COLUMN seen INTEGER');
+}
 
 /**
  * @param {string} [file=':memory:'] - database file (created if missing)
@@ -48,6 +55,7 @@ export function sqliteStorage(file = ':memory:', { wal = true } = {}) {
   if (wal && file !== ':memory:') db.exec('PRAGMA journal_mode = WAL;');
   db.exec('PRAGMA synchronous = NORMAL;');
   db.exec(SCHEMA);
+  migrate(db);
 
   const q = {
     upsert: db.prepare(`
@@ -60,8 +68,11 @@ export function sqliteStorage(file = ':memory:', { wal = true } = {}) {
     rows: db.prepare('SELECT path, value, ts_ms, ts_count, ts_replica, deleted FROM leaves WHERE store = ?'),
     version: db.prepare('SELECT version FROM stores WHERE store = ?'),
     setVersion: db.prepare('INSERT INTO stores (store, version) VALUES (?, ?) ON CONFLICT (store) DO UPDATE SET version = excluded.version'),
-    replicas: db.prepare('SELECT replica, seq FROM replicas WHERE store = ?'),
-    setReplica: db.prepare('INSERT INTO replicas (store, replica, seq) VALUES (?, ?, ?) ON CONFLICT (store, replica) DO UPDATE SET seq = excluded.seq'),
+    replicas: db.prepare('SELECT replica, seq, seen FROM replicas WHERE store = ?'),
+    setReplica: db.prepare(`
+      INSERT INTO replicas (store, replica, seq, seen) VALUES (?, ?, ?, ?)
+      ON CONFLICT (store, replica) DO UPDATE SET seq = excluded.seq, seen = excluded.seen`),
+    forgetReplica: db.prepare('DELETE FROM replicas WHERE store = ? AND replica = ?'),
     ids: db.prepare('SELECT store FROM stores ORDER BY store'),
     dropLeaves: db.prepare('DELETE FROM leaves WHERE store = ?'),
     dropReplicas: db.prepare('DELETE FROM replicas WHERE store = ?'),
@@ -73,7 +84,8 @@ export function sqliteStorage(file = ':memory:', { wal = true } = {}) {
     for (const [key, row] of change.upserts) {
       q.upsert.run(id, key, row.deleted ? null : JSON.stringify(row.value), row.ts[0], row.ts[1], row.ts[2], row.deleted ? 1 : 0);
     }
-    if (change.replica) q.setReplica.run(id, change.replica.id, change.replica.seq);
+    if (change.replica) q.setReplica.run(id, change.replica.id, change.replica.seq, change.replica.seen ?? null);
+    for (const replica of change.forgetReplicas ?? []) q.forgetReplica.run(id, replica);
     q.setVersion.run(id, change.version);
   });
 
@@ -101,8 +113,8 @@ export function sqliteStorage(file = ':memory:', { wal = true } = {}) {
               ? { ts: [r.ts_ms, r.ts_count, r.ts_replica], deleted: true }
               : { value: JSON.parse(r.value), ts: [r.ts_ms, r.ts_count, r.ts_replica] }
           ]);
-          const seqs = Object.fromEntries(q.replicas.all(id).map(r => [r.replica, r.seq]));
-          return { rows, seqs, version: meta.version };
+          const replicas = Object.fromEntries(q.replicas.all(id).map(r => [r.replica, { seq: r.seq, seen: r.seen ?? null }]));
+          return { rows, replicas, version: meta.version };
         },
         commit(change) {
           commit(id, change);

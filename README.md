@@ -88,12 +88,16 @@ timestamp of the last accepted write per leaf path and decides per leaf:
 
 A client whose op lost receives a correction with the server's values and
 falls back in line. The server is the only merge point, which is what
-keeps this small: clients never merge with each other, and tombstones can
-be compacted whenever every replica has synced past them.
+keeps this small: clients never merge with each other, and old tombstones
+can be forgotten on a schedule (see [Persistence](#persistence)).
 
-Clocks are hybrid logical clocks, so a replica with a skewed wall clock is
-pulled into line by whatever it receives and does not win (or lose) every
-conflict for as long as its clock is off.
+Clocks are hybrid logical clocks, so a replica whose wall clock runs slow
+is pulled forward by whatever it receives. A clock that runs *fast* would
+win every conflict and drag the server's clock with it, so the server
+refuses any op stamped more than `maxSkew` (default five minutes) ahead of
+its own time, telling the client the server's time. The client adopts it
+as an offset, re-stamps its pending ops, and sends them again; nothing is
+lost, and the app hears nothing about it.
 
 ## Offline
 
@@ -133,9 +137,22 @@ Adapters:
   atomically and debounced. Fine for small single-store deployments.
 - `memoryStorage()` — nothing survives the process; for tests.
 
-Tombstones are the only rows that grow without bound;
-`store.compactTombstones(olderThan)` forgets those older than a timestamp
-once every replica that could still send an older write has synced.
+Two things would otherwise grow without bound: tombstones, and the
+progress kept per replica (every browser tab that ever connected). A store
+keeps both for its **retention window** (`retention`, default 30 days) and
+forgets what is older, on load and then once an hour as ops arrive
+(`store.compact()` does it on demand and reports what it removed). To make
+that safe, an op stamped before the window is refused with code `expired`:
+it might be a write to a record whose deletion has since been forgotten,
+and would resurrect it. The client drops such an op and resyncs, and the
+app can listen for the error to tell the user that a change made more than
+a month ago offline could not be kept. `retention: Infinity` keeps
+everything and accepts ops of any age.
+
+An adapter records a replica's progress as `{ seq, seen }`, where `seen`
+is the store's clock when its last op arrived; a database from before
+0.3.0 opens as is (SQLite gains the column on open) and its replicas get a
+full window before they are pruned.
 
 ## Multiple stores
 
@@ -183,6 +200,23 @@ Two hooks on the Bun adapter decide who gets a session on which store:
   exists; a refusal arrives as a `closed` message with code `forbidden` and
   affects only that store, while the socket stays up for the others. Both
   hooks may return promises.
+
+Opening a store is not the same as writing to it, so the store itself
+decides what a client may write:
+
+- `readOnly: ['team', 'tasks/*/createdAt']` names paths clients may not
+  touch (same syntax as registers). An op with a leaf at or under one is
+  refused whole, with code `forbidden`; the client drops it and resyncs,
+  so the local state falls back in line. The server's own `store.patch` is
+  the way to write there. Deleting a record whose *field* is read-only is
+  allowed: the pattern protects the field, not the record.
+- `validate(diff, { user, replicaId, store })` judges every client op that
+  passed the read-only check. Return `false` or throw to refuse it (the
+  error's message reaches the client), return a diff to accept *that*
+  instead (a validator that strips fields the user may not set, say; the
+  client is corrected on what was stripped, silently), or return `true` or
+  nothing to let it through. It is synchronous and never sees the server's
+  own writes.
 
 The user rides on the session (`store.session({ send, user })` if you drive
 sessions yourself), which powers two more features:
@@ -241,18 +275,18 @@ replaced by a leaf) drops the affected steps.
 - `db.collection(name)` — `add(record) → id`, `update(id, fields)`, `remove(id)`, `get(id)`, `has(id)`, `ids()`, `all()`
 - `db.connect()`, `db.disconnect()`, `db.status` (`'offline' | 'connecting' | 'online'`), `db.pending`
 - `db.watch(listener)` — state changes; `meta?.origin === 'remote'` marks the server's
-- `db.on('status' | 'error' | 'sync' | 'presence' | 'closed', fn)` — lifecycle events; server errors carry a `code`
+- `db.on('status' | 'error' | 'sync' | 'presence' | 'closed', fn)` — lifecycle events; a refused op is an error with a `code` (`forbidden`, `expired`, `invalid`; `clock-skew` is handled without one)
 - `db.undo()`, `db.redo()`, `db.canUndo`, `db.canRedo`, `db.checkpoint()`, `db.group(fn)`, `db.clearHistory()`
 - `webSocketTransport(url)`, `memoryOutbox()`, `localStorageOutbox(key)`
 
 **Server** (`lazy-storage/server`)
 
-- `createStore({ initial, registers, storage, presenceKey, now })`
+- `createStore({ initial, registers, readOnly, validate, maxSkew, retention, compactEvery, storage, presenceKey, now })`
 - `store.session({ send, user, onEvict })` → `{ receive(message), close(), user, replicaId }` — one per connection, transport-agnostic
 - `store.closeSessions(predicate, message)` — evict sessions; `store.presence()` — distinct users with a live session
-- `store.patch(diff)` — a server-side change, timestamped and broadcast
-- `store.on(listener)`, `store.snapshot()`, `store.state`, `store.version`
-- `store.compactTombstones(olderThan)`, `store.flush()`, `store.dispose()`
+- `store.patch(diff)` — a server-side change, timestamped and broadcast; `store.apply(op)` — a trusted op, gates skipped
+- `store.on(listener)`, `store.snapshot()`, `store.state`, `store.version`, `store.replicas`
+- `store.compact()` → `{ tombstones, replicas }` removed; `store.compactTombstones(olderThan)`, `store.flush()`, `store.dispose()`
 - `memoryStorage()`, `jsonFileStorage(path, { debounce })`
 - `createStores(factory)` → `get(id)`, `has(id)`, `ids()`, `release(id)`, `dispose()`; `isStoreId(id)`
 - `createHub(resolveStore, { send, user, authorize })` → `{ receive(message), close(), stores, user }` — the server side of a multiplexed connection, session-shaped
@@ -281,7 +315,9 @@ differs from its own), `{ t: 'patch', diff, ts }`,
 `{ t: 'ack', seq, ts, correction }`, `{ t: 'presence', users }`,
 `{ t: 'closed', code, message }` (final for the store: `evicted`,
 `forbidden`, `unknown-store`, `invalid-store`),
-`{ t: 'error', seq?, code?, message }`, `{ t: 'pong' }`.
+`{ t: 'error', seq?, code?, message, now?, ts? }` (a refused op names its
+`seq` and a code: `invalid`, `forbidden`, `expired`, or `clock-skew` with
+the server's wall time `now` and the refused stamp `ts`), `{ t: 'pong' }`.
 
 Every message except `ping`/`pong` carries a `store` field with the store
 id, and the client sends `{ t: 'leave', store }` to close one store's

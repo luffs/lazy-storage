@@ -11,9 +11,11 @@ const snap = client => LazyWatch.snapshot(client.state);
 
 // The server gets a fake clock too: a real one would pull every client's
 // hybrid clock up to wall time and swamp the fake advances the tests use
-// to order concurrent edits
+// to order concurrent edits. Clients without a fake clock of their own run
+// on real time, far ahead of the store's, so the skew guard is off here
+// (clock.test.js covers it)
 function setup(options = {}) {
-  const store = createStore({ initial: INITIAL, registers: REGISTERS, now: fakeTime(1_000_000), ...options });
+  const store = createStore({ initial: INITIAL, registers: REGISTERS, now: fakeTime(1_000_000), maxSkew: Infinity, ...options });
   const net = createNetwork(store);
   return { store, net };
 }

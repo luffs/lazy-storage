@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createStore, createStores, isStoreId, memoryStorage } from '../src/server/index.js';
-import { createNetwork, fakeTime } from './helpers.js';
+import { createNetwork } from './helpers.js';
 
 const INITIAL = { tasks: {} };
 
@@ -34,7 +34,7 @@ test('a factory may refuse an id', () => {
 });
 
 test('stores in one registry are isolated: clients of one never see the other', async () => {
-  const stores = createStores(() => createStore({ initial: INITIAL, storage: memoryStorage(), now: fakeTime() }));
+  const stores = createStores(() => createStore({ initial: INITIAL, storage: memoryStorage() }));
   const netA = createNetwork(stores.get('team-a'));
   const netB = createNetwork(stores.get('team-b'));
   const a = netA.client({ replicaId: 'a', initial: INITIAL });

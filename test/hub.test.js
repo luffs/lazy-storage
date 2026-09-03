@@ -3,13 +3,14 @@ import assert from 'node:assert/strict';
 import { createStore, createStores, createHub, memoryStorage } from '../src/server/index.js';
 import { createClient } from '../src/client/index.js';
 import { createConnection } from '../src/client/connection.js';
-import { createNetwork, fakeTime } from './helpers.js';
+import { createNetwork } from './helpers.js';
 
 const INITIAL = { tasks: {} };
 
 // A hub endpoint looks like a store to the network harness: it hands out a
-// session-shaped object per connection
-function setup(factory = () => createStore({ initial: INITIAL, storage: memoryStorage(), now: fakeTime() })) {
+// session-shaped object per connection. Stores and clients share the real
+// clock here; nothing below orders edits by time
+function setup(factory = () => createStore({ initial: INITIAL, storage: memoryStorage() })) {
   const stores = createStores(factory);
   const net = createNetwork({ session: ({ send }) => createHub(id => stores.get(id), { send }) });
   const connect = () => {
@@ -102,7 +103,7 @@ test('disconnecting one client leaves the socket up for the others, and it can r
 });
 
 test('an unknown store is closed for that client only; the other stays online', async () => {
-  const { net, connect, attach } = setup(id => (id.startsWith('team-') ? createStore({ initial: INITIAL, now: fakeTime() }) : null));
+  const { net, connect, attach } = setup(id => (id.startsWith('team-') ? createStore({ initial: INITIAL }) : null));
   const shared = connect();
   const ok = attach(shared, 'team-x', 'x1');
   const nope = attach(shared, 'other', 'o1');
@@ -120,7 +121,7 @@ test('an unknown store is closed for that client only; the other stays online', 
 test('a store factory that throws refuses that store only, without taking the connection down', async () => {
   const { net, connect, attach } = setup(id => {
     if (id === 'broken') throw new Error('migration failed: arrays are not allowed');
-    return createStore({ initial: INITIAL, now: fakeTime() });
+    return createStore({ initial: INITIAL });
   });
   const shared = connect();
   const errors = [];

@@ -21,6 +21,10 @@ export function createClock(replicaId, now = Date.now) {
   }
   let ms = 0;
   let count = 0;
+  // The highest remote timestamp received, so a rewind never falls behind
+  // what the rest of the system has already seen
+  let observedMs = 0;
+  let observedCount = 0;
 
   return {
     get replicaId() {
@@ -44,6 +48,10 @@ export function createClock(replicaId, now = Date.now) {
       if (!isTimestamp(ts)) return;
       const wall = now();
       const [rms, rcount] = ts;
+      if (rms > observedMs || (rms === observedMs && rcount > observedCount)) {
+        observedMs = rms;
+        observedCount = rcount;
+      }
       if (wall > ms && wall > rms) {
         ms = wall;
         count = 0;
@@ -54,6 +62,26 @@ export function createClock(replicaId, now = Date.now) {
         count = Math.max(count, rcount) + 1;
       } else {
         count++;
+      }
+    },
+
+    /**
+     * Drop local stamps that ran ahead of the wall clock (after the wall
+     * clock was corrected): fall back to it, but never behind the newest
+     * timestamp received, so later stamps still sort after everything
+     * acknowledged. The one deliberate exception to "never runs behind"
+     */
+    rewind() {
+      const wall = now();
+      if (wall >= ms) return;
+      if (observedMs >= wall) {
+        if (observedMs < ms || (observedMs === ms && observedCount + 1 < count)) {
+          ms = observedMs;
+          count = observedCount + 1;
+        }
+      } else {
+        ms = wall;
+        count = 0;
       }
     },
 

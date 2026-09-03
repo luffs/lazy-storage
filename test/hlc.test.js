@@ -34,3 +34,26 @@ test('replica id breaks ties so no two replicas produce equal timestamps', () =>
 test('a replica id is required', () => {
   assert.throws(() => createClock(''), TypeError);
 });
+
+test('rewind falls back to the wall clock after it was corrected, but never behind what was received', () => {
+  const now = fakeTime(10_000);
+  const clock = createClock('a', now);
+  clock.receive([9_000, 4, 'server']);
+  const ahead = clock.now();                       // stamped while an hour ahead
+  assert.equal(ahead[0], 10_000);
+  now.set(5_000);                                  // the clock is corrected backwards
+  clock.rewind();
+  const after = clock.now();
+  assert.deepEqual(after, [9_000, 6, 'a'], 'not behind the newest received stamp, and after it');
+  assert.ok(compareTs(after, [9_000, 4, 'server']) > 0);
+
+  // Nothing received: a rewind goes straight to the wall clock
+  const wall = fakeTime(10_000);
+  const alone = createClock('c', wall);
+  alone.now();
+  wall.set(2_000);
+  alone.rewind();
+  assert.deepEqual(alone.now(), [2_000, 1, 'c']);
+  alone.rewind();
+  assert.deepEqual(alone.peek(), [2_000, 1, 'c'], 'a rewind to where the clock already is changes nothing');
+});
