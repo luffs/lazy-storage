@@ -4,18 +4,48 @@
   "description": "Self-hosted realtime state store with offline sync, built on lazy-watch: keyed collections, last-writer-wins per field, an outbox that survives reconnects.",
   "type": "module",
   "exports": {
-    ".": "./src/index.js",
-    "./core": "./src/core/index.js",
-    "./client": "./src/client/index.js",
-    "./server": "./src/server/index.js",
-    "./server/bun": "./src/server/bun.js",
-    "./server/sqlite": "./src/server/sqlite-bun.js",
-    "./client/sqlite": "./src/client/sqlite-bun.js"
+    ".": {
+      "types": "./types/index.d.ts",
+      "default": "./src/index.js"
+    },
+    "./core": {
+      "types": "./types/core.d.ts",
+      "default": "./src/core/index.js"
+    },
+    "./client": {
+      "types": "./types/client.d.ts",
+      "default": "./src/client/index.js"
+    },
+    "./client/sqlite": {
+      "types": "./types/client-sqlite.d.ts",
+      "default": "./src/client/sqlite-bun.js"
+    },
+    "./server": {
+      "types": "./types/server.d.ts",
+      "default": "./src/server/index.js"
+    },
+    "./server/bun": {
+      "types": "./types/server-bun.d.ts",
+      "default": "./src/server/bun.js"
+    },
+    "./server/sqlite": {
+      "types": "./types/server-sqlite.d.ts",
+      "default": "./src/server/sqlite-bun.js"
+    },
+    "./server/node": {
+      "types": "./types/server-node.d.ts",
+      "default": "./src/server/node.js"
+    },
+    "./server/sqlite-node": {
+      "types": "./types/server-sqlite-node.d.ts",
+      "default": "./src/server/sqlite-node.js"
+    }
   },
   "files": [
     "src",
     "README.md",
-    "CHANGELOG.md"
+    "CHANGELOG.md",
+    "types"
   ],
   "sideEffects": false,
   "engines": {
@@ -24,7 +54,8 @@
   "scripts": {
     "test": "node --test \"test/*.test.js\"",
     "test:bun": "bun test/bun/sqlite.test.js && bun test/bun/sqlite-client.test.js && bun test/bun/serve.test.js",
-    "fuzz": "node test/fuzz/run.js"
+    "fuzz": "node test/fuzz/run.js",
+    "test:types": "tsc -p test/types/tsconfig.json"
   },
   "keywords": [
     "sync",
@@ -53,6 +84,18 @@
   "homepage": "https://github.com/luffs/lazy-storage#readme",
   "license": "ISC",
   "devDependencies": {
-    "fake-indexeddb": "6.2.5"
+    "@types/node": "^26.4.1",
+    "fake-indexeddb": "6.2.5",
+    "typescript": "^7.0.2",
+    "ws": "^8.21.3"
+  },
+  "types": "./types/index.d.ts",
+  "peerDependencies": {
+    "ws": ">=8"
+  },
+  "peerDependenciesMeta": {
+    "ws": {
+      "optional": true
+    }
   }
 }

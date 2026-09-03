@@ -1,0 +1,167 @@
+// check.ts - Exercises the public typings the way an app would; `npm run test:types`
+// compiles it (never runs it). Wrong usages carry an expect-error
+// directive, so the declarations are tested in both directions.
+import {
+  createClient, openClient, createConnection, webSocketTransport, memoryOutbox, localStorageOutbox, indexedDBStorage,
+  LazyWatch, compareTs, createClock, pathKey, registerSet, leaves, rebuild, randomId,
+  type Client, type ClientError, type Timestamp, type Diff, type ServerMessage, type RowStorage, type Op
+} from 'lazy-storage';
+import { createClient as createClientAgain } from 'lazy-storage/client';
+import { sqliteClientStorage } from 'lazy-storage/client/sqlite';
+import {
+  createStore, createStores, createHub, memoryStorage, jsonFileStorage, isStoreId, toJSON, tagStore,
+  type Store, type ServerStorage, type StorageCommit, type OpEvent
+} from 'lazy-storage/server';
+import { createHandlers, serve } from 'lazy-storage/server/bun';
+import { sqliteStorage } from 'lazy-storage/server/sqlite';
+import { mergeOp } from 'lazy-storage/core';
+
+interface Task { id: string; title: string; done: boolean }
+interface State { tasks: Record<string, Task>; order: string[] }
+
+// --- Client ---------------------------------------------------------------------
+
+const connection = createConnection({ transport: webSocketTransport(() => 'ws://localhost:3200/ws?token=x'), reconnect: { min: 500, max: 10_000 }, keepalive: false });
+const status: 'offline' | 'connecting' | 'open' = connection.status;
+
+const db: Client<State> = createClient<State>({
+  connection,
+  store: 'team-1',
+  initial: { tasks: {}, order: [] },
+  registers: ['order'],
+  storage: localStorageOutbox('app:team-1')
+});
+db.connect();
+db.state.tasks.a = { id: 'a', title: 'typed', done: false };
+db.state.order.push('a');
+const tasks = db.collection<Task>('tasks');
+const id: string = tasks.add({ title: 'new', done: false });
+tasks.update(id, { done: true });
+const maybe: Task | undefined = tasks.get(id);
+const pending: number = db.pending;
+const version: number = db.version;
+db.on('status', s => { const _s: 'offline' | 'connecting' | 'online' = s; });
+db.on('error', (err: ClientError) => { if (err.code === 'rate-limited') return; });
+db.on('closed', c => { const _code: string = c.code; });
+db.watch((changes, inverse, meta) => { if (meta?.origin === 'remote') return; });
+db.undo(); db.redo(); db.group(() => 1);
+const snapshot: State = LazyWatch.snapshot(db.state);
+db.dispose();
+
+// @ts-expect-error a client needs a store id
+createClient<State>({ connection });
+// @ts-expect-error not both
+createClient<State>({ store: 'x', connection, transport: webSocketTransport('ws://x') });
+// @ts-expect-error status is read-only
+db.status = 'online';
+
+const owned = createClientAgain({ store: 'solo', transport: webSocketTransport('ws://localhost:3200/ws'), storage: memoryOutbox(), cache: false });
+owned.disconnect();
+
+async function browser() {
+  const storage = indexedDBStorage('app:team-1', { onError: e => console.warn(e) });
+  const opened = await openClient<State>({ store: 'team-1', connection, initial: { tasks: {}, order: [] }, storage });
+  await storage.settled();
+  await storage.destroy();
+  return opened.restored;
+}
+
+const rows: RowStorage = sqliteClientStorage('mirror.sqlite');
+const opFor: Op = { replicaId: 'r', seq: 1, ts: [1, 0, 'r'], diff: { tasks: { a: null } } };
+rows.saveOp(opFor, { replicaId: 'r', seq: 1, version: 3, epoch: 'e' });
+
+// --- Core -------------------------------------------------------------------------
+
+const clock = createClock('r');
+const ts: Timestamp = clock.now();
+const order: number = compareTs(ts, clock.peek());
+const key: string = pathKey(['tasks', 'a']);
+const regs = registerSet(['order', 'tasks/*/subtaskOrder']);
+const matched: boolean = regs.matches(['order']);
+const flat = leaves({ tasks: { a: { title: 'x' } } } as Diff, regs);
+const rebuilt: State = rebuild<State>({ tasks: {}, order: [] }, [[key, 1]]);
+const merged = mergeOp(new Map(), ts, {}, regs);
+const accepted: Diff | null = merged.accepted;
+const rid: string = randomId();
+const message: ServerMessage = { t: 'patch', diff: {}, ts, v: 1 };
+void [status, maybe, pending, version, snapshot, order, matched, flat, rebuilt, accepted, rid, message, browser];
+
+// --- Server ---------------------------------------------------------------------------
+
+const store: Store<State> = createStore<State>({
+  initial: { tasks: {}, order: [] },
+  registers: ['order'],
+  readOnly: ['team'],
+  validate(diff, { user, store }) {
+    const _s: Store<State> = store;
+    if ((user as { role?: string } | undefined)?.role !== 'editor') return false;
+    return diff;
+  },
+  maxSkew: 60_000,
+  retention: Infinity,
+  rateLimit: { burst: 100, perSecond: 10 },
+  onError: err => console.error(err)
+});
+store.patch({ tasks: { a: { id: 'a', title: 't', done: false } } });
+const session = store.session({ send: m => { if (m.t === 'ack') return m.seq; }, user: { id: 'u1' } });
+session.receive({ t: 'ping' });
+const off = store.observe('op', (e: OpEvent) => e.accepted);
+store.observe('session', e => e.event === 'open');
+// @ts-expect-error unknown event
+store.observe('nope', () => {});
+off();
+const evicted: number = store.closeSessions(s => (s.user as { id: string }).id === 'u1', 'bye');
+const stats = store.stats();
+const version2: number = stats.version;
+const compacted: { tombstones: number; replicas: number } = store.compact();
+
+const stores = createStores(id => (isStoreId(id) ? createStore<State>({ storage: memoryStorage() }) : null), { idle: 60_000 });
+const got: Store<State> | null = stores.get('team-1');
+const released: string[] = stores.sweep();
+
+const custom: ServerStorage = {
+  load: () => null,
+  commit: (change: StorageCommit) => { void change.log?.v; },
+  flush() {}
+};
+void [jsonFileStorage('x.json', { debounce: 100 }), custom];
+
+const hub = createHub(id => stores.get(id), { send: m => toJSON(m), user: { id: 'u1' }, authorize: (user, storeId) => storeId.startsWith('team-') });
+hub.receive({ t: 'hello', store: 'team-1', replicaId: 'r', ops: [] });
+const tagged = tagStore({ t: 'pong' as const }, 'team-1');
+const storeName: string = tagged.store;
+
+const handlers = createHandlers({
+  stores,
+  authenticate: req => new URL(req.url).searchParams.get('token'),
+  authorize: (user, storeId) => typeof user === 'string' && storeId.length > 0,
+  maxPayload: 1024 * 1024
+});
+async function bun() {
+  await handlers.close({ reason: 'deploy' });
+  const server = serve({ stores, port: 0 });
+  const port: number = server.port;
+  await server.shutdown();
+  return port;
+}
+const sqlite = sqliteStorage('data/state.sqlite');
+const adapter: ServerStorage = sqlite.store('team-1');
+void [evicted, version2, compacted, got, released, storeName, bun, adapter];
+
+// --- Node -----------------------------------------------------------------------------
+import { serve as serveNode, createHandlers as createNodeHandlers, toRequest } from 'lazy-storage/server/node';
+import { sqliteStorage as sqliteStorageNode } from 'lazy-storage/server/sqlite-node';
+import { createServer } from 'node:http';
+
+async function node() {
+  const nodeServer = serveNode({ stores, port: 0, authenticate: req => new URL(req.url).searchParams.get('token'), request: (req, res) => res.end('app') });
+  const port = (nodeServer.address() as { port: number }).port;
+  await nodeServer.shutdown({ reason: 'deploy' });
+  const lazy = createNodeHandlers({ stores, path: '/sync', maxPayload: 1024 });
+  const http = createServer((req, res) => { const r: Request = toRequest(req); res.end(r.url); });
+  http.on('upgrade', (req, socket, head) => { lazy.upgrade(req, socket, head).then((ours: boolean) => { if (!ours) socket.destroy(); }); });
+  await lazy.close();
+  const nodeSqlite: ServerStorage = sqliteStorageNode('data/state.sqlite', { wal: false }).store('team-1');
+  return [port, nodeSqlite] as const;
+}
+void node;

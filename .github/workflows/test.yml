@@ -27,6 +27,9 @@ jobs:
       - name: Run tests
         run: npm test
 
+      - name: Check the type declarations
+        run: npm run test:types
+
   bun:
     name: Bun adapters (sqlite, WebSocket server)
     runs-on: ubuntu-latest

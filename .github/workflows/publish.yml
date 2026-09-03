@@ -31,6 +31,9 @@ jobs:
       - name: Run tests
         run: npm test
 
+      - name: Check the type declarations
+        run: npm run test:types
+
       - name: Install Bun
         # Via Bun's official npm package rather than oven-sh/setup-bun: only
         # GitHub-owned actions are used here

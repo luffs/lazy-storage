@@ -2,6 +2,32 @@
 
 All notable changes to lazy-storage are documented here. The format follows Keep a Changelog; versions follow Semantic Versioning.
 
+## [Unreleased]
+
+### Added
+
+- **TypeScript declarations** for every entry, hand-written under
+  `types/` and wired into the package exports: the client (`Client<S>`,
+  `ClientOptions`, storage adapter shapes), the server (`Store<S>`,
+  `StoreOptions`, the storage interface, registry, hub), core (clocks,
+  paths, the merge, the wire protocol as `ClientMessage` and
+  `ServerMessage`), and the Bun, Node, and SQLite entries. A type check
+  (`npm run test:types`) compiles a file that uses the API as an app
+  would, wrong usages included, and runs in CI
+- **A Node server.** `lazy-storage/server/node` serves stores over the
+  `ws` package (an optional peer dependency) with the same `serve`,
+  `createHandlers`, hooks, limits, and graceful `close` as the Bun
+  adapter; `authenticate` receives a Web `Request` built from the Node
+  request, so one function serves both. `lazy-storage/server/sqlite-node`
+  is the SQLite adapter on `node:sqlite` (Node 22.13 and later), reading
+  and writing the same files as the Bun one. Both are tested end to end
+  in the Node suite
+
+### Changed
+
+- The two SQLite adapters share one implementation (`sqlite-shared.js`);
+  the Bun one behaves as before
+
 ## [0.4.0] - 2026-09-03
 
 Row persistence on the client, deltas that survive a deploy, and the

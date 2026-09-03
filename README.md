@@ -163,6 +163,9 @@ Adapters:
   kept alongside. `sqlite.store(id)` gives a store its adapter;
   `sqlite.ids()`, `sqlite.remove(id)`, and the raw `sqlite.db` are there
   for administration.
+- `sqliteStorage(file)` from `lazy-storage/server/sqlite-node` — the same
+  adapter on `node:sqlite` (Node 22.13 and later); the two read each
+  other's files.
 - `jsonFileStorage(file)` — one JSON document per store, written
   atomically and debounced, without the delta log (a restart answers the
   first reconnects with snapshots). Fine for small single-store deployments.
@@ -346,6 +349,31 @@ for (const signal of ['SIGTERM', 'SIGINT']) {
 }
 ```
 
+### On Node
+
+The server runs on Node too, through the `ws` package (an optional peer
+dependency: install it yourself). `lazy-storage/server/node` has the same
+`serve` and `createHandlers`, with the same hooks, limits, and graceful
+`close`; `authenticate` receives a Web `Request` built from the incoming
+Node request, so one function serves both runtimes. Storage comes from
+`lazy-storage/server/sqlite-node`, the same adapter on `node:sqlite`.
+
+```js
+import { once } from 'node:events';
+import { createStore, createStores } from 'lazy-storage/server';
+import { serve } from 'lazy-storage/server/node';
+import { sqliteStorage } from 'lazy-storage/server/sqlite-node';
+
+const sqlite = sqliteStorage('data/state.sqlite');
+const stores = createStores(id => createStore({ initial, registers, storage: sqlite.store(id) }));
+const server = serve({ stores, port: 3200, authenticate, authorize });
+await once(server, 'listening');
+```
+
+To mount inside an http server you already have, handle its `upgrade`
+event with `lazy.upgrade(req, socket, head)`, which resolves to false when
+the URL is not lazy-storage's, and call `lazy.close()` on shutdown.
+
 ## Undo
 
 Each client has a lazy-watch undo manager attached with a `record` filter
@@ -397,6 +425,13 @@ replaced by a leaf) drops the affected steps.
 hub listens at `path`; the returned server gains `shutdown({ reason })`.
 `createHandlers({ stores, path, authenticate, authorize, maxPayload, onError })` →
 `{ upgrade(req, server), websocket, close({ reason }), closing }` for mounting inside your own `Bun.serve`.
+
+**Node adapter** (`lazy-storage/server/node`, needs `ws`): `serve({ stores, port, host, request, path, authenticate, authorize, maxPayload, onError })` →
+an `http.Server` with `shutdown({ reason })`; `createHandlers(options)` → `{ upgrade(req, socket, head), close({ reason }), closing, wss }`;
+`toRequest(req)` — the Web `Request` `authenticate` sees. **node:sqlite** (`lazy-storage/server/sqlite-node`): `sqliteStorage(file, { wal })`, as the Bun one.
+
+**Types**: declarations ship with the package for every entry (`types/`);
+the Node entry's need `@types/node`.
 
 **Core** (`lazy-storage/core`): the pieces both sides share — `createClock`,
 `compareTs`, `mergeOp`, `leaves`, `expandRegisters`, `rebuild`, `registerSet`,
