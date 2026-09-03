@@ -15,6 +15,12 @@ const until = async (pred, label) => {
   }
   throw new Error(`timeout: ${label}`);
 };
+// A refused handshake: Node 22's WebSocket (undici 6) fires only 'error' for
+// it, later versions 'close' too. Resolves to the ready state, never 1 (open)
+const refused = ws => new Promise(resolve => {
+  ws.onerror = () => resolve(ws.readyState);
+  ws.onclose = () => resolve(ws.readyState);
+});
 const users = {
   alice: { id: 'u1', name: 'Alice', teams: ['t1', 't2'] },
   bob: { id: 'u2', name: 'Bob', teams: ['t1'] }
@@ -56,8 +62,7 @@ test('serve: other requests reach the app, a bad token is refused, two sockets s
     assert.equal(await (await fetch(`http://localhost:${port}/health`)).text(), 'ok');
     assert.equal(await (await fetch(`http://localhost:${port}/ws?token=nope`)).text(), 'other', 'a plain GET is not an upgrade; the app answers');
     const bad = new WebSocket(`ws://localhost:${port}/ws?token=nope`);
-    const badClose = await new Promise(resolve => { bad.onclose = e => resolve(e.code); bad.onerror = () => {}; });
-    assert.ok(badClose >= 1000, `the 401 upgrade closed the socket (${badClose})`);
+    assert.notEqual(await refused(bad), 1, 'the 401 upgrade never opened the socket');
 
     const alice = connect(port, 'alice');
     const bob = connect(port, 'bob');
@@ -140,8 +145,7 @@ test('createHandlers mounts on an existing http server; maxPayload closes a sock
     assert.deepEqual(faults, ['factory boom']);
 
     const elsewhere = new WebSocket(`ws://localhost:${port}/other`);
-    const otherClose = await new Promise(resolve => { elsewhere.onclose = e => resolve(e.code); elsewhere.onerror = () => {}; });
-    assert.ok(otherClose >= 1000, 'a socket on another path is not ours');
+    assert.notEqual(await refused(elsewhere), 1, 'a socket on another path is not ours');
     boom.dispose();
     fine.dispose();
     connection.close();

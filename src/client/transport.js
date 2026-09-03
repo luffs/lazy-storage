@@ -37,8 +37,18 @@ export function webSocketTransport(url, { WebSocket: WS = globalThis.WebSocket }
       }
       t.onmessage?.(msg);
     };
-    socket.onclose = () => t.onclose?.();
-    socket.onerror = () => { /* 'close' follows and drives the retry */ };
+    let done = false;
+    const closed = () => {
+      if (done) return;
+      done = true;
+      t.onclose?.();
+    };
+    socket.onclose = closed;
+    // Node 22's WebSocket (undici 6) fires 'error' for a failed handshake
+    // with no 'close' after it, and the socket stays CONNECTING; the close
+    // is reported here so the retry goes on. Where 'close' does follow the
+    // error, as in browsers and Node 24+, it is deduplicated
+    socket.onerror = () => { if (socket.readyState === 0) closed(); };
     return t;
   };
 }

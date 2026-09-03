@@ -2,6 +2,20 @@
 
 All notable changes to lazy-storage are documented here. The format follows Keep a Changelog; versions follow Semantic Versioning.
 
+## [Unreleased]
+
+### Fixed
+
+- **A client on Node 22 no longer stalls after one refused connection.**
+  Node 22's global `WebSocket` (undici 6) fires only `error` for a failed
+  handshake, never `close`, so `webSocketTransport` never reported the
+  close and the connection's retry loop stopped after its first attempt
+  against a server that was down. The transport now reports the close
+  itself when the error arrives while the socket is still connecting, and
+  deduplicates the `close` that browsers and Node 24+ fire after it. The
+  Node server test waited on the same missing event and hung the Node 22
+  CI job until it was cancelled
+
 ## [0.5.1] - 2026-09-03
 
 ### Changed
