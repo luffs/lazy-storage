@@ -1,0 +1,94 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shared list</title>
+<style>
+  body { font: 16px/1.4 system-ui, sans-serif; max-width: 32rem; margin: 3rem auto; padding: 0 1rem; color: #222; background: #fff; }
+  h1 { font-size: 1.4rem; }
+  #status { color: #666; font-size: 0.9rem; min-height: 1.4em; }
+  form { display: flex; gap: 0.5rem; margin: 1rem 0; }
+  input { flex: 1; font: inherit; padding: 0.4rem 0.6rem; }
+  button { font: inherit; padding: 0.4rem 0.8rem; }
+  ul { list-style: none; padding: 0; }
+  li { display: flex; align-items: center; gap: 0.6rem; padding: 0.35rem 0; border-bottom: 1px solid #eee; }
+  li.done span { text-decoration: line-through; color: #999; }
+  li span { flex: 1; }
+  li button { padding: 0.1rem 0.5rem; }
+  #presence { color: #666; font-size: 0.9rem; }
+</style>
+
+<h1>Shared list</h1>
+<p id="status"></p>
+<form id="add"><input id="title" placeholder="Add a task" autocomplete="off" autofocus><button>Add</button></form>
+<ul id="tasks"></ul>
+<p id="presence"></p>
+
+<script type="importmap">
+  { "imports": { "lazy-storage": "/lib/lazy-storage/index.js", "lazy-watch": "/lib/lazy-watch/lazy-watch.js" } }
+</script>
+<script type="module">
+  import { createClient, createConnection, webSocketTransport, localStorageOutbox } from 'lazy-storage';
+
+  // Who we are: `?name=` in the URL, else what this browser remembers, else ask
+  const name = new URLSearchParams(location.search).get('name') || localStorage.getItem('example:name') || prompt('Your name?') || 'anonymous';
+  localStorage.setItem('example:name', name);
+
+  // One socket, one store on it. The outbox and a cache of the state live
+  // in localStorage, so a reload while offline keeps working
+  const connection = createConnection({
+    transport: webSocketTransport(() => `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws?name=${encodeURIComponent(name)}`)
+  });
+  const db = createClient({
+    connection,
+    store: 'shared',
+    initial: { tasks: {}, order: [] },
+    registers: ['order'],
+    storage: localStorageOutbox('example:shared')
+  });
+  const tasks = db.collection('tasks');
+
+  const $ = id => document.getElementById(id);
+  const render = () => {
+    const list = $('tasks');
+    list.replaceChildren(...db.state.order.filter(id => tasks.has(id)).map(id => {
+      const task = tasks.get(id);
+      const li = document.createElement('li');
+      li.className = task.done ? 'done' : '';
+      const box = document.createElement('input');
+      box.type = 'checkbox';
+      box.checked = Boolean(task.done);
+      box.onchange = () => { task.done = box.checked; };          // an ordinary write: synced, undoable
+      const label = document.createElement('span');
+      label.textContent = task.title;
+      const remove = document.createElement('button');
+      remove.textContent = 'x';
+      remove.onclick = () => { tasks.remove(id); db.state.order = db.state.order.filter(x => x !== id); };
+      li.append(box, label, remove);
+      return li;
+    }));
+  };
+  const showStatus = () => {
+    $('status').textContent = db.status === 'online' ? `Online as ${name}` : db.status === 'connecting' ? 'Connecting…' : `Offline as ${name}${db.pending ? ` (${db.pending} change${db.pending > 1 ? 's' : ''} waiting)` : ''}`;
+  };
+
+  $('add').onsubmit = event => {
+    event.preventDefault();
+    const title = $('title').value.trim();
+    if (!title) return;
+    const id = tasks.add({ title, done: false });
+    db.state.order = [...db.state.order, id];                       // the register is replaced as a whole
+    $('title').value = '';
+  };
+  document.addEventListener('keydown', event => {
+    if ((event.metaKey || event.ctrlKey) && event.key === 'z') { event.preventDefault(); event.shiftKey ? db.redo() : db.undo(); }
+  });
+
+  db.watch(render);
+  db.on('status', showStatus);
+  db.on('sync', showStatus);
+  db.on('presence', users => { $('presence').textContent = users.length ? `Here now: ${users.join(', ')}` : ''; });
+  db.on('error', err => console.warn('lazy-storage:', err.code ?? '', err.message));
+  render();
+  showStatus();
+  db.connect();
+</script>

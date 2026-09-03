@@ -2,3 +2,7 @@ node_modules/
 data/
 *.tmp
 .idea/
+
+# Example and benchmark scratch data
+examples/**/*.sqlite
+examples/**/*.sqlite-*

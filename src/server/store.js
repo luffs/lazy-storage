@@ -68,6 +68,7 @@ import { createClock, isTimestamp } from '../core/hlc.js';
 import { registerSet, pathKey, parsePathKey, setAt, valueAt } from '../core/paths.js';
 import { leaves, assertModel, rebuild } from '../core/model.js';
 import { mergeOp, compactTombstones } from '../core/merge.js';
+import { ClockMap } from '../core/clocks.js';
 import { memoryStorage } from './storage.js';
 import { toJSON } from './wire.js';
 import { randomId } from '../core/ids.js';
@@ -189,7 +190,7 @@ export function createStore({
   const locked = registerSet(readOnly);
   const saved = storage.load();
   const state = new LazyWatch(rebuild(initial, saved ? saved.rows.map(([key, row]) => [key, row.deleted ? null : row.value]) : []));
-  const clocks = new Map(saved ? saved.rows.map(([key, row]) => [key, row.deleted ? { ts: row.ts, deleted: true } : { ts: row.ts }]) : []);
+  const clocks = new ClockMap(saved ? saved.rows.map(([key, row]) => [key, row.deleted ? { ts: row.ts, deleted: true } : { ts: row.ts }]) : []);
   const replicas = loadReplicas(saved, time());
   let version = saved ? saved.version : 0;
   // Versions count from 0 for the life of a store's storage. The epoch

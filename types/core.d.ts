@@ -106,6 +106,14 @@ export interface MergeResult {
   dropped: string[];
 }
 
+/** The clock table with a children index, so a write finds its descendants without scanning every key */
+export class ClockMap extends Map<string, ClockEntry> {
+  constructor(entries?: Iterable<[string, ClockEntry]>);
+  /** Keys of every entry strictly under `path` */
+  descendants(path: Path): IterableIterator<string>;
+}
+
+/** With a ClockMap descendants come from its index; with a plain Map every key is scanned */
 export function mergeOp(clocks: Map<string, ClockEntry>, ts: Timestamp, diff: Diff, registers: RegisterSet): MergeResult;
 /** Forget tombstones older than a timestamp; returns the removed keys */
 export function compactTombstones(clocks: Map<string, ClockEntry>, olderThan: Timestamp): string[];

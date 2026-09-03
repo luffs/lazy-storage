@@ -31,7 +31,9 @@ const { Utils } = LazyWatch;
 
 /**
  * Merge one op into the clocks, deciding per leaf.
- * @param {Map<string, {ts: any[], deleted?: boolean}>} clocks - mutated
+ * @param {Map<string, {ts: any[], deleted?: boolean}>} clocks - mutated; a
+ *   ClockMap (see clocks.js) finds descendants through its index, a plain
+ *   Map by scanning every key
  * @param {any[]} ts - the op's timestamp
  * @param {Object} diff - the op's diff (validated against the model here)
  * @param {Set<string>} registers
@@ -101,9 +103,8 @@ function acceptDelete(clocks, path, ts, dropped) {
   const key = pathKey(path);
   const own = clocks.get(key);
   if (own && compareTs(own.ts, ts) >= 0) return false;
-  const prefix = descendantPrefix(path);
-  for (const [k, entry] of clocks) {
-    if (k.startsWith(prefix) && compareTs(entry.ts, ts) >= 0) return false;
+  for (const k of descendants(clocks, path)) {
+    if (compareTs(clocks.get(k).ts, ts) >= 0) return false;
   }
   dropDescendants(clocks, path, dropped);
   clocks.set(key, { ts, deleted: true });
@@ -111,13 +112,20 @@ function acceptDelete(clocks, path, ts, dropped) {
 }
 
 function dropDescendants(clocks, path, dropped) {
-  const prefix = descendantPrefix(path);
-  for (const k of [...clocks.keys()]) {
-    if (k.startsWith(prefix)) {
-      clocks.delete(k);
-      dropped.add(k);
-    }
+  for (const k of [...descendants(clocks, path)]) {
+    clocks.delete(k);
+    dropped.add(k);
   }
+}
+
+/**
+ * The keys strictly under a path: through the index when the clocks are
+ * a ClockMap (the store's), by scanning when they are a plain Map
+ */
+function descendants(clocks, path) {
+  if (typeof clocks.descendants === 'function') return clocks.descendants(path);
+  const prefix = descendantPrefix(path);
+  return [...clocks.keys()].filter(k => k.startsWith(prefix));
 }
 
 /**

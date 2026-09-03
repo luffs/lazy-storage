@@ -475,6 +475,20 @@ Authentication is a hook, not a system: lazy-storage asks you who a request
 is and whether they may open a store, and stores the answer on the session.
 Users, tokens, and memberships stay in your application.
 
+## Examples and benchmark
+
+`examples/` holds small, complete programs that run from a checkout: a
+shared list in the browser over a Bun server (`bun examples/basic/server.js`),
+the same page served by Node (`node examples/node/server.js`), and a
+client that follows a store from a Bun or Node process
+(`bun examples/mirror.js`). See `examples/README.md`.
+
+`npm run bench` times the paths that matter: the merge with and without
+the gates, a broadcast to a hundred and a thousand sockets, a client's
+local op on each kind of storage, and a reconnect answered with a
+snapshot versus a delta. It reports the median of several rounds; compare
+runs on the same machine.
+
 ## Testing
 
 ```bash

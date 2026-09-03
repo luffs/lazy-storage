@@ -83,18 +83,20 @@ export function assertModel(diff, registers) {
  */
 export function expandRegisters(diff, registers, state) {
   if (registers.size === 0) return diff;
-  const live = LazyWatch.isProxy(state) ? LazyWatch.snapshot(state) : state;
+  // Only the registers the diff touches are read, and each is copied on
+  // its own: snapshotting the whole state here would make every local
+  // batch cost as much as the state is large
+  const copy = value => {
+    if (value === undefined) return null;
+    if (value === null || typeof value !== 'object') return value;
+    return LazyWatch.isProxy(value) ? LazyWatch.snapshot(value) : structuredClone(value);
+  };
   const walk = (node, path) => {
     if (!Utils.isPlainObject(node)) return node;
     const out = {};
     for (const key of Object.keys(node)) {
       const p = [...path, key];
-      if (registers.matches(p)) {
-        const value = valueAt(live, p);
-        out[key] = value === undefined ? null : structuredClone(value);
-      } else {
-        out[key] = walk(node[key], p);
-      }
+      out[key] = registers.matches(p) ? copy(valueAt(state, p)) : walk(node[key], p);
     }
     return out;
   };

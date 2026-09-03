@@ -22,11 +22,34 @@ All notable changes to lazy-storage are documented here. The format follows Keep
   is the SQLite adapter on `node:sqlite` (Node 22.13 and later), reading
   and writing the same files as the Bun one. Both are tested end to end
   in the Node suite
+- **Examples.** `examples/basic` is a shared list in the browser over a
+  Bun server, `examples/node` the same page served by Node, and
+  `examples/mirror.js` a client running in a Bun or Node process; all run
+  from a checkout with no build step
+- **A benchmark.** `npm run bench` times the merge, the gates, broadcasts
+  to many sockets, a client's local op on each kind of storage, and
+  reconnects answered with a snapshot versus a delta, as medians over
+  several rounds
 
 ### Changed
 
 - The two SQLite adapters share one implementation (`sqlite-shared.js`);
   the Bun one behaves as before
+
+### Fixed
+
+- **Every write cost as much as the store was large.** The merge found
+  the descendants of a path by scanning every clock key, so a one-leaf
+  op into a store of 10 000 tasks took half a millisecond and a
+  ten-leaf record add fifteen. The clock table now keeps a children
+  index (`ClockMap` in core); the same ops take 29 and 64 microseconds.
+  Found by the new benchmark
+- **Every local op on a client with registers snapshotted the whole
+  state.** `expandRegisters` copied the entire state to read the
+  registers a diff touched; it now copies only those. A client op on a
+  thousand-task state went from 1.1 ms to 13 µs on the row adapter, and
+  the same saving applies to every browser tab of an app that declares a
+  register
 
 ## [0.4.0] - 2026-09-03
 
