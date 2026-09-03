@@ -2,6 +2,19 @@
 
 All notable changes to lazy-storage are documented here. The format follows Keep a Changelog; versions follow Semantic Versioning.
 
+## [Unreleased]
+
+### Fixed
+
+- A store factory (or a migration inside it) that threw while a hub opened
+  a store propagated out of the message handler and, under Bun, took the
+  server process down. The hub now refuses that store with a `closed`
+  message (code `unknown-store`, carrying the error's message), logs the
+  fault, and leaves the connection and its other stores alone; a
+  synchronously throwing `authorize` is treated as a refusal. The Bun
+  adapter additionally catches anything else thrown while handling a
+  message and answers an `error` instead of crashing
+
 ## [0.2.1] - 2026-09-03
 
 A client restarted while offline now starts from the state it last saw.

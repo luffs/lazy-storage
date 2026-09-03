@@ -52,7 +52,13 @@ export function createHandlers({ stores, path = '/ws', authenticate, authorize }
         return ws.send(JSON.stringify({ t: 'error', message: 'Expected JSON' }));
       }
       if (!LazyWatch.Utils.isPlainObject(msg)) return ws.send(JSON.stringify({ t: 'error', message: 'Expected a message object' }));
-      hubs.get(ws)?.receive(msg);
+      // A bug below this point must not take the process down with it
+      try {
+        hubs.get(ws)?.receive(msg);
+      } catch (err) {
+        console.error('lazy-storage: unhandled error while handling a message:', err);
+        ws.send(JSON.stringify({ t: 'error', store: msg.store, message: 'Something went wrong' }));
+      }
     },
     close(ws) {
       hubs.get(ws)?.close();

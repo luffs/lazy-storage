@@ -67,10 +67,24 @@ export function createHub(resolveStore, { send, user, authorize } = {}) {
       if (sessions.has(id)) return deliver(id, msg);
       if (pending.has(id)) return void pending.get(id).push(msg);
 
-      const store = resolveStore(id);
+      // A store that cannot be opened (a factory or migration that throws)
+      // is refused like an unknown one and logged as the server fault it
+      // is; the connection and its other stores are unaffected
+      let store;
+      try {
+        store = resolveStore(id);
+      } catch (err) {
+        console.error(`lazy-storage: opening store "${id}" failed:`, err);
+        return refuse(id, 'unknown-store', `Store "${id}" could not be opened: ${err?.message ?? err}`);
+      }
       if (!store) return refuse(id, 'unknown-store', `Unknown store "${id}"`);
       const forbidden = () => refuse(id, 'forbidden', `Not allowed to access store "${id}"`);
-      const verdict = authorize ? authorize(user, id, store) : true;
+      let verdict;
+      try {
+        verdict = authorize ? authorize(user, id, store) : true;
+      } catch (err) {
+        return refuse(id, 'forbidden', err?.message || `Not allowed to access store "${id}"`);
+      }
       if (verdict && typeof verdict.then === 'function') {
         pending.set(id, [msg]);
         verdict.then(

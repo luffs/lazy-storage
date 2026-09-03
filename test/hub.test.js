@@ -117,6 +117,31 @@ test('an unknown store is closed for that client only; the other stays online', 
   assert.equal(shared.status, 'open');
 });
 
+test('a store factory that throws refuses that store only, without taking the connection down', async () => {
+  const { net, connect, attach } = setup(id => {
+    if (id === 'broken') throw new Error('migration failed: arrays are not allowed');
+    return createStore({ initial: INITIAL, now: fakeTime() });
+  });
+  const shared = connect();
+  const errors = [];
+  const originalError = console.error;
+  console.error = (...args) => errors.push(args.join(' '));
+  try {
+    const ok = attach(shared, 'team-x', 'x1');
+    const broken = attach(shared, 'broken', 'b1');
+    const closed = [];
+    broken.on('closed', info => closed.push(info));
+    await net.settle();
+    assert.equal(ok.status, 'online', 'the healthy store on the same socket is unaffected');
+    assert.equal(broken.status, 'offline');
+    assert.deepEqual(closed, [{ code: 'unknown-store', message: 'Store "broken" could not be opened: migration failed: arrays are not allowed' }]);
+    assert.equal(shared.status, 'open');
+    assert.ok(errors.some(e => e.includes('opening store "broken" failed')), 'the server fault is logged');
+  } finally {
+    console.error = originalError;
+  }
+});
+
 test('one client per store per connection', () => {
   const { connect } = setup();
   const shared = connect();
