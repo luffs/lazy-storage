@@ -15,6 +15,10 @@
 // - A write that changes a container into a leaf (or a register) drops the
 //   descendant entries the container had.
 //
+// Besides the accepted diff, the merge reports exactly which entries it
+// set and dropped, so a storage adapter can persist the op as row upserts
+// and deletes rather than rewriting the whole state.
+//
 // Tombstones are the only entries that grow without bound. The authority
 // may compact them (see `compactTombstones`) once every replica that
 // could still hold an older write has synced.
@@ -31,44 +35,56 @@ const { Utils } = LazyWatch;
  * @param {any[]} ts - the op's timestamp
  * @param {Object} diff - the op's diff (validated against the model here)
  * @param {Set<string>} registers
- * @returns {{ accepted: Object|null, rejected: string[][] }} accepted diff
- *   (null when nothing won) and the paths of rejected leaves
+ * @returns {{
+ *   accepted: Object|null,   rebuilt diff of the winning leaves (null when none)
+ *   rejected: string[][],    paths of the losing leaves
+ *   won: Array<[string[], any]>,  the winning leaves themselves
+ *   dropped: string[]        clock keys removed (descendants of a winning
+ *                            write or deletion, lifted tombstones)
+ * }}
  */
 export function mergeOp(clocks, ts, diff, registers) {
   const entries = leaves(diff, registers);
-  liftTombstones(diff, clocks, ts, []);
+  const dropped = new Set();
+  liftTombstones(diff, clocks, ts, [], dropped);
 
   const won = [];
   const rejected = [];
   for (const [path, value] of entries) {
     const ok = value === null
-      ? acceptDelete(clocks, path, ts)
-      : acceptWrite(clocks, path, ts);
-    if (ok) won.push([path, value]);
-    else rejected.push(path);
+      ? acceptDelete(clocks, path, ts, dropped)
+      : acceptWrite(clocks, path, ts, dropped);
+    if (ok) {
+      won.push([path, value]);
+      dropped.delete(pathKey(path));
+    } else {
+      rejected.push(path);
+    }
   }
-  return { accepted: won.length ? fromLeaves(won) : null, rejected };
+  return { accepted: won.length ? fromLeaves(won) : null, rejected, won, dropped: [...dropped] };
 }
 
 /**
  * A newer object carrying an `id` at a tombstoned path re-adds the record:
  * lift the tombstone so its leaves can be judged on their own timestamps.
  */
-function liftTombstones(node, clocks, ts, path) {
+function liftTombstones(node, clocks, ts, path, dropped) {
   if (!Utils.isPlainObject(node)) return;
   for (const key of Object.keys(node)) {
     const value = node[key];
     if (!Utils.isPlainObject(value)) continue;
     const p = [...path, key];
-    const entry = clocks.get(pathKey(p));
+    const k = pathKey(p);
+    const entry = clocks.get(k);
     if (entry && entry.deleted && Object.hasOwn(value, 'id') && compareTs(ts, entry.ts) > 0) {
-      clocks.delete(pathKey(p));
+      clocks.delete(k);
+      dropped.add(k);
     }
-    liftTombstones(value, clocks, ts, p);
+    liftTombstones(value, clocks, ts, p, dropped);
   }
 }
 
-function acceptWrite(clocks, path, ts) {
+function acceptWrite(clocks, path, ts, dropped) {
   for (let i = 1; i < path.length; i++) {
     const ancestor = clocks.get(pathKey(path.slice(0, i)));
     if (ancestor && ancestor.deleted) return false;
@@ -76,12 +92,12 @@ function acceptWrite(clocks, path, ts) {
   const key = pathKey(path);
   const own = clocks.get(key);
   if (own && compareTs(own.ts, ts) >= 0) return false;
-  dropDescendants(clocks, path);
+  dropDescendants(clocks, path, dropped);
   clocks.set(key, { ts });
   return true;
 }
 
-function acceptDelete(clocks, path, ts) {
+function acceptDelete(clocks, path, ts, dropped) {
   const key = pathKey(path);
   const own = clocks.get(key);
   if (own && compareTs(own.ts, ts) >= 0) return false;
@@ -89,15 +105,18 @@ function acceptDelete(clocks, path, ts) {
   for (const [k, entry] of clocks) {
     if (k.startsWith(prefix) && compareTs(entry.ts, ts) >= 0) return false;
   }
-  dropDescendants(clocks, path);
+  dropDescendants(clocks, path, dropped);
   clocks.set(key, { ts, deleted: true });
   return true;
 }
 
-function dropDescendants(clocks, path) {
+function dropDescendants(clocks, path, dropped) {
   const prefix = descendantPrefix(path);
   for (const k of [...clocks.keys()]) {
-    if (k.startsWith(prefix)) clocks.delete(k);
+    if (k.startsWith(prefix)) {
+      clocks.delete(k);
+      dropped.add(k);
+    }
   }
 }
 
@@ -107,13 +126,14 @@ function dropDescendants(clocks, path) {
  * such a write would then be rejected on timestamp by nothing and could
  * resurrect a field. Live entries are never compacted: they are the
  * last-writer-wins state itself.
+ * @returns {string[]} the removed keys
  */
 export function compactTombstones(clocks, olderThan) {
-  let removed = 0;
+  const removed = [];
   for (const [k, entry] of [...clocks]) {
     if (entry.deleted && compareTs(entry.ts, olderThan) < 0) {
       clocks.delete(k);
-      removed++;
+      removed.push(k);
     }
   }
   return removed;

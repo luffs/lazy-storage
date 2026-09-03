@@ -5,6 +5,12 @@
 // replica (so a resent op is ignored). It is transport-agnostic: a
 // session is created with a `send` function and fed parsed messages.
 //
+// Persistence is row-oriented (see storage.js): every accepted op is
+// committed as the rows it won and the clock entries it dropped. On load
+// the state is `initial` with the persisted rows applied on top, so
+// `initial` acts as the skeleton (the containers an app expects to exist)
+// and rows carry the data.
+//
 // Protocol (client -> server):
 //   { t: 'hello', replicaId, ops: [op...] }   connect or reconnect: the
 //       client's whole outbox; the server merges it and replies with a
@@ -25,16 +31,28 @@
 //   { t: 'pong' }
 import { LazyWatch } from 'lazy-watch';
 import { createClock, isTimestamp } from '../core/hlc.js';
-import { registerSet, pathKey, setAt, valueAt } from '../core/paths.js';
+import { registerSet, pathKey, parsePathKey, setAt, valueAt, deleteAt } from '../core/paths.js';
 import { assertModel } from '../core/model.js';
 import { mergeOp, compactTombstones } from '../core/merge.js';
 import { memoryStorage } from './storage.js';
 
 const { Utils } = LazyWatch;
 
+/** `initial` with the persisted rows applied on top, shallow paths first */
+function rebuild(initial, rows) {
+  const state = structuredClone(initial);
+  const ordered = rows.map(([key, row]) => [parsePathKey(key), row]).sort((a, b) => a[0].length - b[0].length);
+  for (const [path, row] of ordered) {
+    if (row.deleted) deleteAt(state, path);
+    else setAt(state, path, structuredClone(row.value));
+  }
+  return state;
+}
+
 /**
  * @param {Object} [options]
- * @param {Object} [options.initial] - state when nothing is persisted
+ * @param {Object} [options.initial] - the skeleton: state when nothing is
+ *   persisted, and the base persisted rows are applied onto
  * @param {Array<string|string[]>} [options.registers] - paths whose value
  *   is one unit (arrays live only here)
  * @param {Object} [options.storage] - a storage adapter (default: memory)
@@ -43,22 +61,13 @@ const { Utils } = LazyWatch;
 export function createStore({ initial = {}, registers = [], storage = memoryStorage(), now } = {}) {
   const regs = registerSet(registers);
   const saved = storage.load();
-  const state = new LazyWatch(saved ? saved.state : structuredClone(initial));
-  const clocks = new Map(saved ? saved.clocks : []);
+  const state = new LazyWatch(rebuild(initial, saved ? saved.rows : []));
+  const clocks = new Map(saved ? saved.rows.map(([key, row]) => [key, row.deleted ? { ts: row.ts, deleted: true } : { ts: row.ts }]) : []);
   const seqs = new Map(saved ? Object.entries(saved.seqs) : []);
   let version = saved ? saved.version : 0;
   const clock = createClock('server', now);
   const sessions = new Set();
   let serverSeq = seqs.get('server') ?? 0;
-
-  function persist() {
-    storage.save({
-      state: LazyWatch.snapshot(state),
-      clocks: [...clocks],
-      seqs: Object.fromEntries(seqs),
-      version
-    });
-  }
 
   function broadcast(message) {
     for (const s of sessions) s.send(message);
@@ -88,7 +97,7 @@ export function createStore({ initial = {}, registers = [], storage = memoryStor
     const diff = {};
     // Shallow entries first so a deletion is not overwritten by a deeper value
     for (const [key, value] of [...entries].sort((a, b) => a[0].length - b[0].length)) {
-      const path = JSON.parse(key);
+      const path = parsePathKey(key);
       if (path.slice(0, -1).some((_, i) => entries.get(pathKey(path.slice(0, i + 1))) === null)) continue;
       setAt(diff, path, value);
     }
@@ -115,13 +124,18 @@ export function createStore({ initial = {}, registers = [], storage = memoryStor
     seqs.set(op.replicaId, op.seq);
     clock.receive(op.ts);
 
-    const { accepted, rejected } = mergeOp(clocks, op.ts, op.diff, regs);
+    const { accepted, rejected, won, dropped } = mergeOp(clocks, op.ts, op.diff, regs);
     if (accepted) {
       LazyWatch.patch(state, accepted);
       version++;
-      broadcast({ t: 'patch', diff: accepted, ts: op.ts, version });
     }
-    persist();
+    storage.commit({
+      upserts: won.map(([path, value]) => [pathKey(path), value === null ? { ts: op.ts, deleted: true } : { value, ts: op.ts }]),
+      deletes: dropped,
+      replica: { id: op.replicaId, seq: op.seq },
+      version
+    });
+    if (accepted) broadcast({ t: 'patch', diff: accepted, ts: op.ts, version });
     return { duplicate: false, accepted, rejected, correction: rejected.length ? correction(rejected) : null };
   }
 
@@ -191,7 +205,12 @@ export function createStore({ initial = {}, registers = [], storage = memoryStor
     snapshot: () => LazyWatch.snapshot(state),
     /** Subscribe to accepted changes (a LazyWatch listener on the state) */
     on: (listener, options) => LazyWatch.on(state, listener, options),
-    compactTombstones: olderThan => { const n = compactTombstones(clocks, olderThan); if (n) persist(); return n; },
+    /** Forget tombstones older than a timestamp; returns how many */
+    compactTombstones(olderThan) {
+      const removed = compactTombstones(clocks, olderThan);
+      if (removed.length) storage.commit({ upserts: [], deletes: removed, version });
+      return removed.length;
+    },
     flush: () => storage.flush(),
     dispose() {
       storage.flush();

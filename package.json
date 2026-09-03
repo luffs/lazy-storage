@@ -8,7 +8,8 @@
     "./core": "./src/core/index.js",
     "./client": "./src/client/index.js",
     "./server": "./src/server/index.js",
-    "./server/bun": "./src/server/bun.js"
+    "./server/bun": "./src/server/bun.js",
+    "./server/sqlite": "./src/server/sqlite-bun.js"
   },
   "files": [
     "src",
@@ -20,6 +21,7 @@
   },
   "scripts": {
     "test": "node --test \"test/*.test.js\"",
+    "test:bun": "bun test/bun/sqlite.test.js",
     "fuzz": "node test/fuzz/run.js"
   },
   "keywords": [

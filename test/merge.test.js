@@ -86,7 +86,24 @@ test('compactTombstones forgets old tombstones and keeps live entries', () => {
   const clocks = new Map();
   mergeOp(clocks, T(10), { a: 1, b: 2 }, NONE);
   mergeOp(clocks, T(20), { a: null }, NONE);
-  assert.equal(compactTombstones(clocks, T(15)), 0, 'the tombstone is newer than the cutoff');
-  assert.equal(compactTombstones(clocks, T(25)), 1);
+  assert.deepEqual(compactTombstones(clocks, T(15)), [], 'the tombstone is newer than the cutoff');
+  assert.deepEqual(compactTombstones(clocks, T(25)), ['["a"]']);
   assert.deepEqual([...clocks.keys()], ['["b"]']);
+});
+
+test('mergeOp reports the leaves it won and the entries it dropped, for row-oriented storage', () => {
+  const clocks = new Map();
+  mergeOp(clocks, T(10), { tasks: { a: { title: 'A', done: false, sub: { x: 1 } } } }, NONE);
+  // Deleting the record drops its three leaf entries and sets one tombstone
+  let r = mergeOp(clocks, T(20), { tasks: { a: null } }, NONE);
+  assert.deepEqual(r.won, [[['tasks', 'a'], null]]);
+  assert.deepEqual(r.dropped.sort(), ['["tasks","a","done"]', '["tasks","a","sub","x"]', '["tasks","a","title"]']);
+  // Re-adding lifts the tombstone (dropped) and wins the new leaves
+  r = mergeOp(clocks, T(30), { tasks: { a: { id: 'a', title: 'B' } } }, NONE);
+  assert.deepEqual(r.dropped, ['["tasks","a"]']);
+  assert.deepEqual(r.won, [[['tasks', 'a', 'id'], 'a'], [['tasks', 'a', 'title'], 'B']]);
+  // A losing op wins nothing and drops nothing
+  r = mergeOp(clocks, T(5), { tasks: { a: { title: 'old' } } }, NONE);
+  assert.deepEqual(r.won, []);
+  assert.deepEqual(r.dropped, []);
 });

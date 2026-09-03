@@ -35,6 +35,14 @@ export function setAt(target, path, value) {
   return target;
 }
 
+/** Remove the property at `path` if it exists; ancestors are left alone */
+export function deleteAt(target, path) {
+  const parent = valueAt(target, path.slice(0, -1));
+  if (parent !== null && typeof parent === 'object' && !Array.isArray(parent)) {
+    delete parent[path[path.length - 1]];
+  }
+}
+
 /** Own-property walk; `undefined` when the path does not resolve */
 export function valueAt(root, path) {
   let node = root;

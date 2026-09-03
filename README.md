@@ -28,16 +28,22 @@ db.undo();
 ```
 
 ```js
-import { createStore, jsonFileStorage } from 'lazy-storage/server';
+import { createStore, createStores } from 'lazy-storage/server';
+import { sqliteStorage } from 'lazy-storage/server/sqlite';
 import { serve } from 'lazy-storage/server/bun';
 
-const store = createStore({
+// Any number of stores in one SQLite file, one row per leaf
+const sqlite = sqliteStorage('data/app.sqlite');
+const stores = createStores(id => createStore({
   initial: { tasks: {}, order: [] },
   registers: ['order'],
-  storage: jsonFileStorage('data/todo.json')
-});
-serve({ store, port: 3200 });
+  storage: sqlite.store(id)
+}));
+serve({ stores, port: 3200 }); // clients connect to ws://host:3200/ws/<storeId>
 ```
+
+For a single store, `createStore` with `jsonFileStorage('data/todo.json')`
+and `serve({ store })` serves it at `/ws`.
 
 ## The model
 
@@ -88,6 +94,43 @@ reload while offline: the replica id, sequence numbers, and pending ops
 are restored with the outbox, and the server ignores an op it has already
 seen.
 
+## Persistence
+
+A store persists as **rows, one per leaf path**: a live row holds the
+value and the timestamp that won it, a tombstone holds the timestamp only.
+Every accepted op commits exactly the rows it won and the entries it
+dropped, inside one transaction, so the write cost of an edit is a few
+rows rather than the state. On load the state is `initial` with the rows
+applied on top: `initial` is the skeleton an app expects to exist (its
+top-level containers), the rows carry the data, and a container added to
+`initial` later simply appears.
+
+Adapters:
+
+- `sqliteStorage(file)` (`lazy-storage/server/sqlite`, Bun) — one file for
+  any number of stores, keyed by `(store, path)`, WAL mode. `sqlite.store(id)`
+  gives a store its adapter; `sqlite.ids()`, `sqlite.remove(id)`, and the
+  raw `sqlite.db` are there for administration.
+- `jsonFileStorage(file)` — one JSON document per store, written
+  atomically and debounced. Fine for small single-store deployments.
+- `memoryStorage()` — nothing survives the process; for tests.
+
+Tombstones are the only rows that grow without bound;
+`store.compactTombstones(olderThan)` forgets those older than a timestamp
+once every replica that could still send an older write has synced.
+
+## Multiple stores
+
+`createStores(id => store)` is a registry: it builds a store on first use
+through your factory (typically `createStore` with a per-id storage
+adapter) and keeps it live; `stores.release(id)` disposes one, closing
+its sessions, and the persisted rows stay. Store ids are restricted to a
+URL- and filename-safe alphabet (`isStoreId`), so an id can name a path
+segment or a table key without escaping. The Bun adapter routes
+`/ws/<storeId>` to the registry; the id lives in the URL rather than in
+the protocol so an authenticating wrapper can look at it before a session
+exists.
+
 ## Undo
 
 Each client has a lazy-watch undo manager attached with a `record` filter
@@ -118,8 +161,13 @@ replaced by a leaf) drops the affected steps.
 - `store.on(listener)`, `store.snapshot()`, `store.state`, `store.version`
 - `store.compactTombstones(olderThan)`, `store.flush()`, `store.dispose()`
 - `memoryStorage()`, `jsonFileStorage(path, { debounce })`
+- `createStores(factory)` → `get(id)`, `has(id)`, `ids()`, `release(id)`, `dispose()`; `isStoreId(id)`
 
-**Bun adapter** (`lazy-storage/server/bun`): `serve({ store, port, path, fetch })`.
+**SQLite** (`lazy-storage/server/sqlite`, Bun): `sqliteStorage(file, { wal })` →
+`store(id)`, `ids()`, `remove(id)`, `db`, `close()`.
+
+**Bun adapter** (`lazy-storage/server/bun`): `serve({ store, stores, port, path, fetch })` —
+a single `store` at `path`, or `stores` (a registry or `id => store|null`) at `path/<id>`.
 
 **Core** (`lazy-storage/core`): the pieces both sides share — `createClock`,
 `compareTs`, `mergeOp`, `leaves`, `expandRegisters`, `registerSet`,
@@ -143,14 +191,15 @@ concurrent edits to the *same* field (the later one wins) and it is not a
 text CRDT. For collaborative documents, embed a purpose-built library for
 the document and keep the surrounding state here.
 
-Authentication, per-user permissions, and multiple stores per server are
-not part of this first version; the Bun adapter takes a `fetch` handler
-for anything beside the socket, and `store.session` is transport-agnostic
-so an authenticated wrapper can decide who gets a session.
+Authentication and per-user permissions are not part of this version; the
+Bun adapter takes a `fetch` handler for anything beside the socket, and
+`store.session` is transport-agnostic so an authenticated wrapper can
+decide who gets a session on which store.
 
 ## Testing
 
 ```bash
-npm test          # unit and integration tests plus a fixed-seed convergence run
+npm test          # unit and integration tests plus a fixed-seed convergence run (Node)
+npm run test:bun  # the bun:sqlite adapter (Bun)
 npm run fuzz      # a longer randomized convergence campaign; a failure prints the seed
 ```
