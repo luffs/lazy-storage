@@ -1,4 +1,8 @@
 // lazy-storage - client entry (the server lives under 'lazy-storage/server')
+// LazyWatch is re-exported so an application can drive `db.state` with the
+// very instance lazy-storage uses (two copies of lazy-watch in one bundle
+// would not recognize each other's proxies).
+export { LazyWatch } from 'lazy-watch';
 export * from './core/index.js';
 export { createClient } from './client/index.js';
 export { createConnection } from './client/connection.js';
