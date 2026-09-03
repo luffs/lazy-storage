@@ -5,7 +5,7 @@ import { LazyWatch } from 'lazy-watch';
 import { createStore, memoryStorage } from '../src/server/index.js';
 import { createClient } from '../src/client/index.js';
 import { memoryOutbox } from '../src/client/storage.js';
-import { createNetwork } from './helpers.js';
+import { createNetwork, fakeTime } from './helpers.js';
 
 const INITIAL = { tasks: {}, team: {} };
 const snap = client => LazyWatch.snapshot(client.state);
@@ -86,6 +86,40 @@ test('a hello with pending ops gets a delta that includes them, and corrections 
   assert.deepEqual(Object.keys(a.state.tasks).sort(), ['t1', 'ta', 'tb']);
   assert.deepEqual(snap(a), store.snapshot());
   assert.deepEqual(snap(b), store.snapshot());
+});
+
+test('a correction in a delta reflects the state after every op of the hello, not the moment one op lost', async () => {
+  // Found by the fuzzer: an early register write in the hello loses, its
+  // correction is read then, a later write in the same hello wins, and
+  // the stale correction applied last put the client on the old value
+  const START = 1_000_000;
+  const aTime = fakeTime(START);
+  const bTime = fakeTime(START);
+  const { store, net, last } = setup({ initial: { tasks: {}, order: [] }, registers: ['order'], now: fakeTime(START) });
+  const a = net.client({ replicaId: 'a', initial: { tasks: {}, order: [] }, registers: ['order'], now: aTime });
+  const b = net.client({ replicaId: 'b', initial: { tasks: {}, order: [] }, registers: ['order'], now: bTime });
+  await net.settle();
+
+  a.link.goOffline();
+  await net.settle();
+  // a writes at START+10 (will lose), b at START+20 (wins over that), a again at START+40 (wins over b)
+  aTime.set(START + 10);
+  a.state.order = ['first'];
+  await net.settle();
+  bTime.set(START + 20);
+  b.state.order = ['middle'];
+  await net.settle();
+  aTime.set(START + 40);
+  a.state.order = ['last'];
+  await net.settle();
+  assert.equal(a.pending, 2);
+
+  await reconnect(net, a);
+  assert.equal(last().t, 'delta');
+  assert.deepEqual(store.snapshot().order, ['last']);
+  assert.deepEqual(snap(a).order, ['last'], 'the correction was taken after the winning write');
+  assert.deepEqual(snap(b).order, ['last']);
+  assert.equal(a.pending, 0);
 });
 
 test('a refused op in the hello, a short log, or a disabled log all fall back to a snapshot', async () => {

@@ -45,8 +45,9 @@ export const stateRows = (state, regs) => leaves(state, regs).map(([path, value]
  * @param {() => Object} deps.state - the live state
  * @param {() => {replicaId: string, seq: number, version: number, epoch: string|null}} deps.meta
  * @param {() => Object[]} deps.ops - the outbox
+ * @param {(error: any) => void} deps.onError - a batch that could not be persisted
  */
-export function createPersistence({ storage, cache, regs, state, meta, ops }) {
+export function createPersistence({ storage, cache, regs, state, meta, ops, onError }) {
   if (isRowAdapter(storage)) {
     return {
       rows: true,
@@ -66,7 +67,7 @@ export function createPersistence({ storage, cache, regs, state, meta, ops }) {
           // A state the model cannot express in rows (registers that
           // differ from the server's, reported separately); the next
           // snapshot replaces the rows wholesale
-          console.error('lazy-storage: could not persist a batch as rows:', err);
+          onError(err);
         }
       },
       /** The version moved without the state changing: the next drop or op carries it */

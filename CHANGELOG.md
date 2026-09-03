@@ -6,6 +6,27 @@ All notable changes to lazy-storage are documented here. The format follows Keep
 
 ### Added
 
+- **Limits.** `maxPayload` on the Bun adapter (default 4 MB) ends a socket
+  that sends a larger message; a hello now carries at most 1000 ops, the
+  rest following as ops once the answer lands. `maxLeaves` on the store
+  (default 10 000) refuses an op touching more leaves with code
+  `too-large`. `rateLimit` on the store (a token bucket per replica,
+  default `{ burst: 500, perSecond: 100 }`) refuses a live op beyond it
+  with code `rate-limited` and a `retryAfter`; the client keeps the op and
+  resends its outbox in a hello after that, so nothing is lost
+- **Idle store release.** `createStores(factory, { idle })` releases a
+  store that has had no session for `idle` ms, flushing its storage, and
+  loads it again on the next request; `sweep()` runs it by hand. Off by
+  default
+- **Observability.** `store.observe('op' | 'refused' | 'session', fn)`
+  reports merged ops, refused client ops, and sessions opening and
+  closing; `store.stats()` counts what the store holds. `onError` on
+  `createHandlers`, `createHub`, and `createStore` receives server faults
+  (a store factory or an observer that throws, a bug while handling a
+  message) instead of the console; the client's persistence faults reach
+  its `error` event
+- The Bun adapter is now tested in the library itself, end to end over
+  real sockets (`test/bun/serve.test.js`)
 - **Row persistence on the client.** A storage adapter may keep one row
   per leaf and one per pending op instead of a state document: every
   batch the state applies is walked into leaves and committed as the rows
@@ -23,6 +44,16 @@ All notable changes to lazy-storage are documented here. The format follows Keep
 - `rebuild(initial, rows)` in `lazy-storage/core`: `initial` with rows
   applied shallow-first, now shared by the server's load and the client's
   restore
+
+### Fixed
+
+- A delta could leave a reconnecting client on a stale value. The
+  correction for a leaf that one of the hello's ops lost was read the
+  moment that op was merged; a later op in the same hello could then win
+  the same leaf, and since a client applies corrections last, the stale
+  value stuck (a register was the usual victim). Corrections are now taken
+  once, after every op of the hello. Found by the convergence fuzzer;
+  present since 0.3.0
 
 ## [0.3.0] - 2026-09-03
 

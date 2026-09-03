@@ -22,11 +22,23 @@ import { toJSON } from './wire.js';
  * @param {(req: Request) => any} [options.authenticate] - the user for a
  *   request, or null/undefined to refuse (401); may return a promise
  * @param {(user: any, storeId: string, store: Object) => boolean|Promise<boolean>} [options.authorize]
+ * @param {number} [options.maxPayload=4194304] - the largest message (bytes)
+ *   a socket may send; Bun closes a socket that exceeds it. A hello carries
+ *   at most 1000 ops, so a long offline spell stays well under 4 MB
+ * @param {(error: any) => void} [options.onError] - server faults: a
+ *   store factory that threw, a bug while handling a message; default console
  * @returns {{ upgrade: (req: Request, server: any) => Promise<Response|undefined|null>, websocket: Object }}
  *   `upgrade` resolves to null when the URL is not ours, undefined after a
  *   successful upgrade, or an error Response
  */
-export function createHandlers({ stores, path = '/ws', authenticate, authorize } = {}) {
+export function createHandlers({
+  stores,
+  path = '/ws',
+  authenticate,
+  authorize,
+  maxPayload = 4 * 1024 * 1024,
+  onError = err => console.error('lazy-storage:', err)
+} = {}) {
   if (!stores) throw new TypeError('createHandlers requires stores (a registry or a resolver function)');
   const resolveStore = typeof stores === 'function' ? stores : id => stores.get(id);
   const hubs = new Map();
@@ -42,9 +54,10 @@ export function createHandlers({ stores, path = '/ws', authenticate, authorize }
   }
 
   const websocket = {
+    maxPayloadLength: maxPayload,
     open(ws) {
       // A broadcast is encoded once for every socket it reaches (see wire.js)
-      hubs.set(ws, createHub(resolveStore, { send: message => ws.send(toJSON(message)), user: ws.data.user, authorize }));
+      hubs.set(ws, createHub(resolveStore, { send: message => ws.send(toJSON(message)), user: ws.data.user, authorize, onError }));
     },
     message(ws, raw) {
       let msg;
@@ -58,7 +71,7 @@ export function createHandlers({ stores, path = '/ws', authenticate, authorize }
       try {
         hubs.get(ws)?.receive(msg);
       } catch (err) {
-        console.error('lazy-storage: unhandled error while handling a message:', err);
+        onError(err);
         ws.send(JSON.stringify({ t: 'error', store: msg.store, message: 'Something went wrong' }));
       }
     },

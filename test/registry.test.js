@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createStore, createStores, isStoreId, memoryStorage } from '../src/server/index.js';
-import { createNetwork } from './helpers.js';
+import { createNetwork, fakeTime } from './helpers.js';
 
 const INITIAL = { tasks: {} };
 
@@ -53,5 +53,37 @@ test('stores in one registry are isolated: clients of one never see the other', 
   assert.equal(stores.release('team-a'), true, 'releasing disposes the store and closes its sessions');
   assert.equal(stores.has('team-a'), false);
   a.dispose(); b.dispose();
+  stores.dispose();
+});
+
+test('with idle set, a store with no sessions for that long is released by the sweep and reloaded from storage on the next use', async () => {
+  const time = fakeTime(0);
+  const storages = new Map();
+  const storageFor = id => storages.get(id) ?? storages.set(id, memoryStorage()).get(id);
+  const stores = createStores(id => createStore({ initial: INITIAL, storage: storageFor(id) }), { idle: 1000, sweepEvery: 100_000, now: time });
+  const net = createNetwork(stores.get('team-a'));
+  const a = net.client({ replicaId: 'a', initial: INITIAL });
+  await net.settle();
+  a.collection('tasks').add({ id: 'x' });
+  await net.settle();
+  stores.get('team-b');
+  assert.deepEqual(stores.ids(), ['team-a', 'team-b']);
+
+  time.advance(500);
+  assert.deepEqual(stores.sweep(), [], 'team-b is first seen idle now');
+  time.advance(600);
+  assert.deepEqual(stores.sweep(), [], '600 ms idle is under the limit');
+  time.advance(500);
+  assert.deepEqual(stores.sweep(), ['team-b'], '1100 ms idle: released');
+  assert.deepEqual(stores.ids(), ['team-a'], 'team-a has a session and stays');
+
+  a.dispose();
+  await net.settle();
+  time.advance(2000);
+  assert.deepEqual(stores.sweep(), [], 'first seen idle now, however long it has really been');
+  time.advance(1000);
+  assert.deepEqual(stores.sweep(), ['team-a']);
+  assert.deepEqual(stores.ids(), []);
+  assert.deepEqual(stores.get('team-a').snapshot(), { tasks: { x: { id: 'x' } } }, 'back from its storage');
   stores.dispose();
 });

@@ -133,9 +133,20 @@ const defaultPresenceKey = user =>
  * @param {number} [options.deltaLog=1000] - how many accepted diffs to keep
  *   for answering a reconnect with a delta instead of a snapshot; 0 always
  *   sends snapshots
+ * @param {number} [options.maxLeaves=10000] - the most leaves one client op
+ *   may touch; a larger one is refused with code 'too-large'
+ * @param {{ burst: number, perSecond: number }|false} [options.rateLimit] -
+ *   live ops a replica may send: a token bucket holding `burst` tokens,
+ *   refilled at `perSecond` (default 500 and 100). An op beyond it is
+ *   refused with code 'rate-limited' and a `retryAfter` in ms; the client
+ *   keeps the op and resends its outbox in a hello after that. Ops in a
+ *   hello are not counted (they are bounded by the payload limit). `false`
+ *   disables
  * @param {Object} [options.storage] - a storage adapter (default: memory)
  * @param {(user: any) => string} [options.presenceKey] - how presence
  *   dedupes users (default: by `id`)
+ * @param {(error: any) => void} [options.onError] - where faults that are
+ *   not a client's (an observer that throws) are reported; default console
  * @param {() => number} [options.now] - wall clock (injectable for tests)
  */
 export function createStore({
@@ -147,11 +158,15 @@ export function createStore({
   retention = 30 * DAY,
   compactEvery = HOUR,
   deltaLog = 1000,
+  maxLeaves = 10_000,
+  rateLimit = { burst: 500, perSecond: 100 },
   storage = memoryStorage(),
   presenceKey = defaultPresenceKey,
+  onError = err => console.error('lazy-storage:', err),
   now
 } = {}) {
   if (validate !== undefined && typeof validate !== 'function') throw new TypeError('validate must be a function');
+  if (rateLimit && !(rateLimit.burst > 0 && rateLimit.perSecond > 0)) throw new TypeError('rateLimit needs positive burst and perSecond');
   const time = now ?? Date.now;
   const regs = registerSet(registers);
   const locked = registerSet(readOnly);
@@ -170,7 +185,43 @@ export function createStore({
   let serverSeq = replicas.get('server')?.seq ?? 0;
   let lastCompaction = -Infinity;
   const log = [];  // the last `deltaLog` accepted diffs, as { v, diff }
+  const buckets = new Map();  // replicaId -> { tokens, at }, for the rate limit
+  const observers = { op: new Set(), refused: new Set(), session: new Set() };
   let self;
+
+  function notify(event, payload) {
+    for (const fn of observers[event]) {
+      try {
+        fn(payload);
+      } catch (err) {
+        onError(err);
+      }
+    }
+  }
+
+  /**
+   * Take one token from a replica's bucket. Returns 0 when the op may
+   * proceed, else the milliseconds until a token is back.
+   */
+  function throttle(replicaId) {
+    if (!rateLimit) return 0;
+    const wall = time();
+    let bucket = buckets.get(replicaId);
+    if (!bucket) {
+      if (buckets.size >= 10_000) {
+        for (const [id, b] of buckets) if (wall - b.at > MINUTE) buckets.delete(id);
+      }
+      bucket = { tokens: rateLimit.burst, at: wall };
+      buckets.set(replicaId, bucket);
+    }
+    bucket.tokens = Math.min(rateLimit.burst, bucket.tokens + ((wall - bucket.at) / 1000) * rateLimit.perSecond);
+    bucket.at = wall;
+    if (bucket.tokens >= 1) {
+      bucket.tokens -= 1;
+      return 0;
+    }
+    return Math.ceil(((1 - bucket.tokens) / rateLimit.perSecond) * 1000);
+  }
 
   function broadcast(message) {
     toJSON(message);  // encoded once, however many sessions there are
@@ -248,6 +299,9 @@ export function createStore({
    */
   function admit(op, session) {
     const entries = leaves(op.diff, regs);
+    if (entries.length > maxLeaves) {
+      throw new RefusedError('too-large', `The op touches ${entries.length} leaves; the store accepts at most ${maxLeaves} in one op`);
+    }
     const wall = time();
     if (op.ts[0] > wall + maxSkew) {
       throw new RefusedError('clock-skew',
@@ -310,6 +364,9 @@ export function createStore({
     });
     if (accepted) broadcast({ t: 'patch', diff: accepted, ts: op.ts, v: version });
     const lost = [...rejected, ...stripped];
+    if (observers.op.size) {
+      notify('op', { replicaId: op.replicaId, seq: op.seq, user: session?.user, accepted: accepted !== null, rejected: lost.length, version });
+    }
     return { duplicate: false, accepted, rejected: lost, correction: lost.length ? correction(lost) : null };
   }
 
@@ -371,9 +428,13 @@ export function createStore({
   }
 
   /** The error message for an op the store did not merge */
-  function refusal(op, err) {
+  function refusal(op, err, session) {
     const message = { t: 'error', seq: Utils.isPlainObject(op) ? op.seq : undefined, code: err.code ?? 'invalid', message: err.message };
     if (err.code === 'clock-skew') Object.assign(message, { now: err.now, ts: err.ts });
+    if (err.code === 'rate-limited') message.retryAfter = err.retryAfter;
+    if (observers.refused.size) {
+      notify('refused', { replicaId: Utils.isPlainObject(op) ? op.replicaId : undefined, seq: message.seq, user: session?.user, code: message.code, message: err.message });
+    }
     return message;
   }
 
@@ -399,24 +460,33 @@ export function createStore({
             if (typeof msg.replicaId !== 'string' || !msg.replicaId) return send({ t: 'error', message: 'hello requires a replicaId' });
             s.replicaId = msg.replicaId;
             let refused = false;
-            const corrections = [];
+            const lost = [];
             for (const op of Array.isArray(msg.ops) ? msg.ops : []) {
               try {
-                const result = apply(op, s);
-                if (result.correction) corrections.push(result.correction);
+                lost.push(...apply(op, s).rejected);
               } catch (err) {
                 refused = true;
-                send(refusal(op, err));
+                send(refusal(op, err, s));
               }
             }
+            // One correction for every leaf the hello's ops lost, taken
+            // after the last of them: a value read mid-hello could be
+            // overtaken by a later op of the same hello, and the client
+            // applies corrections last
+            const corrections = lost.length ? [correction(lost)] : [];
             return send(catchUp(msg.replicaId, msg.since, msg.epoch, refused, corrections));
           }
           case 'op': {
             try {
+              const replica = Utils.isPlainObject(msg.op) ? msg.op.replicaId : undefined;
+              const wait = typeof replica === 'string' ? throttle(replica) : 0;
+              if (wait > 0) {
+                throw new RefusedError('rate-limited', `Too many ops; try again in ${wait} ms`, { retryAfter: wait });
+              }
               const result = apply(msg.op, s);
               return send({ t: 'ack', seq: msg.op.seq, ts: clock.peek(), correction: result.correction });
             } catch (err) {
-              return send(refusal(msg.op, err));
+              return send(refusal(msg.op, err, s));
             }
           }
           case 'ping':
@@ -428,6 +498,7 @@ export function createStore({
       close() {
         if (!sessions.delete(s)) return;
         if (user !== undefined) broadcastPresence();
+        if (observers.session.size) notify('session', { event: 'close', user, replicaId: s.replicaId, sessions: sessions.size });
       }
     };
     sessions.add(s);
@@ -435,6 +506,7 @@ export function createStore({
     // still needs to see who is here
     if (user !== undefined) broadcastPresence();
     else send({ t: 'presence', users: presence() });
+    if (observers.session.size) notify('session', { event: 'open', user, replicaId: null, sessions: sessions.size });
     return s;
   }
 
@@ -482,6 +554,26 @@ export function createStore({
     snapshot: () => LazyWatch.snapshot(state),
     /** Subscribe to accepted changes (a LazyWatch listener on the state) */
     on: (listener, options) => LazyWatch.on(state, listener, options),
+    /**
+     * Watch what happens to the store, for logs, audits, and metrics:
+     * 'op' ({ replicaId, seq, user, accepted, rejected, version }) for every
+     * op merged, the server's own included; 'refused' ({ replicaId, seq,
+     * user, code, message }) for every client op turned away; 'session'
+     * ({ event: 'open' | 'close', user, replicaId, sessions }). Returns an
+     * unsubscribe function
+     */
+    observe(event, fn) {
+      if (!observers[event]) throw new TypeError(`Unknown store event "${event}"`);
+      if (typeof fn !== 'function') throw new TypeError('observe needs a function');
+      observers[event].add(fn);
+      return () => observers[event].delete(fn);
+    },
+    /** A few numbers about the store's size and activity */
+    stats() {
+      let tombstones = 0;
+      for (const entry of clocks.values()) if (entry.deleted) tombstones++;
+      return { version, epoch, sessions: sessions.size, replicas: replicas.size, rows: clocks.size, tombstones, log: log.length };
+    },
     /** Forget what the retention window no longer needs; returns { tombstones, replicas } removed */
     compact,
     /** Forget tombstones older than a timestamp; returns how many */

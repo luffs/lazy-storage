@@ -265,6 +265,40 @@ sessions yourself), which powers two more features:
   at which point authorization runs afresh. On a shared connection the
   socket stays up for the other stores.
 
+## Limits, memory, and observability
+
+A public server needs a few ceilings, all on by default:
+
+- **Message size.** `maxPayload` on the Bun adapter (default 4 MB) is the
+  largest message a socket may send; Bun ends a socket that exceeds it. A
+  hello carries at most 1000 ops, the rest following as ordinary ops once
+  the answer lands, so a long offline spell stays well under it.
+- **Op size.** `maxLeaves` on the store (default 10 000) is the most leaves
+  one op may touch; a larger one is refused with code `too-large`, and
+  the client drops it and resyncs.
+- **Op rate.** `rateLimit` on the store is a token bucket per replica,
+  `{ burst: 500, perSecond: 100 }` by default. A live op beyond it is
+  refused with code `rate-limited` and a `retryAfter` in milliseconds;
+  the client keeps the op and resends its outbox in a hello after that,
+  so nothing is lost and a runaway client is throttled rather than
+  broken. Ops inside a hello are not counted. `false` turns it off.
+
+**Memory follows the stores in use** when the registry is given an idle
+time: `createStores(factory, { idle: 30 * 60_000 })` releases a store
+that has had no session for that long (its storage is flushed first) and
+loads it again on the next request. Off by default, since a store on
+`memoryStorage` would lose its data.
+
+**Watching a store.** `store.observe('op' | 'refused' | 'session', fn)`
+reports every merged op (`{ replicaId, seq, user, accepted, rejected,
+version }`), every client op turned away (`{ replicaId, seq, user, code,
+message }`), and sessions opening and closing, for logs, audits, and
+metrics; `store.stats()` counts version, sessions, replicas, rows,
+tombstones, and the delta log. Server faults that are nobody's request
+(a store factory that throws, an observer that throws, a bug while
+handling a message) go to an `onError` option on `createHandlers`,
+`createHub`, and `createStore`, which defaults to the console.
+
 ## Embedding in your own server
 
 `createHandlers` returns the two pieces `serve` is built from, so the
@@ -307,7 +341,7 @@ replaced by a leaf) drops the affected steps.
 - `db.collection(name)` — `add(record) → id`, `update(id, fields)`, `remove(id)`, `get(id)`, `has(id)`, `ids()`, `all()`
 - `db.connect()`, `db.disconnect()`, `db.status` (`'offline' | 'connecting' | 'online'`), `db.pending`
 - `db.watch(listener)` — state changes; `meta?.origin === 'remote'` marks the server's
-- `db.on('status' | 'error' | 'sync' | 'presence' | 'closed', fn)` — lifecycle events; a refused op is an error with a `code` (`forbidden`, `expired`, `invalid`; `clock-skew` is handled without one)
+- `db.on('status' | 'error' | 'sync' | 'presence' | 'closed', fn)` — lifecycle events; a refused op is an error with a `code` (`forbidden`, `expired`, `invalid`, `too-large` drop the op; `rate-limited` keeps it and retries; `clock-skew` is handled without one)
 - `db.undo()`, `db.redo()`, `db.canUndo`, `db.canRedo`, `db.checkpoint()`, `db.group(fn)`, `db.clearHistory()`
 - `webSocketTransport(url)`, `memoryOutbox()`, `localStorageOutbox(key)` — document adapters: `{ load(), save(outbox), saveState(cache) }`; without `saveState` the state rides inside `save`
 - `indexedDBStorage(name, { onError })` → also `settled()`, `close()`, `destroy()` — a row adapter: `{ load(), commit({ puts, deletes, meta }), replace({ rows, meta }), saveOp(op, meta), dropOps(seq, meta) }`, where a delete removes the path and everything under it and `meta` is `{ replicaId, seq, version, epoch }`
@@ -316,23 +350,24 @@ replaced by a leaf) drops the affected steps.
 
 **Server** (`lazy-storage/server`)
 
-- `createStore({ initial, registers, readOnly, validate, maxSkew, retention, compactEvery, deltaLog, storage, presenceKey, now })`; `store.epoch` — this life of the storage
+- `createStore({ initial, registers, readOnly, validate, maxSkew, retention, compactEvery, deltaLog, maxLeaves, rateLimit, storage, presenceKey, onError, now })`; `store.epoch` — this life of the storage
+- `store.observe(event, fn)` → unsubscribe — `'op'`, `'refused'`, `'session'`; `store.stats()` → `{ version, epoch, sessions, replicas, rows, tombstones, log }`
 - `store.session({ send, user, onEvict })` → `{ receive(message), close(), user, replicaId }` — one per connection, transport-agnostic
 - `store.closeSessions(predicate, message)` — evict sessions; `store.presence()` — distinct users with a live session
 - `store.patch(diff)` — a server-side change, timestamped and broadcast; `store.apply(op)` — a trusted op, gates skipped
 - `store.on(listener)`, `store.snapshot()`, `store.state`, `store.version`, `store.replicas`
 - `store.compact()` → `{ tombstones, replicas }` removed; `store.compactTombstones(olderThan)`, `store.flush()`, `store.dispose()`
 - `memoryStorage()`, `jsonFileStorage(path, { debounce })`
-- `createStores(factory)` → `get(id)`, `has(id)`, `ids()`, `release(id)`, `dispose()`; `isStoreId(id)`
-- `createHub(resolveStore, { send, user, authorize })` → `{ receive(message), close(), stores, user }` — the server side of a multiplexed connection, session-shaped
+- `createStores(factory, { idle, sweepEvery, now })` → `get(id)`, `has(id)`, `ids()`, `release(id)`, `sweep()`, `dispose()`; `isStoreId(id)`
+- `createHub(resolveStore, { send, user, authorize, onError })` → `{ receive(message), close(), stores, user }` — the server side of a multiplexed connection, session-shaped
 - `toJSON(message)` — a message's JSON, encoded once however many sockets it goes to; use it in a transport of your own so a broadcast is not re-encoded per socket (`tagStore(message, id)` is what a hub does)
 
 **SQLite** (`lazy-storage/server/sqlite`, Bun): `sqliteStorage(file, { wal })` →
 `store(id)`, `ids()`, `remove(id)`, `db`, `close()`.
 
-**Bun adapter** (`lazy-storage/server/bun`): `serve({ stores, port, path, fetch, authenticate, authorize })` —
+**Bun adapter** (`lazy-storage/server/bun`): `serve({ stores, port, path, fetch, authenticate, authorize, maxPayload, onError })` —
 `stores` is a registry or `id => store|null` (for one store, `() => store`); the
-hub listens at `path`. `createHandlers({ stores, path, authenticate, authorize })` →
+hub listens at `path`. `createHandlers({ stores, path, authenticate, authorize, maxPayload, onError })` →
 `{ upgrade(req, server), websocket }` for mounting inside your own `Bun.serve`.
 
 **Core** (`lazy-storage/core`): the pieces both sides share — `createClock`,
@@ -356,8 +391,9 @@ since then, in order, then corrections for the hello's own ops);
 `{ t: 'ack', seq, ts, correction }`, `{ t: 'presence', users }`,
 `{ t: 'closed', code, message }` (final for the store: `evicted`,
 `forbidden`, `unknown-store`, `invalid-store`),
-`{ t: 'error', seq?, code?, message, now?, ts? }` (a refused op names its
-`seq` and a code: `invalid`, `forbidden`, `expired`, or `clock-skew` with
+`{ t: 'error', seq?, code?, message, now?, ts?, retryAfter? }` (a refused
+op names its `seq` and a code: `invalid`, `forbidden`, `expired`,
+`too-large`, `rate-limited` with `retryAfter` in ms, or `clock-skew` with
 the server's wall time `now` and the refused stamp `ts`), `{ t: 'pong' }`.
 
 Every message except `ping`/`pong` carries a `store` field with the store

@@ -137,7 +137,7 @@ test('a store factory that throws refuses that store only, without taking the co
     assert.equal(broken.status, 'offline');
     assert.deepEqual(closed, [{ code: 'unknown-store', message: 'Store "broken" could not be opened: migration failed: arrays are not allowed' }]);
     assert.equal(shared.status, 'open');
-    assert.ok(errors.some(e => e.includes('opening store "broken" failed')), 'the server fault is logged');
+    assert.ok(errors.some(e => e.includes('migration failed')), 'the server fault is logged (the default onError)');
   } finally {
     console.error = originalError;
   }

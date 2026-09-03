@@ -27,8 +27,8 @@ jobs:
       - name: Run tests
         run: npm test
 
-  sqlite:
-    name: bun:sqlite adapter (Bun)
+  bun:
+    name: Bun adapters (sqlite, WebSocket server)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -47,7 +47,7 @@ jobs:
         # GitHub-owned actions are used here
         run: npm install -g bun
 
-      - name: Run the adapter tests
+      - name: Run the Bun-only tests
         run: npm run test:bun
 
   fuzz:

@@ -23,7 +23,7 @@
   },
   "scripts": {
     "test": "node --test \"test/*.test.js\"",
-    "test:bun": "bun test/bun/sqlite.test.js && bun test/bun/sqlite-client.test.js",
+    "test:bun": "bun test/bun/sqlite.test.js && bun test/bun/sqlite-client.test.js && bun test/bun/serve.test.js",
     "fuzz": "node test/fuzz/run.js"
   },
   "keywords": [

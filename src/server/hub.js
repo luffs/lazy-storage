@@ -26,8 +26,10 @@ const { Utils } = LazyWatch;
  * @param {any} [options.user] - the authenticated user, attached to every
  *   store session opened on this connection
  * @param {(user: any, storeId: string, store: Object) => boolean|Promise<boolean>} [options.authorize]
+ * @param {(error: any) => void} [options.onError] - server faults (a store
+ *   factory that threw); default console
  */
-export function createHub(resolveStore, { send, user, authorize } = {}) {
+export function createHub(resolveStore, { send, user, authorize, onError = err => console.error('lazy-storage:', err) } = {}) {
   if (typeof send !== 'function') throw new TypeError('A hub needs a send function');
   const sessions = new Map();
   const pending = new Map(); // store id -> messages queued while authorization is in flight
@@ -75,7 +77,7 @@ export function createHub(resolveStore, { send, user, authorize } = {}) {
       try {
         store = resolveStore(id);
       } catch (err) {
-        console.error(`lazy-storage: opening store "${id}" failed:`, err);
+        onError(err);
         return refuse(id, 'unknown-store', `Store "${id}" could not be opened: ${err?.message ?? err}`);
       }
       if (!store) return refuse(id, 'unknown-store', `Unknown store "${id}"`);

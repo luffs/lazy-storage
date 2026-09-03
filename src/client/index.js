@@ -48,6 +48,10 @@ const SNAPSHOT = { origin: 'remote', snapshot: true };
 const RESTORE = { origin: 'restore' };
 const HISTORY = new Set(['undo', 'redo']);
 const EVENTS = ['status', 'error', 'sync', 'closed', 'presence'];
+// A hello carries at most this many ops, so it stays under any payload
+// limit after a long offline spell; the rest go as ops once the answer
+// lands, the way edits made during the hello do
+const HELLO_LIMIT = 1000;
 
 /**
  * @param {Object} options
@@ -148,6 +152,7 @@ function build({
   let lastStatus = 'offline';
   let presence = [];      // distinct users with a live session on this store
   let ended = null;       // { code, message } after the server closed this store for us
+  let retryTimer = null;  // a hello scheduled after a rate-limit refusal
 
   const persistence = createPersistence({
     storage,
@@ -155,7 +160,8 @@ function build({
     regs,
     state: () => state,
     ops: () => outbox,
-    meta: () => ({ replicaId, seq, version: known.v, epoch: known.epoch })
+    meta: () => ({ replicaId, seq, version: known.v, epoch: known.epoch }),
+    onError: err => emit('error', err)
   });
 
   // Own batches (meta undefined) and undo/redo replays are history; remote
@@ -223,9 +229,14 @@ function build({
     emit('sync');
   });
 
-  /** The (re)connect message: the outbox, and where our knowledge of the store ends */
-  function hello() {
-    link?.send({ t: 'hello', replicaId, ops: outbox, since: known.v, epoch: known.epoch });
+  /**
+   * The (re)connect message: the outbox (its first HELLO_LIMIT ops) and,
+   * unless a full snapshot is wanted, where our knowledge of the store ends
+   */
+  function hello({ full = false } = {}) {
+    const message = { t: 'hello', replicaId, ops: outbox.slice(0, HELLO_LIMIT) };
+    if (!full) Object.assign(message, { since: known.v, epoch: known.epoch });
+    link?.send(message);
   }
 
   function checkRegisters(theirs) {
@@ -304,6 +315,17 @@ function build({
         const err = new Error(msg.message);
         if (msg.code) err.code = msg.code;
         emit('error', err);
+        if (msg.code === 'rate-limited') {
+          // Nothing is dropped: the op stays in the outbox and a hello after
+          // the server's retryAfter resends everything still pending
+          if (retryTimer) return;
+          retryTimer = setTimeout(() => {
+            retryTimer = null;
+            if (synced) hello();
+          }, Number.isInteger(msg.retryAfter) ? msg.retryAfter : 1000);
+          if (typeof retryTimer?.unref === 'function') retryTimer.unref();
+          return;
+        }
         // The server refused an op we already applied locally: drop it and
         // resync from a snapshot so this replica falls back in line (when a
         // hello is in flight its snapshot is already on the way)
@@ -311,7 +333,7 @@ function build({
           acknowledge(msg.seq);
           // Ask for a snapshot, not a delta: the delta would leave the
           // refused edit in place
-          if (synced) link?.send({ t: 'hello', replicaId, ops: outbox });
+          if (synced) hello({ full: true });
         }
         return;
       }
@@ -456,6 +478,7 @@ function build({
     restored,
     dispose() {
       disconnect();
+      clearTimeout(retryTimer);
       persistence.flush();
       stopStatus();
       undoManager?.dispose();
