@@ -52,16 +52,17 @@ consumer.
 ### Added
 
 - **Authentication and authorization hooks.** `serve` / `createHandlers`
-  take `authenticate(req)` (the user for a request; null answers 401) and
-  `authorize(user, storeId, store)` (before any session exists: 403 on a
-  per-store URL, a `closed` message with code `forbidden` for one store on
-  a hub). Both may return promises; a hub queues a store's messages while
-  its authorization is in flight. The user rides on the session
-  (`store.session({ send, user, onEvict })`, `createHub(..., { user, authorize })`)
+  take `authenticate(req)` (the user for a request; null answers 401 at
+  upgrade) and `authorize(user, storeId, store)`, asked per store before
+  its session exists; a refusal reaches the client as a `closed` message
+  with code `forbidden` for that store alone. Both may return promises; a
+  hub queues a store's messages while its authorization is in flight. The
+  user rides on the session (`store.session({ send, user, onEvict })`,
+  `createHub(..., { user, authorize })`)
 - **Eviction.** `store.closeSessions(predicate, message)` ends the
   sessions a predicate selects with a `closed` message (code `evicted`) and
-  tells their transport through `onEvict` (the Bun adapter closes the
-  socket on a per-store route and drops the hub entry on a hub). The client
+  tells their transport through `onEvict` (the hub drops its entry for that
+  store; the socket stays up for the others). The client
   gains a `closed` event and `db.closed`, goes offline for that store
   without reconnecting on its own, and rejoins on `connect()`. Terminal
   hub refusals (`unknown-store`, `invalid-store`, `forbidden`) now arrive
@@ -80,21 +81,17 @@ consumer.
 - **Wildcard registers.** A `*` segment in a register path matches one
   segment (`tasks/*/subtaskOrder`), declaring a register per record;
   `registerSet` is now a matcher and `expandRegisters` walks the diff
-
-- **Many stores over one socket.** `createConnection({ transport })` is a
-  shared, multiplexed connection that several clients attach to, one per
-  store (`createClient({ connection, store })`); messages are tagged with
-  the store id, and `client.disconnect()` on a shared connection leaves
-  just that store (`{ t: 'leave', store }`) while `connection.close()`
-  drops the socket for all. Each client keeps its own outbox, undo history,
-  and status. On the server, `createHub(resolveStore, { send })` is the
-  session-shaped counterpart that keeps one store session per socket, and
-  `serve({ stores })` serves it at `path` while `path/<id>` keeps the
-  plain per-store protocol. A client with its own `transport` gets a
-  private, untagged connection, so single-store servers and URLs are
-  unchanged. The fuzzer gained a `hub` mode in which clients share two
-  connections and an offline toggle drops everyone on that socket
-
+- **Any number of stores over one socket.** `createConnection({ transport })`
+  is a connection that several clients attach to, one per store
+  (`createClient({ connection, store })`); every message names its store,
+  and `client.disconnect()` on a shared connection leaves just that store
+  (`{ t: 'leave', store }`) while `connection.close()` drops the socket for
+  all. Each client keeps its own outbox, undo history, and status. A client
+  created with a `transport` instead owns a connection of its own, same
+  protocol. On the server, `createHub(resolveStore, { send, user, authorize })`
+  is the session-shaped counterpart that keeps one store session per
+  socket, and `serve({ stores })` serves it at `path`. Every fuzzer client
+  carries two stores on its socket, so an offline toggle drops both
 - **SQLite persistence on Bun.** `sqliteStorage(file)` from
   `lazy-storage/server/sqlite` keeps any number of stores in one database
   file, one row per leaf path keyed by `(store, path)`, in WAL mode; each
@@ -104,9 +101,10 @@ consumer.
 - **Multiple stores per server.** `createStores(factory)` is a registry
   that builds a store per id on first use and keeps it live (`get`, `has`,
   `ids`, `release`, `dispose`); `isStoreId` restricts ids to a URL- and
-  filename-safe alphabet. `serve({ stores })` routes `/ws/<storeId>` to
-  it, answering 400 for an invalid id and 404 for one the factory refuses;
-  `serve({ store })` still serves a single store at `/ws`
+  filename-safe alphabet. The hub resolves stores through it (or through a
+  plain `id => store|null` function; `() => store` for a single store),
+  answering an invalid id with `closed` code `invalid-store` and a refused
+  one with `unknown-store`
 
 ### Changed
 
