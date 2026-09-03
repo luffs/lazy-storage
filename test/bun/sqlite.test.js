@@ -35,7 +35,8 @@ try {
       ],
       replicas: { r1: { seq: 2, seen: 500 } },
       version: 1,
-      epoch: null
+      epoch: null,
+      log: []
     });
     a.commit({ upserts: [], deletes: ['["tasks","y"]'], replica: { id: 'r2', seq: 1, seen: 600 }, version: 2, epoch: 'e1' });
     const loaded = a.load();
@@ -104,6 +105,26 @@ try {
     store.apply({ replicaId: 'r1', seq: 8, ts: T(4_999_000, 'r1'), diff: { tasks: { a: { done: true } } } });
     assert.deepEqual(sqlite.store('t').load().replicas.r1, { seq: 8, seen: 5_000_000 });
     store.dispose();
+    sqlite.close();
+  });
+
+  test('the delta log is persisted, pruned to the store\'s floor, reloaded, and dropped with the store', () => {
+    let sqlite = sqliteStorage(file);
+    const one = createStore({ initial: INITIAL, storage: sqlite.store('logged'), deltaLog: 3 });
+    for (let i = 0; i < 5; i++) one.patch({ tasks: { [`t${i}`]: { id: `t${i}` } } });
+    one.dispose();
+    assert.deepEqual(sqlite.db.query('SELECT v FROM log WHERE store = ? ORDER BY v').all('logged').map(r => r.v), [3, 4, 5], 'pruned to the last three');
+    sqlite.close();
+
+    sqlite = sqliteStorage(file);
+    const loaded = sqlite.store('logged').load();
+    assert.deepEqual(loaded.log.map(e => e.v), [3, 4, 5]);
+    assert.deepEqual(loaded.log[2].diff, { tasks: { t4: { id: 't4' } } });
+    const two = createStore({ initial: INITIAL, storage: sqlite.store('logged'), deltaLog: 3 });
+    assert.equal(two.stats().log, 3, 'the reopened store can answer deltas from before the restart');
+    two.dispose();
+    sqlite.remove('logged');
+    assert.equal(sqlite.db.query('SELECT COUNT(*) AS n FROM log WHERE store = ?').get('logged').n, 0);
     sqlite.close();
   });
 

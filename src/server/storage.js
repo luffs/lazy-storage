@@ -16,15 +16,21 @@
 // The interface is incremental so a row-oriented backend (SQLite) writes
 // only what an op touched:
 //
-//   load()  -> null | { rows: Array<[pathKey, row]>, replicas: { replicaId: { seq, seen } }, version, epoch }
+//   load()  -> null | { rows: Array<[pathKey, row]>, replicas: { replicaId: { seq, seen } }, version, epoch, log? }
 //   commit({ upserts: Array<[pathKey, row]>, deletes: pathKey[],
-//            replica?: { id, seq, seen }, forgetReplicas?: replicaId[], version, epoch })
+//            replica?: { id, seq, seen }, forgetReplicas?: replicaId[], version, epoch,
+//            log?: { v, diff }, logFloor?: number })
 //   flush() -> void   (write out anything buffered; called on dispose)
 //
 // `seen` is the store's clock (ms) when the replica's op arrived; a
 // `seen` of null means unknown (a document from before it was recorded).
 // `epoch` is a random id the store mints once per storage life, so a
 // client can tell whether its cached version means anything here.
+// `log` in a commit is the accepted diff this op made, at version `v`;
+// an adapter may keep these (pruning below `logFloor`) and hand them back
+// as `log: [{ v, diff }]` on load, so a restarted server still answers
+// reconnects with deltas. The memory and SQLite adapters do; the JSON
+// file adapter does not, to keep its document small.
 // The store also accepts the older `seqs: { replicaId: seq }` from load.
 // `null` from load means "never seen": the store starts from `initial`.
 // Document-oriented adapters (memory, JSON file) apply commits to an
@@ -33,8 +39,9 @@ import { existsSync, readFileSync, mkdirSync, writeFileSync, renameSync } from '
 import { dirname, resolve } from 'node:path';
 
 /** The in-memory document shared by the memory and JSON-file adapters */
-function document(initial = null) {
+function document(initial = null, { keepLog = false } = {}) {
   const rows = new Map(initial ? initial.rows : []);
+  let log = keepLog && Array.isArray(initial?.log) ? initial.log.map(e => structuredClone(e)) : [];
   // A document written before `seen` existed holds `seqs`
   const replicas = initial
     ? Object.fromEntries(initial.replicas
@@ -45,7 +52,9 @@ function document(initial = null) {
   let epoch = initial?.epoch ?? null;
   let seen = initial !== null;
   return {
-    load: () => (seen ? { rows: [...rows].map(([k, r]) => [k, structuredClone(r)]), replicas: structuredClone(replicas), version, epoch } : null),
+    load: () => (seen
+      ? { rows: [...rows].map(([k, r]) => [k, structuredClone(r)]), replicas: structuredClone(replicas), version, epoch, ...(keepLog ? { log: structuredClone(log) } : {}) }
+      : null),
     commit(change) {
       seen = true;
       for (const key of change.deletes) rows.delete(key);
@@ -54,14 +63,18 @@ function document(initial = null) {
       for (const id of change.forgetReplicas ?? []) delete replicas[id];
       version = change.version;
       if (change.epoch !== undefined) epoch = change.epoch;
+      if (keepLog) {
+        if (change.log) log.push(structuredClone(change.log));
+        if (Number.isInteger(change.logFloor)) log = log.filter(e => e.v >= change.logFloor);
+      }
     },
-    serialize: () => ({ rows: [...rows], replicas, version, epoch })
+    serialize: () => ({ rows: [...rows], replicas, version, epoch, ...(keepLog ? { log } : {}) })
   };
 }
 
-/** Keeps the document in memory only; the store starts fresh with the process */
+/** Keeps the document in memory only (delta log included); the store starts fresh with the process */
 export function memoryStorage() {
-  const doc = document();
+  const doc = document(null, { keepLog: true });
   return {
     load: doc.load,
     commit: doc.commit,

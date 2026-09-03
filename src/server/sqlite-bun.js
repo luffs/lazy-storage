@@ -38,6 +38,12 @@ const SCHEMA = `
     seen    INTEGER,
     PRIMARY KEY (store, replica)
   ) WITHOUT ROWID;
+  CREATE TABLE IF NOT EXISTS log (
+    store TEXT    NOT NULL,
+    v     INTEGER NOT NULL,
+    diff  TEXT    NOT NULL,
+    PRIMARY KEY (store, v)
+  ) WITHOUT ROWID;
 `;
 
 /** Databases from before 0.3.0 lack `replicas.seen` (NULL: unknown) and `stores.epoch` (NULL: the store mints one) */
@@ -78,8 +84,12 @@ export function sqliteStorage(file = ':memory:', { wal = true } = {}) {
       ON CONFLICT (store, replica) DO UPDATE SET seq = excluded.seq, seen = excluded.seen`),
     forgetReplica: db.prepare('DELETE FROM replicas WHERE store = ? AND replica = ?'),
     ids: db.prepare('SELECT store FROM stores ORDER BY store'),
+    putLog: db.prepare('INSERT INTO log (store, v, diff) VALUES (?, ?, ?) ON CONFLICT (store, v) DO UPDATE SET diff = excluded.diff'),
+    pruneLog: db.prepare('DELETE FROM log WHERE store = ? AND v < ?'),
+    log: db.prepare('SELECT v, diff FROM log WHERE store = ? ORDER BY v'),
     dropLeaves: db.prepare('DELETE FROM leaves WHERE store = ?'),
     dropReplicas: db.prepare('DELETE FROM replicas WHERE store = ?'),
+    dropLog: db.prepare('DELETE FROM log WHERE store = ?'),
     dropStore: db.prepare('DELETE FROM stores WHERE store = ?')
   };
 
@@ -90,12 +100,15 @@ export function sqliteStorage(file = ':memory:', { wal = true } = {}) {
     }
     if (change.replica) q.setReplica.run(id, change.replica.id, change.replica.seq, change.replica.seen ?? null);
     for (const replica of change.forgetReplicas ?? []) q.forgetReplica.run(id, replica);
+    if (change.log) q.putLog.run(id, change.log.v, JSON.stringify(change.log.diff));
+    if (Number.isInteger(change.logFloor)) q.pruneLog.run(id, change.logFloor);
     q.setVersion.run(id, change.version, change.epoch ?? null);
   });
 
   const remove = db.transaction(id => {
     q.dropLeaves.run(id);
     q.dropReplicas.run(id);
+    q.dropLog.run(id);
     q.dropStore.run(id);
   });
 
@@ -118,7 +131,8 @@ export function sqliteStorage(file = ':memory:', { wal = true } = {}) {
               : { value: JSON.parse(r.value), ts: [r.ts_ms, r.ts_count, r.ts_replica] }
           ]);
           const replicas = Object.fromEntries(q.replicas.all(id).map(r => [r.replica, { seq: r.seq, seen: r.seen ?? null }]));
-          return { rows, replicas, version: meta.version, epoch: meta.epoch ?? null };
+          const log = q.log.all(id).map(r => ({ v: r.v, diff: JSON.parse(r.diff) }));
+          return { rows, replicas, version: meta.version, epoch: meta.epoch ?? null, log };
         },
         commit(change) {
           commit(id, change);

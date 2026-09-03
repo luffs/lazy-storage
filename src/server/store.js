@@ -104,6 +104,23 @@ function loadReplicas(saved, now) {
   return replicas;
 }
 
+/**
+ * A persisted delta log is usable only where it is contiguous and ends at
+ * the current version; the longest such suffix is kept, capped at `limit`.
+ * Anything else (a gap, a log that stops short) would answer a reconnect
+ * with a delta missing ops, so it is dropped and snapshots serve instead.
+ */
+function restoreLog(entries, version, limit) {
+  if (!Array.isArray(entries) || limit <= 0) return [];
+  const sorted = entries
+    .filter(e => Utils.isPlainObject(e) && Number.isInteger(e.v) && Utils.isPlainObject(e.diff))
+    .sort((a, b) => a.v - b.v);
+  if (sorted.length === 0 || sorted[sorted.length - 1].v !== version) return [];
+  let start = sorted.length - 1;
+  while (start > 0 && sorted[start - 1].v === sorted[start].v - 1) start--;
+  return sorted.slice(Math.max(start, sorted.length - limit));
+}
+
 /** Users are distinct by `id` when they have one, else by value */
 const defaultPresenceKey = user =>
   (user !== null && typeof user === 'object' && user.id != null ? String(user.id) : JSON.stringify(user));
@@ -184,7 +201,10 @@ export function createStore({
   const sessions = new Set();
   let serverSeq = replicas.get('server')?.seq ?? 0;
   let lastCompaction = -Infinity;
-  const log = [];  // the last `deltaLog` accepted diffs, as { v, diff }
+  // The last `deltaLog` accepted diffs, as { v, diff }; an adapter that
+  // persists them hands them back on load, so a restart still answers
+  // reconnects with deltas
+  const log = restoreLog(saved?.log, version, deltaLog);
   const buckets = new Map();  // replicaId -> { tokens, at }, for the rate limit
   const observers = { op: new Set(), refused: new Set(), session: new Set() };
   let self;
@@ -360,7 +380,11 @@ export function createStore({
     commit({
       upserts: won.map(([path, value]) => [pathKey(path), value === null ? { ts: op.ts, deleted: true } : { value, ts: op.ts }]),
       deletes: dropped,
-      replica: { id: op.replicaId, seq: op.seq, seen }
+      replica: { id: op.replicaId, seq: op.seq, seen },
+      // The log entry this op made, and the oldest version the store still
+      // keeps, so an adapter persisting the log can prune to match
+      log: accepted && deltaLog > 0 ? { v: version, diff: accepted } : undefined,
+      logFloor: log.length ? log[0].v : version + 1
     });
     if (accepted) broadcast({ t: 'patch', diff: accepted, ts: op.ts, v: version });
     const lost = [...rejected, ...stripped];

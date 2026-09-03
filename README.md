@@ -134,11 +134,12 @@ ops and answers with a **delta**: the accepted diffs since that version,
 in order, followed by corrections for whatever the hello's own ops lost.
 A reconnect after a network blip therefore costs a few small messages,
 and a reconnect that missed nothing costs one empty one. The server keeps
-the last `deltaLog` accepted diffs (default 1000) in memory for this, and
-falls back to a full snapshot when the log does not reach back far
-enough, after a restart that emptied it, when the client's cached version
-belongs to another life of the storage (storage wiped and re-seeded), or
-when one of the hello's ops was refused. Edits made while the hello was
+the last `deltaLog` accepted diffs (default 1000) for this, persisted by
+the SQLite and memory adapters so a restart or a deploy still answers
+with deltas, and falls back to a full snapshot when the log does not
+reach back far enough, when the client's cached version belongs to
+another life of the storage (storage wiped and re-seeded), or when one
+of the hello's ops was refused. Edits made while the hello was
 in flight are re-applied on top and sent. Nothing is lost on a reload
 while offline: the replica id, sequence numbers, pending ops, and the
 version are restored with the outbox, and the server ignores an op it
@@ -158,12 +159,20 @@ top-level containers), the rows carry the data, and a container added to
 Adapters:
 
 - `sqliteStorage(file)` (`lazy-storage/server/sqlite`, Bun) — one file for
-  any number of stores, keyed by `(store, path)`, WAL mode. `sqlite.store(id)`
-  gives a store its adapter; `sqlite.ids()`, `sqlite.remove(id)`, and the
-  raw `sqlite.db` are there for administration.
+  any number of stores, keyed by `(store, path)`, WAL mode, the delta log
+  kept alongside. `sqlite.store(id)` gives a store its adapter;
+  `sqlite.ids()`, `sqlite.remove(id)`, and the raw `sqlite.db` are there
+  for administration.
 - `jsonFileStorage(file)` — one JSON document per store, written
-  atomically and debounced. Fine for small single-store deployments.
+  atomically and debounced, without the delta log (a restart answers the
+  first reconnects with snapshots). Fine for small single-store deployments.
 - `memoryStorage()` — nothing survives the process; for tests.
+
+A custom adapter implements `load()`, `commit(change)`, and `flush()`;
+`change` carries the rows an op won and dropped, the replica's progress,
+the version and epoch, and optionally the accepted diff as a `log` entry
+with the `logFloor` below which the store no longer needs entries. See
+the header of `src/server/storage.js` for the exact shapes.
 
 Two things would otherwise grow without bound: tombstones, and the
 progress kept per replica (every browser tab that ever connected). A store
@@ -319,6 +328,24 @@ Bun.serve({
 });
 ```
 
+**Shutting down.** `await lazy.close()` (or `await server.shutdown()` on
+what `serve` returns) refuses new sockets with 503, closes the open ones
+with WebSocket code 1001 so clients reconnect at once instead of waiting
+out a dead connection, and disposes the store registry, which flushes
+every store's storage. With the delta log persisted, the reconnect to the
+next process is a delta: a deploy costs each client a few small messages.
+Wire it to the signals your host sends:
+
+```js
+for (const signal of ['SIGTERM', 'SIGINT']) {
+  process.on(signal, async () => {
+    await lazy.close();
+    sqlite.close();
+    process.exit(0);
+  });
+}
+```
+
 ## Undo
 
 Each client has a lazy-watch undo manager attached with a `record` filter
@@ -367,8 +394,9 @@ replaced by a leaf) drops the affected steps.
 
 **Bun adapter** (`lazy-storage/server/bun`): `serve({ stores, port, path, fetch, authenticate, authorize, maxPayload, onError })` —
 `stores` is a registry or `id => store|null` (for one store, `() => store`); the
-hub listens at `path`. `createHandlers({ stores, path, authenticate, authorize, maxPayload, onError })` →
-`{ upgrade(req, server), websocket }` for mounting inside your own `Bun.serve`.
+hub listens at `path`; the returned server gains `shutdown({ reason })`.
+`createHandlers({ stores, path, authenticate, authorize, maxPayload, onError })` →
+`{ upgrade(req, server), websocket, close({ reason }), closing }` for mounting inside your own `Bun.serve`.
 
 **Core** (`lazy-storage/core`): the pieces both sides share — `createClock`,
 `compareTs`, `mergeOp`, `leaves`, `expandRegisters`, `rebuild`, `registerSet`,

@@ -1,6 +1,6 @@
 // serve.test.js - Runs under Bun only: the WebSocket adapter end to end, over real sockets
 import assert from 'node:assert/strict';
-import { createStore, createStores } from '../../src/server/index.js';
+import { createStore, createStores, memoryStorage } from '../../src/server/index.js';
 import { serve } from '../../src/server/bun.js';
 import { createClient, createConnection, webSocketTransport } from '../../src/index.js';
 
@@ -157,6 +157,44 @@ try {
       connection.close();
     } finally {
       small.stop(true);
+    }
+  });
+
+  await test('shutdown refuses new sockets, closes the open ones so clients reconnect, flushes the stores, and the next process answers with a delta', async () => {
+    const storage = memoryStorage();
+    const registry = () => createStores(() => createStore({ initial: INITIAL, storage }));
+    let stores2 = registry();
+    const first = serve({ port: 0, stores: stores2 });
+    const port = first.port;
+    const url = `ws://localhost:${port}/ws`;
+    const connection = createConnection({ transport: webSocketTransport(url), reconnect: { min: 20, max: 50 }, keepalive: false });
+    const client = createClient({ connection, store: 'team', initial: INITIAL, replicaId: 'shut-1' });
+    client.connect();
+    await until(() => client.status === 'online', 'online on the first process');
+    client.collection('tasks').add({ id: 'before' });
+    await until(() => stores2.get('team').snapshot().tasks.before && client.pending === 0, 'applied and acked');
+
+    const closed = first.shutdown({ reason: 'deploying' });
+    await until(() => client.status === 'offline', 'the socket was closed');
+    await closed;
+    assert.equal((await fetch(`http://localhost:${port}/ws`).catch(() => ({ status: 'refused' }))).status, 'refused', 'the first process is gone');
+    assert.deepEqual(stores2.ids(), [], 'the registry was disposed, flushing the store');
+    assert.equal(storage.load().rows.length, 1, 'the row is in storage');
+
+    const stores3 = registry();
+    stores3.get('team').patch({ tasks: { meanwhile: { id: 'meanwhile' } } });
+    const second = serve({ port, stores: stores3 });
+    try {
+      await until(() => client.status === 'online', 'reconnected to the second process on its own');
+      assert.deepEqual(Object.keys(client.state.tasks).sort(), ['before', 'meanwhile']);
+      assert.equal(client.version, stores3.get('team').version);
+      client.collection('tasks').add({ id: 'after' });
+      await until(() => stores3.get('team').snapshot().tasks.after, 'edits flow again');
+    } finally {
+      client.dispose();
+      connection.close();
+      second.stop(true);
+      stores3.dispose();
     }
   });
 

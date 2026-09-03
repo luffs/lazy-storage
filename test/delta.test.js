@@ -210,7 +210,7 @@ test('a cached version from another life of the storage is answered with a snaps
   assert.equal(twoClient.version, two.store.version);
 });
 
-test('after a server restart the first reconnect is a delta when nothing changed, a snapshot when something did', async () => {
+test('a restart on storage that keeps the delta log still answers reconnects with deltas; without the log, a snapshot', async () => {
   const storage = memoryStorage();
   const outbox = memoryOutbox();
   let { store, net, last } = setup({ storage });
@@ -220,34 +220,41 @@ test('after a server restart the first reconnect is a delta when nothing changed
   store.patch({ tasks: { t1: { id: 't1' } } });
   await net.settle();
   a.dispose();
+  store.patch({ tasks: { t2: { id: 't2' } } });   // missed by the client, and persisted in the log
   store.dispose();
 
   ({ store, net, last } = setup({ storage }));
+  assert.equal(store.stats().log, 2, 'the log came back with the rows');
   const b = createClient({ transport: net.link().factory, reconnect: false, store: 'main', initial: INITIAL, storage: outbox });
   b.connect();
   await net.settle();
   assert.equal(last().t, 'delta');
-  assert.deepEqual(last().patches, [], 'same epoch, same version: nothing to send');
+  assert.equal(last().patches.length, 1, 'just the op made after the client left');
+  assert.deepEqual(snap(b), store.snapshot());
   b.dispose();
+  store.patch({ tasks: { t3: { id: 't3' } } });   // missed by the client; the restart below forgets the log
   store.dispose();
 
-  ({ store, net, last } = setup({ storage }));
-  store.patch({ tasks: { t2: { id: 't2' } } });   // missed by the client, but in the log: still a delta
+  // Storage that forgets the log (the JSON file adapter, or a custom one)
+  const forgetful = { load: () => { const doc = storage.load(); delete doc.log; return doc; }, commit: change => storage.commit(change), flush() {} };
+  ({ store, net, last } = setup({ storage: forgetful }));
+  assert.equal(store.stats().log, 0);
   const c = createClient({ transport: net.link().factory, reconnect: false, store: 'main', initial: INITIAL, storage: outbox });
   c.connect();
   await net.settle();
-  assert.equal(last().t, 'delta');
-  assert.equal(last().patches.length, 1);
-  assert.deepEqual(snap(c), store.snapshot());
-  c.dispose();
-  store.patch({ tasks: { t3: { id: 't3' } } });   // missed, and lost from the log by the restart below
-  store.dispose();
-
-  ({ store, net, last } = setup({ storage }));
-  const d = createClient({ transport: net.link().factory, reconnect: false, store: 'main', initial: INITIAL, storage: outbox });
-  d.connect();
-  await net.settle();
   assert.equal(last().t, 'snapshot', 'the log does not reach back to the cached version');
-  assert.deepEqual(snap(d), store.snapshot());
-  assert.deepEqual(Object.keys(d.state.tasks).sort(), ['t1', 't2', 't3']);
+  assert.deepEqual(Object.keys(c.state.tasks).sort(), ['t1', 't2', 't3']);
+  c.dispose();
+});
+
+test('a persisted log is used only where it is contiguous and ends at the current version', () => {
+  const rows = [['["tasks","a","id"]', { value: 'a', ts: [1, 0, 'x'] }]];
+  const at = (version, log) => createStore({ initial: INITIAL, storage: { load: () => ({ rows, replicas: {}, version, epoch: 'e', log }), commit() {}, flush() {} } });
+  const entry = v => ({ v, diff: { tasks: { a: { n: v } } } });
+  assert.equal(at(5, [entry(3), entry(4), entry(5)]).stats().log, 3);
+  assert.equal(at(5, [entry(2), entry(4), entry(5)]).stats().log, 2, 'the gap cuts the log at 4');
+  assert.equal(at(5, [entry(3), entry(4)]).stats().log, 0, 'a log that stops short is useless');
+  assert.equal(at(5, [entry(5), entry(3), entry(4)]).stats().log, 3, 'order does not matter');
+  assert.equal(at(5, [entry(4), 'junk', entry(5)]).stats().log, 2);
+  assert.equal(createStore({ initial: INITIAL, deltaLog: 2, storage: { load: () => ({ rows, replicas: {}, version: 5, epoch: 'e', log: [entry(3), entry(4), entry(5)] }), commit() {}, flush() {} } }).stats().log, 2, 'capped at deltaLog');
 });

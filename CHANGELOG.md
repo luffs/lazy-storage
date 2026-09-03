@@ -6,6 +6,18 @@ All notable changes to lazy-storage are documented here. The format follows Keep
 
 ### Added
 
+- **The delta log survives a restart.** A commit carries the accepted diff
+  as `log: { v, diff }` and a `logFloor`; the SQLite and memory adapters
+  keep the entries (a `log` table, pruned to the floor) and hand them back
+  on load, so the first reconnects after a restart or a deploy are deltas
+  too. A persisted log is used only where it is contiguous and ends at the
+  current version. The JSON file adapter does not keep it
+- **Graceful shutdown.** `createHandlers` returns `close({ reason })`, and
+  `serve()`'s server gains `shutdown({ reason })`: new sockets are refused
+  with 503, open ones are closed with WebSocket code 1001 so clients
+  reconnect at once, and the store registry is disposed, flushing every
+  store. Together with the persisted log, a deploy costs each client a few
+  small messages
 - **Limits.** `maxPayload` on the Bun adapter (default 4 MB) ends a socket
   that sends a larger message; a hello now carries at most 1000 ops, the
   rest following as ops once the answer lands. `maxLeaves` on the store

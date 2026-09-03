@@ -22,11 +22,36 @@ test('a fresh adapter loads null and a committed one loads its rows, replicas, a
     rows: [['["tasks","a","title"]', { value: 'A', ts: T(10) }]],
     replicas: { r1: { seq: 3, seen: 500 }, r2: { seq: 1, seen: 600 } },
     version: 2,
-    epoch: null
+    epoch: null,
+    log: []
   });
   storage.commit({ upserts: [], deletes: [], forgetReplicas: ['r1'], version: 3, epoch: 'e1' });
   assert.deepEqual(storage.load().replicas, { r2: { seq: 1, seen: 600 } });
   assert.equal(storage.load().epoch, 'e1');
+});
+
+test('the memory adapter keeps the delta log, pruned to the floor the store names; the JSON file adapter does not', async () => {
+  const storage = memoryStorage();
+  storage.commit({ upserts: [], deletes: [], version: 1, epoch: 'e', log: { v: 1, diff: { a: 1 } }, logFloor: 1 });
+  storage.commit({ upserts: [], deletes: [], version: 2, epoch: 'e', log: { v: 2, diff: { a: 2 } }, logFloor: 1 });
+  storage.commit({ upserts: [], deletes: [], version: 3, epoch: 'e', log: { v: 3, diff: { a: 3 } }, logFloor: 2 });
+  assert.deepEqual(storage.load().log, [{ v: 2, diff: { a: 2 } }, { v: 3, diff: { a: 3 } }]);
+
+  const store = createStore({ initial: INITIAL, storage: memoryStorage(), deltaLog: 2 });
+  for (let i = 0; i < 4; i++) store.patch({ tasks: { [`t${i}`]: { id: `t${i}` } } });
+  assert.deepEqual(store.stats().log, 2);
+
+  const dir = mkdtempSync(join(tmpdir(), 'lazy-storage-'));
+  try {
+    const file = join(dir, 'store.json');
+    const one = createStore({ initial: INITIAL, storage: jsonFileStorage(file, { debounce: 5 }) });
+    one.patch({ tasks: { a: { id: 'a' } } });
+    one.dispose();
+    assert.equal('log' in JSON.parse(readFileSync(file, 'utf8')), false);
+    assert.equal(createStore({ initial: INITIAL, storage: jsonFileStorage(file) }).stats().log, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('a store mints an epoch once and keeps it across reopens; a wiped storage gets a new one', () => {

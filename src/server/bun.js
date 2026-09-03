@@ -10,6 +10,13 @@
 // `createHandlers` returns the pieces to mount inside your own Bun.serve
 // (call `upgrade` from your fetch; pass `websocket` through); `serve` is
 // the convenience wrapper that does it for you.
+//
+// Shutting down: `handlers.close()` refuses new sockets (503), closes the
+// open ones with WebSocket code 1001 "going away" so clients reconnect at
+// once instead of waiting out a dead connection, and disposes the store
+// registry, which flushes every store's storage. With a persisted delta
+// log the reconnect to the next process is a delta. `serve()` adds a
+// `shutdown()` that does this and then stops the server.
 import { LazyWatch } from 'lazy-watch';
 import { createHub } from './hub.js';
 import { toJSON } from './wire.js';
@@ -27,9 +34,10 @@ import { toJSON } from './wire.js';
  *   at most 1000 ops, so a long offline spell stays well under 4 MB
  * @param {(error: any) => void} [options.onError] - server faults: a
  *   store factory that threw, a bug while handling a message; default console
- * @returns {{ upgrade: (req: Request, server: any) => Promise<Response|undefined|null>, websocket: Object }}
+ * @returns {{ upgrade: (req: Request, server: any) => Promise<Response|undefined|null>, websocket: Object, close: (options?: { reason?: string }) => Promise<void>, get closing(): boolean }}
  *   `upgrade` resolves to null when the URL is not ours, undefined after a
- *   successful upgrade, or an error Response
+ *   successful upgrade, or an error Response; `close` is the graceful
+ *   shutdown described above
  */
 export function createHandlers({
   stores,
@@ -42,9 +50,11 @@ export function createHandlers({
   if (!stores) throw new TypeError('createHandlers requires stores (a registry or a resolver function)');
   const resolveStore = typeof stores === 'function' ? stores : id => stores.get(id);
   const hubs = new Map();
+  let closing = false;
 
   async function upgrade(req, server) {
     if (new URL(req.url).pathname !== path) return null;
+    if (closing) return new Response('Server shutting down', { status: 503, headers: { 'retry-after': '1' } });
     let user;
     if (authenticate) {
       user = await authenticate(req);
@@ -81,7 +91,34 @@ export function createHandlers({
     }
   };
 
-  return { upgrade, websocket };
+  /**
+   * Graceful shutdown: no new sockets, the open ones told to go away, the
+   * stores flushed (through the registry's dispose, when `stores` is one;
+   * a resolver function's stores are the caller's to flush). Resolves once
+   * every socket has closed.
+   */
+  async function close({ reason = 'Server shutting down' } = {}) {
+    closing = true;
+    const sockets = [...hubs.keys()];
+    const gone = Promise.all(sockets.map(ws => new Promise(resolve => {
+      const hub = hubs.get(ws);
+      hubs.set(ws, { receive() {}, close() { hub?.close(); resolve(); } });
+    })));
+    for (const ws of sockets) {
+      try {
+        ws.close(1001, reason);
+      } catch (err) {
+        onError(err);
+      }
+    }
+    // A socket that never reports its close (already gone) must not hold the shutdown
+    await Promise.race([gone, new Promise(resolve => setTimeout(resolve, 1000))]);
+    for (const hub of hubs.values()) hub.close();
+    hubs.clear();
+    if (typeof stores.dispose === 'function') stores.dispose();
+  }
+
+  return { upgrade, websocket, close, get closing() { return closing; } };
 }
 
 /**
@@ -93,7 +130,7 @@ export function createHandlers({
  */
 export function serve({ port = 3200, fetch: fetchHandler, ...options } = {}) {
   const handlers = createHandlers(options);
-  return Bun.serve({
+  const server = Bun.serve({
     port,
     async fetch(req, server) {
       const res = await handlers.upgrade(req, server);
@@ -106,4 +143,10 @@ export function serve({ port = 3200, fetch: fetchHandler, ...options } = {}) {
     },
     websocket: handlers.websocket
   });
+  /** Graceful shutdown (see createHandlers' close), then stop the server */
+  server.shutdown = async options => {
+    await handlers.close(options);
+    server.stop(true);
+  };
+  return server;
 }
