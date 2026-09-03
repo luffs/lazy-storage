@@ -2,7 +2,10 @@
 
 All notable changes to lazy-storage are documented here. The format follows Keep a Changelog; versions follow Semantic Versioning.
 
-## [Unreleased]
+## [0.2.2] - 2026-09-03
+
+A server no longer crashes when a store fails to open. No protocol or
+storage-format change.
 
 ### Fixed
 
