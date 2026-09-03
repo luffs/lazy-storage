@@ -15,7 +15,7 @@
 // may contain `*` segments, so 'tasks/*/subtaskOrder' declares one
 // register per task.
 import { LazyWatch } from 'lazy-watch';
-import { setAt, valueAt } from './paths.js';
+import { setAt, valueAt, deleteAt, parsePathKey } from './paths.js';
 
 const { Utils } = LazyWatch;
 
@@ -106,4 +106,23 @@ export function fromLeaves(entries) {
   const diff = {};
   for (const [path, value] of entries) setAt(diff, path, value);
   return diff;
+}
+
+/**
+ * `initial` with rows applied on top, shallow paths first, so a
+ * container's row lands before its children's and a leaf that later
+ * became a container is overridden by the deeper rows. A row is
+ * [pathKey, value]; a `null` value deletes the path (a tombstone on the
+ * server). Values are cloned, so the rows may be kept.
+ * @param {Object} initial
+ * @param {Array<[string, any]>} rows
+ */
+export function rebuild(initial, rows) {
+  const state = structuredClone(initial);
+  const ordered = rows.map(([key, value]) => [parsePathKey(key), value]).sort((a, b) => a[0].length - b[0].length);
+  for (const [path, value] of ordered) {
+    if (value === null) deleteAt(state, path);
+    else setAt(state, path, structuredClone(value));
+  }
+  return state;
 }

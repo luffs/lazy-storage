@@ -8,14 +8,19 @@
 // the server's, and how the undo manager keeps remote changes out of
 // history.
 //
-// On (re)connect the client sends its whole outbox in a `hello`; the
-// server merges it and answers with a snapshot that already contains the
-// result, which the client applies with `overwrite`. Edits made while the
-// hello was in flight are re-applied on top and sent.
+// On (re)connect the client sends its whole outbox in a `hello`, with
+// the store version it last saw; the server merges the ops and answers
+// with a delta of what happened since (applied as patches) or a snapshot
+// (applied with `overwrite`). Edits made while the hello was in flight
+// are re-applied on top and sent.
 //
-// The storage adapter also caches the last state next to the outbox, so a
+// The storage adapter keeps the outbox and a cache of the state, so a
 // client restarted offline (or before its first snapshot lands) starts
 // from what it last saw, pending edits included, instead of from nothing.
+// A document adapter holds the state as one document written debounced;
+// a row adapter holds one row per leaf and is written per batch (see
+// persistence.js). A row adapter that loads asynchronously (IndexedDB)
+// is opened with openClient().
 //
 // An op the server refuses comes back as an error with the op's seq and a
 // code. 'clock-skew' means this device's clock runs ahead: the client
@@ -31,13 +36,15 @@
 import { LazyWatch } from 'lazy-watch';
 import { createClock, compareTs } from '../core/hlc.js';
 import { registerSet } from '../core/paths.js';
-import { leaves, expandRegisters } from '../core/model.js';
+import { leaves, expandRegisters, rebuild } from '../core/model.js';
 import { randomId } from '../core/ids.js';
 import { memoryOutbox } from './storage.js';
 import { createConnection } from './connection.js';
+import { createPersistence, isRowAdapter } from './persistence.js';
 
 const { Utils } = LazyWatch;
 const REMOTE = { origin: 'remote' };
+const SNAPSHOT = { origin: 'remote', snapshot: true };
 const RESTORE = { origin: 'restore' };
 const HISTORY = new Set(['undo', 'redo']);
 const EVENTS = ['status', 'error', 'sync', 'closed', 'presence'];
@@ -54,8 +61,10 @@ const EVENTS = ['status', 'error', 'sync', 'closed', 'presence'];
  *   (arrays may live only here); must match the server's, which reports a
  *   mismatch as an error with code 'registers-mismatch' on every snapshot
  * @param {string} [options.replicaId] - defaults to the persisted one, else random
- * @param {Object} [options.storage] - outbox and state-cache persistence (default: memory)
- * @param {boolean} [options.cache=true] - persist the last state with the
+ * @param {Object} [options.storage] - outbox and state-cache persistence
+ *   (default: memory). An adapter whose load() returns a promise needs
+ *   openClient()
+ * @param {boolean} [options.cache=true] - persist the state with the
  *   outbox and start from it on the next load; false keeps only the outbox
  * @param {boolean} [options.undo=true] - attach an undo manager
  * @param {number} [options.undoLimit=100]
@@ -63,20 +72,39 @@ const EVENTS = ['status', 'error', 'sync', 'closed', 'presence'];
  *   backoff for an owned connection; false disables automatic reconnects
  * @param {() => number} [options.now] - wall clock (injectable for tests)
  */
-export function createClient({
+export function createClient(options = {}) {
+  const storage = options.storage ?? memoryOutbox();
+  const saved = storage.load();
+  if (saved && typeof saved.then === 'function') {
+    throw new TypeError('This storage adapter loads asynchronously; open the client with openClient() instead');
+  }
+  return build({ ...options, storage }, saved);
+}
+
+/**
+ * createClient for a storage adapter that loads asynchronously (IndexedDB):
+ * resolves to the client once the cached state and outbox are in.
+ * @returns {Promise<Object>}
+ */
+export function openClient(options = {}) {
+  const storage = options.storage ?? memoryOutbox();
+  return Promise.resolve(storage.load()).then(saved => build({ ...options, storage }, saved));
+}
+
+function build({
   store: storeId,
   connection,
   transport,
   initial = {},
   registers = [],
   replicaId,
-  storage = memoryOutbox(),
+  storage,
   cache = true,
   undo = true,
   undoLimit = 100,
   reconnect = { min: 500, max: 10_000 },
   now
-} = {}) {
+}, saved) {
   if (typeof storeId !== 'string' || !storeId) throw new TypeError('createClient requires a store id');
   if (connection && transport) throw new TypeError('createClient takes either a connection or a transport, not both');
   if (!connection && typeof transport !== 'function') throw new TypeError('createClient requires a connection or a transport factory');
@@ -84,25 +112,30 @@ export function createClient({
   connection = connection ?? createConnection({ transport, reconnect });
   const regs = registerSet(registers);
   const declared = regs.patterns.map(p => p.join('/')).sort();
+  const rows = isRowAdapter(storage);
 
-  const saved = storage.load();
+  if (!Utils.isPlainObject(saved)) saved = null;
   replicaId = replicaId ?? saved?.replicaId ?? randomId();
   const continuing = saved?.replicaId === replicaId;
   let seq = continuing ? saved.seq : 0;
-  let outbox = continuing ? saved.ops : [];
+  let outbox = continuing && Array.isArray(saved.ops) ? [...saved.ops] : [];
   // The cached state is the right starting point as long as it is this
   // replica's; `initial` underneath supplies any container added since.
-  // It is written debounced, so it may predate the last few pending ops:
-  // replaying the outbox over it (idempotent for diffs) brings it current
-  const restored = cache && continuing && Utils.isPlainObject(saved.state);
+  // A document cache is written debounced, so it may predate the last few
+  // pending ops: replaying the outbox over it (idempotent for diffs)
+  // brings it current
+  const restored = cache && continuing && (rows ? Array.isArray(saved.rows) : Utils.isPlainObject(saved.state));
   const state = new LazyWatch(
-    restored ? { ...structuredClone(initial), ...structuredClone(saved.state) } : structuredClone(initial),
+    restored
+      ? (rows ? rebuild(initial, saved.rows) : { ...structuredClone(initial), ...structuredClone(saved.state) })
+      : structuredClone(initial),
     { inverse: true }
   );
   if (restored) for (const op of outbox) LazyWatch.patch(state, op.diff, RESTORE);
   // The store version (and the store's epoch) the state reflects, so a
   // reconnect can ask for what happened since rather than everything
   let known = { epoch: restored && typeof saved.epoch === 'string' ? saved.epoch : null, v: restored && Number.isInteger(saved.version) ? saved.version : 0 };
+
   // The clock runs on local time plus an offset the server corrects when
   // it refuses an op for running ahead (see 'clock-skew' below)
   const wall = now ?? Date.now;
@@ -115,6 +148,15 @@ export function createClient({
   let lastStatus = 'offline';
   let presence = [];      // distinct users with a live session on this store
   let ended = null;       // { code, message } after the server closed this store for us
+
+  const persistence = createPersistence({
+    storage,
+    cache,
+    regs,
+    state: () => state,
+    ops: () => outbox,
+    meta: () => ({ replicaId, seq, version: known.v, epoch: known.epoch })
+  });
 
   // Own batches (meta undefined) and undo/redo replays are history; remote
   // and rejected batches are not
@@ -148,37 +190,20 @@ export function createClient({
     emit('presence', presence);
   }
 
-  // The outbox is small and written synchronously whenever it changes. The
-  // state cache costs a serialization of everything, so it is written
-  // debounced after any change to the state (and flushed on dispose); the
-  // replay on restore covers the ops it may be behind by. An adapter
-  // without saveState gets the state inside the outbox document instead
-  const splitCache = cache && typeof storage.saveState === 'function';
-  let stateTimer = null;
-  function persist() {
-    if (cache && !splitCache) return persistState();
-    storage.save({ replicaId, seq, ops: outbox });
-  }
-  function persistState() {
-    clearTimeout(stateTimer);
-    stateTimer = null;
-    if (!cache) return;
-    const snapshot = LazyWatch.snapshot(state);
-    if (splitCache) storage.saveState({ state: snapshot, version: known.v, epoch: known.epoch });
-    else storage.save({ replicaId, seq, ops: outbox, state: snapshot, version: known.v, epoch: known.epoch });
-  }
-  function persistStateSoon() {
-    if (!cache || stateTimer) return;
-    stateTimer = setTimeout(persistState, 50);
-    if (typeof stateTimer?.unref === 'function') stateTimer.unref();
+  /** Drop acknowledged ops (seq and below) from the outbox and its persistence */
+  function acknowledge(upTo) {
+    outbox = outbox.filter(op => op.seq > upTo);
+    for (const s of restamped.keys()) if (s <= upTo) restamped.delete(s);
+    persistence.drop(upTo);
   }
 
   // Every local batch becomes an op. A batch that breaks the model is
   // reverted in place (tagged 'rejected', so it is neither sent nor
-  // recorded) and reported.
+  // recorded) and reported. Remote and restore batches only reach
+  // persistence.
   LazyWatch.on(state, (diff, inverse, meta) => {
     if (meta && !HISTORY.has(meta.origin)) {
-      persistStateSoon();
+      if (meta.origin !== 'rejected') persistence.batch(diff, meta);
       return;
     }
     let expanded;
@@ -192,8 +217,8 @@ export function createClient({
     }
     const op = { replicaId, seq: ++seq, ts: clock.now(), diff: expanded };
     outbox.push(op);
-    persist();
-    persistStateSoon();
+    persistence.op(op);
+    persistence.batch(expanded, meta);
     if (status() === 'online') link.send({ t: 'op', op });
     emit('sync');
   });
@@ -222,16 +247,16 @@ export function createClient({
   function caughtUp(msg, applyServerState) {
     clock.receive(msg.ts);
     checkRegisters(msg.registers);
-    outbox = outbox.filter(op => op.seq > msg.seq);
-    for (const seq of restamped.keys()) if (seq <= msg.seq) restamped.delete(seq);
+    // The version first, so what persistence writes for the batches below
+    // is stamped with the version the state is about to reflect
+    if (Number.isInteger(msg.v)) known = { epoch: typeof msg.epoch === 'string' ? msg.epoch : null, v: msg.v };
+    acknowledge(msg.seq);
     applyServerState();
     for (const op of outbox) {
       LazyWatch.patch(state, op.diff, REMOTE);
       link.send({ t: 'op', op });
     }
-    if (Number.isInteger(msg.v)) known = { epoch: typeof msg.epoch === 'string' ? msg.epoch : null, v: msg.v };
-    persist();
-    persistStateSoon();
+    persistence.version();
     synced = true;
     refreshStatus();
     emit('sync');
@@ -240,21 +265,19 @@ export function createClient({
   function handle(msg) {
     switch (msg.t) {
       case 'snapshot':
-        return caughtUp(msg, () => LazyWatch.overwrite(state, msg.state, REMOTE));
+        return caughtUp(msg, () => LazyWatch.overwrite(state, msg.state, SNAPSHOT));
       case 'delta':
         return caughtUp(msg, () => {
           for (const diff of Array.isArray(msg.patches) ? msg.patches : []) LazyWatch.patch(state, diff, REMOTE);
         });
       case 'patch':
         clock.receive(msg.ts);
-        LazyWatch.patch(state, msg.diff, REMOTE);
         if (Number.isInteger(msg.v)) known.v = msg.v;
+        LazyWatch.patch(state, msg.diff, REMOTE);
         return;
       case 'ack':
         clock.receive(msg.ts);
-        outbox = outbox.filter(op => op.seq > msg.seq);
-        for (const seq of restamped.keys()) if (seq <= msg.seq) restamped.delete(seq);
-        persist();
+        acknowledge(msg.seq);
         if (msg.correction) LazyWatch.patch(state, msg.correction, REMOTE);
         emit('sync');
         return;
@@ -285,8 +308,7 @@ export function createClient({
         // resync from a snapshot so this replica falls back in line (when a
         // hello is in flight its snapshot is already on the way)
         if (Number.isInteger(msg.seq)) {
-          outbox = outbox.filter(op => op.seq > msg.seq);
-          persist();
+          acknowledge(msg.seq);
           // Ask for a snapshot, not a delta: the delta would leave the
           // refused edit in place
           if (synced) link?.send({ t: 'hello', replicaId, ops: outbox });
@@ -317,8 +339,8 @@ export function createClient({
     for (const op of behind) {
       op.ts = clock.now();
       restamped.set(op.seq, attempts);
+      persistence.op(op);
     }
-    persist();
     if (synced) for (const op of behind) link.send({ t: 'op', op });
     return true;
   }
@@ -434,7 +456,7 @@ export function createClient({
     restored,
     dispose() {
       disconnect();
-      if (stateTimer) persistState();
+      persistence.flush();
       stopStatus();
       undoManager?.dispose();
       LazyWatch.dispose(state);

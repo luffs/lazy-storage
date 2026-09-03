@@ -2,6 +2,28 @@
 
 All notable changes to lazy-storage are documented here. The format follows Keep a Changelog; versions follow Semantic Versioning.
 
+## [Unreleased]
+
+### Added
+
+- **Row persistence on the client.** A storage adapter may keep one row
+  per leaf and one per pending op instead of a state document: every
+  batch the state applies is walked into leaves and committed as the rows
+  it touched (a deletion takes the path and everything under it), and a
+  snapshot replaces the rows, healing anything a failed write left. So an
+  edit costs its leaves, however large the state. Two adapters:
+  `indexedDBStorage(name, { onError })` for browsers, with `settled()`,
+  `close()`, and `destroy()`, and `sqliteClientStorage(file)`
+  (`lazy-storage/client/sqlite`) for a client running in Bun. The row
+  adapter interface is `{ load, commit, replace, saveOp, dropOps }`, every
+  write carrying the client's `{ replicaId, seq, version, epoch }`
+- `openClient(options)`: `createClient` for an adapter whose `load()`
+  returns a promise (IndexedDB does); resolves to the client. `createClient`
+  refuses such an adapter with a pointer to it
+- `rebuild(initial, rows)` in `lazy-storage/core`: `initial` with rows
+  applied shallow-first, now shared by the server's load and the client's
+  restore
+
 ## [0.3.0] - 2026-09-03
 
 Three guards a deployed store needs, and three costs that no longer grow

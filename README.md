@@ -108,10 +108,25 @@ the **last state** next to the outbox, so a client restarted while offline,
 or before its first snapshot has landed, starts from what it last saw with
 its pending edits already applied (`db.restored` says so) rather than from
 `initial`; the snapshot on reconnect then brings it up to date. Pass
-`cache: false` to keep only the outbox. The outbox is small and written
-with every op; the state is written debounced, since it costs a
-serialization of everything, and a restore replays the outbox over it, so
-a state a few ops behind still comes up current.
+`cache: false` to keep only the outbox.
+
+There are two kinds of storage adapter. A **document** adapter
+(`localStorageOutbox`, `memoryOutbox`) keeps the outbox as one small
+document written with every op, and the state as another, written
+debounced since it costs a serialization of everything; a restore replays
+the outbox over the cached state, so a state a few ops behind still comes
+up current. Fine for states up to a megabyte or so. A **row** adapter
+keeps one row per leaf and one per pending op, so a batch costs the
+leaves it touched and only a snapshot touches everything:
+`indexedDBStorage(name)` for browsers (a far larger quota than
+localStorage and no serialization on the main thread; it loads
+asynchronously, so open the client with `await openClient({ ... })`), and
+`sqliteClientStorage(file)` from `lazy-storage/client/sqlite` for a client
+that runs in Bun, synchronous like the rest. Use one name or file per
+store and per replica (a tab is a replica), and `destroy()` to drop an
+IndexedDB database a closed tab left behind. Everything else about a
+client works in Bun and Node as it does in a browser: the transport needs
+a global `WebSocket` (or one passed in), and ids come from `crypto`.
 
 On (re)connect the client sends the whole outbox in one `hello`, together
 with the store version it last saw (`db.version`). The server merges the
@@ -284,6 +299,7 @@ replaced by a leaf) drops the affected steps.
 **Client** (`lazy-storage`)
 
 - `createClient({ store, connection | transport, initial, registers, replicaId, storage, cache, undo, undoLimit, reconnect, now })`; `db.restored` — started from the cached state; `db.version` — the store version this client has seen everything up to
+- `openClient(options)` → `Promise<db>` — the same, for a storage adapter whose `load()` returns a promise
 - `createConnection({ transport, reconnect, keepalive })` → `connect()`, `close()`, `status`, `attached`, `on('status', fn)` — a socket shared by clients
 - `db.state` — the mirror (a lazy-watch proxy). Read and write it directly
 - `db.store`, `db.connection` — the store id and the connection
@@ -293,7 +309,10 @@ replaced by a leaf) drops the affected steps.
 - `db.watch(listener)` — state changes; `meta?.origin === 'remote'` marks the server's
 - `db.on('status' | 'error' | 'sync' | 'presence' | 'closed', fn)` — lifecycle events; a refused op is an error with a `code` (`forbidden`, `expired`, `invalid`; `clock-skew` is handled without one)
 - `db.undo()`, `db.redo()`, `db.canUndo`, `db.canRedo`, `db.checkpoint()`, `db.group(fn)`, `db.clearHistory()`
-- `webSocketTransport(url)`, `memoryOutbox()`, `localStorageOutbox(key)` — a storage adapter is `{ load(), save(outbox), saveState(cache) }`; without `saveState` the state rides inside `save`
+- `webSocketTransport(url)`, `memoryOutbox()`, `localStorageOutbox(key)` — document adapters: `{ load(), save(outbox), saveState(cache) }`; without `saveState` the state rides inside `save`
+- `indexedDBStorage(name, { onError })` → also `settled()`, `close()`, `destroy()` — a row adapter: `{ load(), commit({ puts, deletes, meta }), replace({ rows, meta }), saveOp(op, meta), dropOps(seq, meta) }`, where a delete removes the path and everything under it and `meta` is `{ replicaId, seq, version, epoch }`
+
+**Bun client** (`lazy-storage/client/sqlite`): `sqliteClientStorage(file, { wal })` → a row adapter on bun:sqlite, plus `db` and `close()`.
 
 **Server** (`lazy-storage/server`)
 
@@ -317,7 +336,7 @@ hub listens at `path`. `createHandlers({ stores, path, authenticate, authorize }
 `{ upgrade(req, server), websocket }` for mounting inside your own `Bun.serve`.
 
 **Core** (`lazy-storage/core`): the pieces both sides share — `createClock`,
-`compareTs`, `mergeOp`, `leaves`, `expandRegisters`, `registerSet`,
+`compareTs`, `mergeOp`, `leaves`, `expandRegisters`, `rebuild`, `registerSet`,
 `compactTombstones`, `randomId`.
 
 ## Wire protocol

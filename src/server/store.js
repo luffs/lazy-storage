@@ -65,8 +65,8 @@
 //   { t: 'pong' }
 import { LazyWatch } from 'lazy-watch';
 import { createClock, isTimestamp } from '../core/hlc.js';
-import { registerSet, pathKey, parsePathKey, setAt, valueAt, deleteAt } from '../core/paths.js';
-import { leaves, assertModel } from '../core/model.js';
+import { registerSet, pathKey, parsePathKey, setAt, valueAt } from '../core/paths.js';
+import { leaves, assertModel, rebuild } from '../core/model.js';
 import { mergeOp, compactTombstones } from '../core/merge.js';
 import { memoryStorage } from './storage.js';
 import { toJSON } from './wire.js';
@@ -86,17 +86,6 @@ export class RefusedError extends Error {
     this.code = code;
     Object.assign(this, extra);
   }
-}
-
-/** `initial` with the persisted rows applied on top, shallow paths first */
-function rebuild(initial, rows) {
-  const state = structuredClone(initial);
-  const ordered = rows.map(([key, row]) => [parsePathKey(key), row]).sort((a, b) => a[0].length - b[0].length);
-  for (const [path, row] of ordered) {
-    if (row.deleted) deleteAt(state, path);
-    else setAt(state, path, structuredClone(row.value));
-  }
-  return state;
 }
 
 /**
@@ -167,7 +156,7 @@ export function createStore({
   const regs = registerSet(registers);
   const locked = registerSet(readOnly);
   const saved = storage.load();
-  const state = new LazyWatch(rebuild(initial, saved ? saved.rows : []));
+  const state = new LazyWatch(rebuild(initial, saved ? saved.rows.map(([key, row]) => [key, row.deleted ? null : row.value]) : []));
   const clocks = new Map(saved ? saved.rows.map(([key, row]) => [key, row.deleted ? { ts: row.ts, deleted: true } : { ts: row.ts }]) : []);
   const replicas = loadReplicas(saved, time());
   let version = saved ? saved.version : 0;
