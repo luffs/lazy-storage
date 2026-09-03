@@ -1,0 +1,15 @@
+{
+  "lockfileVersion": 2,
+  "configVersion": 1,
+  "workspaces": {
+    "": {
+      "name": "lazy-storage",
+      "dependencies": {
+        "lazy-watch": "^6.2.1",
+      },
+    },
+  },
+  "packages": {
+    "lazy-watch": ["lazy-watch@6.2.1", "", {}, "sha512-RRe1iPFWl5MK068lPr/WnGry3fLN+saMhDXv8rlIy6IDdSj2u+n+x4M2qoJgXyllbEvRvxCXtr+uWMB/vOiE0Q=="],
+  }
+}

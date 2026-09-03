@@ -1,0 +1,37 @@
+{
+  "name": "lazy-storage",
+  "version": "0.1.0",
+  "description": "Self-hosted realtime state store with offline sync, built on lazy-watch: keyed collections, last-writer-wins per field, an outbox that survives reconnects.",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.js",
+    "./core": "./src/core/index.js",
+    "./client": "./src/client/index.js",
+    "./server": "./src/server/index.js",
+    "./server/bun": "./src/server/bun.js"
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test \"test/*.test.js\"",
+    "fuzz": "node test/fuzz/run.js"
+  },
+  "keywords": [
+    "sync",
+    "offline-first",
+    "realtime",
+    "state",
+    "lazy-watch",
+    "last-writer-wins"
+  ],
+  "dependencies": {
+    "lazy-watch": "^6.2.1"
+  },
+  "license": "ISC"
+}

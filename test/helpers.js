@@ -1,0 +1,100 @@
+// helpers.js - An in-memory network between clients and a store
+//
+// Deliveries are queued and drained by `settle()`, which also yields to
+// the event loop between hops so lazy-watch's microtask batches emit. A
+// link can be taken offline, which closes its current connection and
+// refuses new ones until it is back online.
+import { createClient } from '../src/client/index.js';
+
+// A macrotask boundary: lazy-watch's microtask batches have emitted by then,
+// and setImmediate has no timer granularity floor (setTimeout(0) costs ~15 ms
+// on Windows, which made the fuzzer crawl)
+const tick = () => new Promise(resolve => setImmediate(resolve));
+
+export function createNetwork(store) {
+  const queue = [];
+
+  const net = {
+    get pending() { return queue.length; },
+
+    /** Deliver everything, repeatedly, until the network and microtasks are quiet */
+    async settle() {
+      for (let round = 0; round < 10_000; round++) {
+        await tick();
+        if (queue.length === 0) {
+          await tick();
+          if (queue.length === 0) return;
+        }
+        while (queue.length) queue.shift()();
+      }
+      throw new Error('network did not settle');
+    },
+
+    /** A link for one client: a transport factory plus offline/online control */
+    link() {
+      const link = { online: true, current: null };
+      link.factory = () => {
+        let session = null;
+        const t = { onopen: null, onmessage: null, onclose: null, open: false };
+        t.send = message => {
+          if (!t.open) return;
+          const copy = structuredClone(message);
+          queue.push(() => { if (t.open) session.receive(copy); });
+        };
+        t.close = () => {
+          if (!t.open) return;
+          t.open = false;
+          session.close();
+          if (link.current === t) link.current = null;
+          queue.push(() => t.onclose?.());
+        };
+        queue.push(() => {
+          if (!link.online) { t.onclose?.(); return; }
+          session = store.session({
+            send: message => {
+              const copy = structuredClone(message);
+              queue.push(() => { if (t.open) t.onmessage?.(copy); });
+            }
+          });
+          t.open = true;
+          link.current = t;
+          t.onopen?.();
+        });
+        return t;
+      };
+      link.goOffline = () => { link.online = false; link.current?.close(); };
+      link.goOnline = () => { link.online = true; };
+      return link;
+    },
+
+    /** A connected client on its own link; `reconnect` is off so tests drive it */
+    client(options = {}) {
+      const link = net.link();
+      const client = createClient({ transport: link.factory, reconnect: false, ...options });
+      client.link = link;
+      client.connect();
+      return client;
+    }
+  };
+  return net;
+}
+
+/** A controllable wall clock for hybrid logical clocks */
+export function fakeTime(start = 1_000_000) {
+  let t = start;
+  const now = () => t;
+  now.advance = ms => { t += ms; return t; };
+  now.set = ms => { t = ms; };
+  return now;
+}
+
+export function seededRandom(seed) {
+  let s = seed >>> 0 || 1;
+  const rng = {
+    next() { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; },
+    int: n => Math.floor(rng.next() * n),
+    chance: p => rng.next() < p,
+    pick: arr => arr[rng.int(arr.length)]
+  };
+  return rng;
+}
