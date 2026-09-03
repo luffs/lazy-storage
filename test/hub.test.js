@@ -45,7 +45,7 @@ test('two stores travel over one socket, stay isolated, and reach clients on oth
   assert.equal(x.collection('tasks').has('y-task'), false);
   assert.deepEqual(stores.get('team-x').snapshot(), { tasks: { [id]: { title: 'for team x', id } } });
   assert.deepEqual(stores.get('team-y').snapshot(), { tasks: { 'y-task': { id: 'y-task', title: 'for team y' } } });
-  assert.equal(stores.get('team-x').sessions, 2, 'one hub session and one direct-style session');
+  assert.equal(stores.get('team-x').sessions, 2, 'one session per socket on team-x');
   assert.equal(stores.get('team-y').sessions, 1);
 });
 
@@ -122,7 +122,8 @@ test('one client per store per connection', () => {
   const shared = connect();
   createClient({ connection: shared, store: 'team-x', initial: INITIAL }).connect();
   assert.throws(() => createClient({ connection: shared, store: 'team-x', initial: INITIAL }).connect(), /already attached/);
-  assert.throws(() => createClient({ connection: shared, initial: INITIAL }), /requires the store id/);
+  assert.throws(() => createClient({ connection: shared, initial: INITIAL }), /requires a store id/);
+  assert.throws(() => createClient({ store: 'team-x', initial: INITIAL }), /connection or a transport/);
 });
 
 test('a hub refuses messages without a valid store id and answers pings', () => {

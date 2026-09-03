@@ -25,10 +25,11 @@
 // where op = { replicaId, seq, ts, diff }.
 //
 // Server -> client:
-//   { t: 'snapshot', state, ts, version, seq }  full state; `seq` is the
+//   { t: 'snapshot', state, ts, seq, registers }  full state; `seq` is the
 //       last op of this replica the server holds, so the client can drop
-//       acknowledged outbox entries
-//   { t: 'patch', diff, ts, version }           an accepted diff (from any
+//       acknowledged outbox entries; `registers` are the server's register
+//       patterns, for the client to check against its own
+//   { t: 'patch', diff, ts }                    an accepted diff (from any
 //       replica, the receiving one included)
 //   { t: 'ack', seq, ts, correction }           `correction` is a diff with
 //       the server's values at the leaves the op lost, or null
@@ -163,12 +164,16 @@ export function createStore({ initial = {}, registers = [], storage = memoryStor
       replica: { id: op.replicaId, seq: op.seq },
       version
     });
-    if (accepted) broadcast({ t: 'patch', diff: accepted, ts: op.ts, version });
+    if (accepted) broadcast({ t: 'patch', diff: accepted, ts: op.ts });
     return { duplicate: false, accepted, rejected, correction: rejected.length ? correction(rejected) : null };
   }
 
+  // The snapshot names the server's register patterns so a client can
+  // detect a declaration that differs from its own
+  const registerPatterns = regs.patterns.map(p => p.join('/'));
+
   function snapshotMessage(replicaId) {
-    return { t: 'snapshot', state: LazyWatch.snapshot(state), ts: clock.peek(), version, seq: seqs.get(replicaId) ?? 0 };
+    return { t: 'snapshot', state: LazyWatch.snapshot(state), ts: clock.peek(), seq: seqs.get(replicaId) ?? 0, registers: registerPatterns };
   }
 
   /**

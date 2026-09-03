@@ -13,9 +13,10 @@
 // result, which the client applies with `overwrite`. Edits made while the
 // hello was in flight are re-applied on top and sent.
 //
-// A client either owns a private connection (`transport`) or attaches to a
-// shared multiplexed one (`connection` + `store`), where several stores
-// travel over one socket.
+// A client attaches to a connection under its store id. Pass a shared
+// `connection` to carry several stores over one socket, or a `transport`
+// to have the client own a connection of its own; the protocol is the same
+// either way.
 import { LazyWatch } from 'lazy-watch';
 import { createClock } from '../core/hlc.js';
 import { registerSet } from '../core/paths.js';
@@ -31,26 +32,27 @@ const EVENTS = ['status', 'error', 'sync', 'closed', 'presence'];
 
 /**
  * @param {Object} options
- * @param {() => Object} [options.transport] - transport factory for a private
- *   connection (see transport.js); either this or `connection`
+ * @param {string} options.store - the store id
  * @param {Object} [options.connection] - a shared connection from
- *   createConnection; requires `store`
- * @param {string} [options.store] - the store id on a shared connection
+ *   createConnection; either this or `transport`
+ * @param {() => Object} [options.transport] - transport factory (see
+ *   transport.js) for a connection this client owns
  * @param {Object} [options.initial] - state before the first snapshot
  * @param {Array<string|string[]>} [options.registers] - whole-value paths
- *   (arrays may live only here); must match the server's
+ *   (arrays may live only here); must match the server's, which reports a
+ *   mismatch as an error with code 'registers-mismatch' on every snapshot
  * @param {string} [options.replicaId] - defaults to the persisted one, else random
  * @param {Object} [options.storage] - outbox persistence (default: memory)
  * @param {boolean} [options.undo=true] - attach an undo manager
  * @param {number} [options.undoLimit=100]
  * @param {{min: number, max: number}|false} [options.reconnect] - retry
- *   backoff for a private connection; false disables automatic reconnects
+ *   backoff for an owned connection; false disables automatic reconnects
  * @param {() => number} [options.now] - wall clock (injectable for tests)
  */
 export function createClient({
-  transport,
-  connection,
   store: storeId,
+  connection,
+  transport,
   initial = {},
   registers = [],
   replicaId,
@@ -60,12 +62,13 @@ export function createClient({
   reconnect = { min: 500, max: 10_000 },
   now
 } = {}) {
-  if (connection && transport) throw new TypeError('createClient takes either a transport or a connection, not both');
-  if (connection && (typeof storeId !== 'string' || !storeId)) throw new TypeError('createClient on a shared connection requires the store id');
-  if (!connection && typeof transport !== 'function') throw new TypeError('createClient requires a transport factory or a connection');
+  if (typeof storeId !== 'string' || !storeId) throw new TypeError('createClient requires a store id');
+  if (connection && transport) throw new TypeError('createClient takes either a connection or a transport, not both');
+  if (!connection && typeof transport !== 'function') throw new TypeError('createClient requires a connection or a transport factory');
   const ownsConnection = !connection;
-  connection = connection ?? createConnection({ transport, reconnect, multiplex: false });
+  connection = connection ?? createConnection({ transport, reconnect });
   const regs = registerSet(registers);
+  const declared = regs.patterns.map(p => p.join('/')).sort();
 
   const saved = storage.load();
   replicaId = replicaId ?? saved?.replicaId ?? randomId();
@@ -142,6 +145,14 @@ export function createClient({
     switch (msg.t) {
       case 'snapshot': {
         clock.receive(msg.ts);
+        if (Array.isArray(msg.registers)) {
+          const theirs = [...msg.registers].sort();
+          if (JSON.stringify(theirs) !== JSON.stringify(declared)) {
+            const err = new Error(`Register paths differ: this client declares [${declared.join(', ')}], the server [${theirs.join(', ')}]`);
+            err.code = 'registers-mismatch';
+            emit('error', err);
+          }
+        }
         outbox = outbox.filter(op => op.seq > msg.seq);
         LazyWatch.overwrite(state, msg.state, REMOTE);
         // Edits made since the hello went out: back on top, and off to the server
@@ -219,12 +230,12 @@ export function createClient({
 
   function connect() {
     ended = null;
-    if (!link) link = connection.attach(storeId ?? '', handler);
+    if (!link) link = connection.attach(storeId, handler);
     connection.connect();
     refreshStatus();
   }
 
-  /** Detach this store; a private connection closes, a shared one stays up for the others */
+  /** Detach this store; an owned connection closes, a shared one stays up for the others */
   function disconnect() {
     if (link) {
       link.detach();
@@ -274,7 +285,6 @@ export function createClient({
     /** The mirrored state: read and write it like a plain object */
     state,
     replicaId,
-    /** The store id on a shared connection; undefined on a private one */
     store: storeId,
     connection,
     get status() { return status(); },

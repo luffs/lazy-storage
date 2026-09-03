@@ -5,13 +5,21 @@
 // link can be taken offline, which closes its current connection and
 // refuses new ones until it is back online.
 import { createClient } from '../src/client/index.js';
+import { createHub } from '../src/server/hub.js';
 
 // A macrotask boundary: lazy-watch's microtask batches have emitted by then,
 // and setImmediate has no timer granularity floor (setTimeout(0) costs ~15 ms
 // on Windows, which made the fuzzer crawl)
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
-export function createNetwork(store) {
+/**
+ * @param {Object} target - a store (served through a hub that maps every
+ *   id to it) or an endpoint `{ session({ send, user }) }` such as a hub factory
+ */
+export function createNetwork(target) {
+  const store = target.state !== undefined
+    ? { session: ({ send, user }) => createHub(() => target, { send, user }) }
+    : target;
   const queue = [];
 
   const net = {
@@ -79,10 +87,10 @@ export function createNetwork(store) {
       return link;
     },
 
-    /** A connected client on its own link; `reconnect` is off so tests drive it */
+    /** A connected client on its own link (store 'main' unless given); `reconnect` is off so tests drive it */
     client(options = {}, linkOptions = {}) {
       const link = net.link(linkOptions);
-      const client = createClient({ transport: link.factory, reconnect: false, ...options });
+      const client = createClient({ transport: link.factory, reconnect: false, store: 'main', ...options });
       client.link = link;
       client.connect();
       return client;

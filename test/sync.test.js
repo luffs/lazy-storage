@@ -196,14 +196,14 @@ test('an outbox persisted before a reload is sent on the next connect, and dupli
   const link = net.link();
   link.goOffline();
   const { createClient } = await import('../src/client/index.js');
-  const first = createClient({ transport: link.factory, reconnect: false, initial: INITIAL, registers: REGISTERS, storage, replicaId: 'a' });
+  const first = createClient({ transport: link.factory, reconnect: false, store: 'main', initial: INITIAL, registers: REGISTERS, storage, replicaId: 'a' });
   const id = first.collection('tasks').add({ title: 'Survives reload' });
   await net.settle();
   assert.equal(storage.load().ops.length, 1);
   first.dispose();
 
   link.goOnline();
-  const second = createClient({ transport: link.factory, reconnect: false, initial: INITIAL, registers: REGISTERS, storage });
+  const second = createClient({ transport: link.factory, reconnect: false, store: 'main', initial: INITIAL, registers: REGISTERS, storage });
   assert.equal(second.replicaId, 'a', 'the replica id is restored with the outbox');
   second.connect();
   await net.settle();
@@ -230,6 +230,19 @@ test('the server persists state and clocks through its storage adapter', async (
   const r = two.apply({ replicaId: 'late', seq: 1, ts: [1, 0, 'late'], diff: { tasks: { a: { title: 'ghost' } } } });
   assert.equal(r.accepted, null);
   assert.deepEqual(r.correction, { tasks: { a: null } });
+});
+
+test('a client whose registers differ from the server\'s is told so on every snapshot', async () => {
+  const { net } = setup();                                        // server declares ['order']
+  const agreed = net.client({ replicaId: 'ok', initial: INITIAL, registers: REGISTERS });
+  const differs = net.client({ replicaId: 'no', initial: INITIAL, registers: ['order', 'tags'] });
+  const errors = [];
+  agreed.on('error', err => errors.push(['ok', err.code]));
+  differs.on('error', err => errors.push(['no', err.code, err.message]));
+  await net.settle();
+  assert.equal(agreed.status, 'online');
+  assert.equal(differs.status, 'online', 'a mismatch is reported, not fatal');
+  assert.deepEqual(errors, [['no', 'registers-mismatch', 'Register paths differ: this client declares [order, tags], the server [order]']]);
 });
 
 test('a server-side patch reaches connected clients', async () => {

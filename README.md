@@ -11,7 +11,8 @@ everything converges when the connection is back.
 import { createClient, webSocketTransport, localStorageOutbox } from 'lazy-storage';
 
 const db = createClient({
-  transport: webSocketTransport('wss://example.com/ws'),
+  transport: webSocketTransport('wss://example.com/ws?token=...'),
+  store: 'todo',
   initial: { tasks: {}, order: [] },
   registers: ['order'],
   storage: localStorageOutbox('todo')
@@ -45,12 +46,11 @@ serve({
   authenticate: req => userForToken(new URL(req.url).searchParams.get('token')), // null → 401
   authorize: (user, storeId) => user.teams.includes(storeId)                     // false → 403 / closed
 });
-// clients: ws://host:3200/ws/<storeId>?token=... for one store,
-//          ws://host:3200/ws?token=...           for many stores over one socket
+// clients connect to ws://host:3200/ws?token=... and name their store per client
 ```
 
-For a single store, `createStore` with `jsonFileStorage('data/todo.json')`
-and `serve({ store })` serves it at `/ws`.
+A server with a single store passes `stores: () => store`; there is one
+protocol and one route either way.
 
 ## The model
 
@@ -134,18 +134,15 @@ once every replica that could still send an older write has synced.
 through your factory (typically `createStore` with a per-id storage
 adapter) and keeps it live; `stores.release(id)` disposes one, closing
 its sessions, and the persisted rows stay. Store ids are restricted to a
-URL- and filename-safe alphabet (`isStoreId`), so an id can name a path
-segment or a table key without escaping. The Bun adapter routes
-`/ws/<storeId>` to the registry; the id lives in the URL rather than in
-the protocol so an authenticating wrapper can look at it before a session
-exists.
+URL- and filename-safe alphabet (`isStoreId`), so an id can name a file or
+a table key without escaping.
 
-### Many stores over one socket
+### Any number of stores over one socket
 
-A client can also attach to a shared, multiplexed connection instead of
-owning a socket. Several clients, one per store, ride on it; messages are
-tagged with the store id and the server's hub (served at `/ws` when a
-registry is configured) keeps one session per store per socket:
+Every message names its store, so one socket carries as many stores as
+the clients attached to it. The server's hub keeps one session per store
+per socket, and authorizes each store separately. Several clients, one per
+store, share a connection:
 
 ```js
 import { createClient, createConnection, webSocketTransport } from 'lazy-storage';
@@ -160,11 +157,10 @@ teamB.connect();   // one socket, two stores
 Each client keeps its own outbox, undo history, and status; `connection.status`
 is the socket's. `client.disconnect()` on a shared connection leaves only
 that store (the socket stays up for the others), and `connection.close()`
-drops the socket for all of them. A client created with its own
-`transport` gets a private, untagged connection, which is what the
-per-store URL and a single-store server speak. While open, a connection
-pings every 30 seconds (`keepalive`, or `false`) so idle sockets survive
-proxies and server idle timeouts.
+drops the socket for all of them. A client created with a `transport`
+instead of a `connection` owns a connection of its own, same protocol. While
+open, a connection pings every 30 seconds (`keepalive`, or `false`) so idle
+sockets survive proxies and server idle timeouts.
 
 ## Authentication, presence, and eviction
 
@@ -174,10 +170,10 @@ Two hooks on the Bun adapter decide who gets a session on which store:
   (a token in the query string is the usual carrier, since browsers cannot
   set headers on a WebSocket; `webSocketTransport` takes a function URL for
   that). `null` or `undefined` answers 401.
-- `authorize(user, storeId, store)` runs before a session exists: at
-  upgrade for a per-store URL (403), and per store on a hub, where a
-  refusal arrives as a `closed` message with code `forbidden` and only that
-  store is affected. Both hooks may return promises.
+- `authorize(user, storeId, store)` runs per store, before its session
+  exists; a refusal arrives as a `closed` message with code `forbidden` and
+  affects only that store, while the socket stays up for the others. Both
+  hooks may return promises.
 
 The user rides on the session (`store.session({ send, user })` if you drive
 sessions yourself), which powers two more features:
@@ -228,10 +224,10 @@ replaced by a leaf) drops the affected steps.
 
 **Client** (`lazy-storage`)
 
-- `createClient({ transport | connection + store, initial, registers, replicaId, storage, undo, undoLimit, reconnect, now })`
-- `createConnection({ transport, reconnect, multiplex, keepalive })` → `connect()`, `close()`, `status`, `attached`, `on('status', fn)` — a socket shared by clients
+- `createClient({ store, connection | transport, initial, registers, replicaId, storage, undo, undoLimit, reconnect, now })`
+- `createConnection({ transport, reconnect, keepalive })` → `connect()`, `close()`, `status`, `attached`, `on('status', fn)` — a socket shared by clients
 - `db.state` — the mirror (a lazy-watch proxy). Read and write it directly
-- `db.store`, `db.connection` — the store id on a shared connection, and the connection itself
+- `db.store`, `db.connection` — the store id and the connection
 - `db.presence` — users with a live session on this store; `db.closed` — `{ code, message }` after the server ended this store for us, else null
 - `db.collection(name)` — `add(record) → id`, `update(id, fields)`, `remove(id)`, `get(id)`, `has(id)`, `ids()`, `all()`
 - `db.connect()`, `db.disconnect()`, `db.status` (`'offline' | 'connecting' | 'online'`), `db.pending`
@@ -255,11 +251,10 @@ replaced by a leaf) drops the affected steps.
 **SQLite** (`lazy-storage/server/sqlite`, Bun): `sqliteStorage(file, { wal })` →
 `store(id)`, `ids()`, `remove(id)`, `db`, `close()`.
 
-**Bun adapter** (`lazy-storage/server/bun`): `serve({ store, stores, port, path, fetch, authenticate, authorize })` —
-with a single `store`, a plain session at `path`; with `stores` (a registry or
-`id => store|null`), a hub at `path` and plain per-store sessions at `path/<id>`.
-`createHandlers({ store, stores, path, authenticate, authorize })` → `{ upgrade(req, server), websocket }`
-for mounting inside your own `Bun.serve`.
+**Bun adapter** (`lazy-storage/server/bun`): `serve({ stores, port, path, fetch, authenticate, authorize })` —
+`stores` is a registry or `id => store|null` (for one store, `() => store`); the
+hub listens at `path`. `createHandlers({ stores, path, authenticate, authorize })` →
+`{ upgrade(req, server), websocket }` for mounting inside your own `Bun.serve`.
 
 **Core** (`lazy-storage/core`): the pieces both sides share — `createClock`,
 `compareTs`, `mergeOp`, `leaves`, `expandRegisters`, `registerSet`,
@@ -271,16 +266,17 @@ Client to server: `{ t: 'hello', replicaId, ops }`, `{ t: 'op', op }`,
 `{ t: 'ping' }`, where `op = { replicaId, seq, ts, diff }` and `diff` is a
 plain lazy-watch diff.
 
-Server to client: `{ t: 'snapshot', state, ts, version, seq }`,
-`{ t: 'patch', diff, ts, version }`, `{ t: 'ack', seq, ts, correction }`,
-`{ t: 'presence', users }`, `{ t: 'closed', code, message }` (final for the
-store: `evicted`, `forbidden`, `unknown-store`, `invalid-store`),
+Server to client: `{ t: 'snapshot', state, ts, seq, registers }` (the
+server's register patterns, so a client can detect a declaration that
+differs from its own), `{ t: 'patch', diff, ts }`,
+`{ t: 'ack', seq, ts, correction }`, `{ t: 'presence', users }`,
+`{ t: 'closed', code, message }` (final for the store: `evicted`,
+`forbidden`, `unknown-store`, `invalid-store`),
 `{ t: 'error', seq?, code?, message }`, `{ t: 'pong' }`.
 
-On a multiplexed connection every message except `ping`/`pong` carries a
-`store` field with the store id, and the client sends `{ t: 'leave', store }`
-to close one store's session without dropping the socket. A store cannot
-tell a hub session from a direct one.
+Every message except `ping`/`pong` carries a `store` field with the store
+id, and the client sends `{ t: 'leave', store }` to close one store's
+session without dropping the socket.
 
 ## Scope
 

@@ -82,7 +82,7 @@ test('eviction closes the store for that user, reaches the client as final, and 
   assert.equal(stores.get('team-x').state.tasks.late.title, 'after eviction');
 });
 
-test('evicting a direct (per-store) session closes its socket and the client does not reconnect on its own', async () => {
+test('an evicted client that owns its connection closes it and does not reconnect on its own', async () => {
   const store = createStore({ initial: INITIAL, now: fakeTime() });
   const net = createNetwork(store);
   const a = net.client({ replicaId: 'a', initial: INITIAL }, { user: { id: 'u1' } });
@@ -94,7 +94,7 @@ test('evicting a direct (per-store) session closes its socket and the client doe
   await net.settle();
   assert.equal(a.status, 'offline');
   assert.deepEqual(a.closed, { code: 'evicted', message: 'bye' });
-  assert.equal(a.connection.status, 'offline', 'the private connection was closed by the client, not left retrying');
+  assert.equal(a.connection.status, 'offline', 'the owned connection was closed by the client, not left retrying');
   assert.deepEqual(b.presence, [{ id: 'u2' }]);
   assert.equal(store.sessions, 1);
 });

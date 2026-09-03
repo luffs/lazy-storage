@@ -4,6 +4,26 @@ All notable changes to lazy-storage are documented here. The format follows Keep
 
 ## [Unreleased]
 
+### Removed
+
+- **The single-store mode and the per-store URL.** There is one protocol
+  (every message names its store) and one route (a hub at `path`).
+  `serve({ store })` and `/ws/<storeId>` are gone; a server with one store
+  passes `stores: () => store`. `createClient` always takes a `store` id,
+  with either a shared `connection` or a `transport` for a connection the
+  client owns; `createConnection` lost its `multiplex` flag. The untagged
+  protocol had no upside that survived scrutiny (a browser cannot read a
+  403 at upgrade anyway, and a `closed` message with a code says more) and
+  cost every feature a second code path
+- `version` no longer travels on the wire (no client read it); it stays on
+  the store for tests and debugging
+
+### Changed
+
+- The snapshot names the server's register patterns, and a client whose
+  declaration differs raises an error with code `registers-mismatch` on
+  every snapshot, so a silent divergence between the two sides is loud
+
 ### Added
 
 - **Authentication and authorization hooks.** `serve` / `createHandlers`
