@@ -131,6 +131,30 @@ segment or a table key without escaping. The Bun adapter routes
 the protocol so an authenticating wrapper can look at it before a session
 exists.
 
+### Many stores over one socket
+
+A client can also attach to a shared, multiplexed connection instead of
+owning a socket. Several clients, one per store, ride on it; messages are
+tagged with the store id and the server's hub (served at `/ws` when a
+registry is configured) keeps one session per store per socket:
+
+```js
+import { createClient, createConnection, webSocketTransport } from 'lazy-storage';
+
+const connection = createConnection({ transport: webSocketTransport('wss://example.com/ws') });
+const teamA = createClient({ connection, store: 'team-a', initial: { tasks: {} } });
+const teamB = createClient({ connection, store: 'team-b', initial: { tasks: {} } });
+teamA.connect();
+teamB.connect();   // one socket, two stores
+```
+
+Each client keeps its own outbox, undo history, and status; `connection.status`
+is the socket's. `client.disconnect()` on a shared connection leaves only
+that store (the socket stays up for the others), and `connection.close()`
+drops the socket for all of them. A client created with its own
+`transport` gets a private, untagged connection, which is what the
+per-store URL and a single-store server speak.
+
 ## Undo
 
 Each client has a lazy-watch undo manager attached with a `record` filter
@@ -144,8 +168,10 @@ replaced by a leaf) drops the affected steps.
 
 **Client** (`lazy-storage`)
 
-- `createClient({ transport, initial, registers, replicaId, storage, undo, undoLimit, reconnect, now })`
+- `createClient({ transport | connection + store, initial, registers, replicaId, storage, undo, undoLimit, reconnect, now })`
+- `createConnection({ transport, reconnect, multiplex })` → `connect()`, `close()`, `status`, `attached`, `on('status', fn)` — a socket shared by clients
 - `db.state` — the mirror (a lazy-watch proxy). Read and write it directly
+- `db.store`, `db.connection` — the store id on a shared connection, and the connection itself
 - `db.collection(name)` — `add(record) → id`, `update(id, fields)`, `remove(id)`, `get(id)`, `has(id)`, `ids()`, `all()`
 - `db.connect()`, `db.disconnect()`, `db.status` (`'offline' | 'connecting' | 'online'`), `db.pending`
 - `db.watch(listener)` — state changes; `meta?.origin === 'remote'` marks the server's
@@ -162,12 +188,14 @@ replaced by a leaf) drops the affected steps.
 - `store.compactTombstones(olderThan)`, `store.flush()`, `store.dispose()`
 - `memoryStorage()`, `jsonFileStorage(path, { debounce })`
 - `createStores(factory)` → `get(id)`, `has(id)`, `ids()`, `release(id)`, `dispose()`; `isStoreId(id)`
+- `createHub(resolveStore, { send })` → `{ receive(message), close(), stores }` — the server side of a multiplexed connection, session-shaped
 
 **SQLite** (`lazy-storage/server/sqlite`, Bun): `sqliteStorage(file, { wal })` →
 `store(id)`, `ids()`, `remove(id)`, `db`, `close()`.
 
 **Bun adapter** (`lazy-storage/server/bun`): `serve({ store, stores, port, path, fetch })` —
-a single `store` at `path`, or `stores` (a registry or `id => store|null`) at `path/<id>`.
+with a single `store`, a plain session at `path`; with `stores` (a registry or
+`id => store|null`), a hub at `path` and plain per-store sessions at `path/<id>`.
 
 **Core** (`lazy-storage/core`): the pieces both sides share — `createClock`,
 `compareTs`, `mergeOp`, `leaves`, `expandRegisters`, `registerSet`,
@@ -182,6 +210,11 @@ plain lazy-watch diff.
 Server to client: `{ t: 'snapshot', state, ts, version, seq }`,
 `{ t: 'patch', diff, ts, version }`, `{ t: 'ack', seq, ts, correction }`,
 `{ t: 'error', seq?, message }`, `{ t: 'pong' }`.
+
+On a multiplexed connection every message except `ping`/`pong` carries a
+`store` field with the store id, and the client sends `{ t: 'leave', store }`
+to close one store's session without dropping the socket. A store cannot
+tell a hub session from a direct one.
 
 ## Scope
 

@@ -6,7 +6,9 @@
 // the end everyone is online and all states are identical. Deterministic
 // from the seed.
 import { LazyWatch } from 'lazy-watch';
-import { createStore } from '../../src/server/index.js';
+import { createStore, createHub } from '../../src/server/index.js';
+import { createClient } from '../../src/client/index.js';
+import { createConnection } from '../../src/client/connection.js';
 import { createNetwork, fakeTime, seededRandom } from '../helpers.js';
 
 const INITIAL = { tasks: {}, order: [] };
@@ -20,16 +22,44 @@ function flatten(value, prefix = '', out = {}) {
   return out;
 }
 
-export async function runFuzz({ seed = 1, runs = 20, steps = 30, clients: clientCount = 3, log = () => {} } = {}) {
+/**
+ * @param {Object} options
+ * @param {'single'|'hub'} [options.mode] - 'single': each client on its own
+ *   socket to the store; 'hub': clients share two multiplexed connections,
+ *   so an offline toggle drops every client on that socket
+ */
+export async function runFuzz({ seed = 1, runs = 20, steps = 30, clients: clientCount = 3, mode = 'single', log = () => {} } = {}) {
   let operations = 0;
   for (let run = 0; run < runs; run++) {
     const rng = seededRandom(seed * 1000 + run);
     const store = createStore({ initial: INITIAL, registers: REGISTERS, now: fakeTime(1_000_000) });
-    const net = createNetwork(store);
+    // hub mode: every client has its own socket carrying two stores — the
+    // shared one under test and a private side store — so multiplexing is
+    // exercised and an offline toggle drops both stores on that socket
+    const sideStores = new Map();
+    const resolveStore = id => {
+      if (id === 'main') return store;
+      if (!sideStores.has(id)) sideStores.set(id, createStore({ initial: { notes: {} }, now: fakeTime(1_000_000) }));
+      return sideStores.get(id);
+    };
+    const net = mode === 'hub'
+      ? createNetwork({ session: ({ send }) => createHub(resolveStore, { send }) })
+      : createNetwork(store);
     const clients = [];
     for (let i = 0; i < clientCount; i++) {
       const time = fakeTime(1_000_000 + rng.int(5000)); // skewed wall clocks
-      const c = net.client({ replicaId: `r${i}`, initial: INITIAL, registers: REGISTERS, now: time });
+      let c;
+      if (mode === 'hub') {
+        const link = net.link();
+        const connection = createConnection({ transport: link.factory, reconnect: false });
+        c = createClient({ connection, store: 'main', replicaId: `r${i}`, initial: INITIAL, registers: REGISTERS, now: time });
+        c.side = createClient({ connection, store: `side-${i}`, replicaId: `s${i}`, initial: { notes: {} }, now: time });
+        c.link = link;
+        c.connect();
+        c.side.connect();
+      } else {
+        c = net.client({ replicaId: `r${i}`, initial: INITIAL, registers: REGISTERS, now: time });
+      }
       c.time = time;
       c.errors = [];
       c.on('error', e => c.errors.push(e));
@@ -38,7 +68,7 @@ export async function runFuzz({ seed = 1, runs = 20, steps = 30, clients: client
     await net.settle();
 
     const ops = [];
-    const fail = message => new Error(`Convergence failure (seed ${seed}, run ${run}):\n  ${message}\n  ops:\n    ${ops.slice(-25).join('\n    ')}\n  reproduce: node test/fuzz/run.js --seed ${seed} --runs ${run + 1} --steps ${steps}`);
+    const fail = message => new Error(`Convergence failure (seed ${seed}, run ${run}, mode ${mode}):\n  ${message}\n  ops:\n    ${ops.slice(-25).join('\n    ')}\n  reproduce: node test/fuzz/run.js --seed ${seed} --runs ${run + 1} --steps ${steps} --mode ${mode}`);
 
     for (let step = 0; step < steps; step++) {
       const c = rng.pick(clients);
@@ -67,6 +97,9 @@ export async function runFuzz({ seed = 1, runs = 20, steps = 30, clients: client
       } else if (roll < 0.9 && c.canUndo) {
         c.undo();
         ops.push(`${c.replicaId} undo`);
+      } else if (c.side && roll < 0.95) {
+        c.side.collection('notes').add({ text: `n${step}` });
+        ops.push(`${c.replicaId} side note`);
       } else if (c.canRedo) {
         c.redo();
         ops.push(`${c.replicaId} redo`);
@@ -85,7 +118,7 @@ export async function runFuzz({ seed = 1, runs = 20, steps = 30, clients: client
       }
     }
 
-    for (const c of clients) { if (c.status === 'offline') { c.link.goOnline(); c.connect(); } }
+    for (const c of clients) { if (c.status === 'offline') { c.link.goOnline(); c.connect(); c.side?.connect(); } }
     await net.settle();
     const expected = canon(store.snapshot());
     for (const c of clients) {
@@ -93,8 +126,15 @@ export async function runFuzz({ seed = 1, runs = 20, steps = 30, clients: client
       if (canon(LazyWatch.snapshot(c.state)) !== expected) {
         throw fail(`${c.replicaId} did not converge\n  server: ${expected}\n  client: ${canon(LazyWatch.snapshot(c.state))}`);
       }
+      if (c.side) {
+        const sideExpected = canon(resolveStore(c.side.store).snapshot());
+        if (c.side.pending !== 0 || canon(LazyWatch.snapshot(c.side.state)) !== sideExpected) {
+          throw fail(`${c.replicaId}'s side store did not converge\n  server: ${sideExpected}\n  client: ${canon(LazyWatch.snapshot(c.side.state))}`);
+        }
+      }
     }
-    for (const c of clients) c.dispose();
+    for (const c of clients) { c.side?.dispose(); c.dispose(); }
+    for (const s of sideStores.values()) s.dispose();
     store.dispose();
     log(`run ${run}: ${steps} steps ok`);
   }

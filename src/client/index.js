@@ -12,12 +12,17 @@
 // server merges it and answers with a snapshot that already contains the
 // result, which the client applies with `overwrite`. Edits made while the
 // hello was in flight are re-applied on top and sent.
+//
+// A client either owns a private connection (`transport`) or attaches to a
+// shared multiplexed one (`connection` + `store`), where several stores
+// travel over one socket.
 import { LazyWatch } from 'lazy-watch';
 import { createClock } from '../core/hlc.js';
 import { registerSet } from '../core/paths.js';
 import { leaves, expandRegisters } from '../core/model.js';
 import { randomId } from '../core/ids.js';
 import { memoryOutbox } from './storage.js';
+import { createConnection } from './connection.js';
 
 const { Utils } = LazyWatch;
 const REMOTE = { origin: 'remote' };
@@ -26,7 +31,11 @@ const EVENTS = ['status', 'error', 'sync'];
 
 /**
  * @param {Object} options
- * @param {() => Object} options.transport - transport factory (see transport.js)
+ * @param {() => Object} [options.transport] - transport factory for a private
+ *   connection (see transport.js); either this or `connection`
+ * @param {Object} [options.connection] - a shared connection from
+ *   createConnection; requires `store`
+ * @param {string} [options.store] - the store id on a shared connection
  * @param {Object} [options.initial] - state before the first snapshot
  * @param {Array<string|string[]>} [options.registers] - whole-value paths
  *   (arrays may live only here); must match the server's
@@ -35,11 +44,13 @@ const EVENTS = ['status', 'error', 'sync'];
  * @param {boolean} [options.undo=true] - attach an undo manager
  * @param {number} [options.undoLimit=100]
  * @param {{min: number, max: number}|false} [options.reconnect] - retry
- *   backoff after an unexpected close; false disables automatic reconnects
+ *   backoff for a private connection; false disables automatic reconnects
  * @param {() => number} [options.now] - wall clock (injectable for tests)
  */
 export function createClient({
   transport,
+  connection,
+  store: storeId,
   initial = {},
   registers = [],
   replicaId,
@@ -49,7 +60,11 @@ export function createClient({
   reconnect = { min: 500, max: 10_000 },
   now
 } = {}) {
-  if (typeof transport !== 'function') throw new TypeError('createClient requires a transport factory');
+  if (connection && transport) throw new TypeError('createClient takes either a transport or a connection, not both');
+  if (connection && (typeof storeId !== 'string' || !storeId)) throw new TypeError('createClient on a shared connection requires the store id');
+  if (!connection && typeof transport !== 'function') throw new TypeError('createClient requires a transport factory or a connection');
+  const ownsConnection = !connection;
+  connection = connection ?? createConnection({ transport, reconnect, multiplex: false });
   const regs = registerSet(registers);
 
   const saved = storage.load();
@@ -60,11 +75,9 @@ export function createClient({
   const state = new LazyWatch(structuredClone(initial), { inverse: true });
   const clock = createClock(replicaId, now);
   const listeners = Object.fromEntries(EVENTS.map(e => [e, new Set()]));
-  let status = 'offline';
-  let conn = null;
-  let closedByUser = true;
-  let retryDelay = reconnect ? reconnect.min : 0;
-  let retryTimer = null;
+  let link = null;        // attachment to the connection while connected
+  let synced = false;     // this store's snapshot has landed on this socket
+  let lastStatus = 'offline';
 
   // Own batches (meta undefined) and undo/redo replays are history; remote
   // and rejected batches are not
@@ -82,11 +95,15 @@ export function createClient({
     }
   }
 
-  function setStatus(next) {
-    if (status === next) return;
-    status = next;
-    emit('status', status);
+  const status = () => (!link || connection.status === 'offline' ? 'offline' : synced ? 'online' : 'connecting');
+
+  function refreshStatus() {
+    const next = status();
+    if (next === lastStatus) return;
+    lastStatus = next;
+    emit('status', next);
   }
+  const stopStatus = connection.on('status', refreshStatus);
 
   function persistOutbox() {
     storage.save({ replicaId, seq, ops: outbox });
@@ -109,12 +126,11 @@ export function createClient({
     const op = { replicaId, seq: ++seq, ts: clock.now(), diff: expanded };
     outbox.push(op);
     persistOutbox();
-    if (status === 'online') conn.send({ t: 'op', op });
+    if (status() === 'online') link.send({ t: 'op', op });
     emit('sync');
   });
 
   function handle(msg) {
-    if (!Utils.isPlainObject(msg)) return;
     switch (msg.t) {
       case 'snapshot': {
         clock.receive(msg.ts);
@@ -123,11 +139,11 @@ export function createClient({
         // Edits made since the hello went out: back on top, and off to the server
         for (const op of outbox) {
           LazyWatch.patch(state, op.diff, REMOTE);
-          conn.send({ t: 'op', op });
+          link.send({ t: 'op', op });
         }
         persistOutbox();
-        retryDelay = reconnect ? reconnect.min : 0;
-        setStatus('online');
+        synced = true;
+        refreshStatus();
         emit('sync');
         return;
       }
@@ -149,52 +165,44 @@ export function createClient({
         if (Number.isInteger(msg.seq)) {
           outbox = outbox.filter(op => op.seq > msg.seq);
           persistOutbox();
-          conn?.send({ t: 'hello', replicaId, ops: outbox });
+          link?.send({ t: 'hello', replicaId, ops: outbox });
         }
         return;
       }
-      case 'pong':
-        return;
     }
   }
 
-  function open() {
-    setStatus('connecting');
-    const c = transport();
-    conn = c;
-    c.onopen = () => {
-      if (conn === c) c.send({ t: 'hello', replicaId, ops: outbox });
-    };
-    c.onmessage = msg => {
-      if (conn === c) handle(msg);
-    };
-    c.onclose = () => {
-      if (conn !== c) return;
-      conn = null;
-      setStatus('offline');
-      if (!closedByUser && reconnect) scheduleRetry();
-    };
-  }
-
-  function scheduleRetry() {
-    clearTimeout(retryTimer);
-    retryTimer = setTimeout(open, retryDelay);
-    retryDelay = Math.min(retryDelay * 2 || reconnect.min, reconnect.max);
-  }
+  const handler = {
+    // Receives the link because on an already-open connection this fires
+    // inside attach(), before connect() has stored the return value
+    onOpen(attached) {
+      link = attached;
+      synced = false;
+      link.send({ t: 'hello', replicaId, ops: outbox });
+      refreshStatus();
+    },
+    onMessage: handle,
+    onClose() {
+      synced = false;
+      refreshStatus();
+    }
+  };
 
   function connect() {
-    closedByUser = false;
-    clearTimeout(retryTimer);
-    if (!conn) open();
+    if (!link) link = connection.attach(storeId ?? '', handler);
+    connection.connect();
+    refreshStatus();
   }
 
+  /** Detach this store; a private connection closes, a shared one stays up for the others */
   function disconnect() {
-    closedByUser = true;
-    clearTimeout(retryTimer);
-    const c = conn;
-    conn = null;
-    c?.close();
-    setStatus('offline');
+    if (link) {
+      link.detach();
+      link = null;
+    }
+    if (ownsConnection) connection.close();
+    synced = false;
+    refreshStatus();
   }
 
   /** Records keyed by id under `state[name]` */
@@ -235,7 +243,10 @@ export function createClient({
     /** The mirrored state: read and write it like a plain object */
     state,
     replicaId,
-    get status() { return status; },
+    /** The store id on a shared connection; undefined on a private one */
+    store: storeId,
+    connection,
+    get status() { return status(); },
     /** Unacknowledged local ops */
     get pending() { return outbox.length; },
     connect,
@@ -258,6 +269,7 @@ export function createClient({
     clearHistory: () => undoManager?.clear(),
     dispose() {
       disconnect();
+      stopStatus();
       undoManager?.dispose();
       LazyWatch.dispose(state);
     }

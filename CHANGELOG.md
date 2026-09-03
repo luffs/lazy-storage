@@ -6,6 +6,20 @@ All notable changes to lazy-storage are documented here. The format follows Keep
 
 ### Added
 
+- **Many stores over one socket.** `createConnection({ transport })` is a
+  shared, multiplexed connection that several clients attach to, one per
+  store (`createClient({ connection, store })`); messages are tagged with
+  the store id, and `client.disconnect()` on a shared connection leaves
+  just that store (`{ t: 'leave', store }`) while `connection.close()`
+  drops the socket for all. Each client keeps its own outbox, undo history,
+  and status. On the server, `createHub(resolveStore, { send })` is the
+  session-shaped counterpart that keeps one store session per socket, and
+  `serve({ stores })` serves it at `path` while `path/<id>` keeps the
+  plain per-store protocol. A client with its own `transport` gets a
+  private, untagged connection, so single-store servers and URLs are
+  unchanged. The fuzzer gained a `hub` mode in which clients share two
+  connections and an offline toggle drops everyone on that socket
+
 - **SQLite persistence on Bun.** `sqliteStorage(file)` from
   `lazy-storage/server/sqlite` keeps any number of stores in one database
   file, one row per leaf path keyed by `(store, path)`, in WAL mode; each

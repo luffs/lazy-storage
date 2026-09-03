@@ -1,20 +1,26 @@
 // bun.js - Serve stores over WebSockets with Bun.serve
 //
-// Each socket gets one session on one store; messages are JSON. With a
-// single `store`, clients connect to `path` (default /ws). With `stores`
-// (a registry from createStores, or a function id -> store|null), clients
-// connect to `path/<storeId>`; the id sits in the URL rather than in the
-// protocol so an authenticating wrapper can inspect it before a session
-// exists. Everything else (state, merge, persistence) lives in the store,
-// so this file is the only runtime-specific one on the server side.
+// Messages are JSON. Routes:
+//   serve({ store })    path            one store, a plain session per socket
+//   serve({ stores })   path            a hub: many stores over one socket,
+//                                       messages tagged with `store`
+//                       path/<storeId>  one store from the registry, a plain
+//                                       session per socket (the single-store
+//                                       client protocol, unchanged)
+// The store id sits in the URL for the per-store route and in the
+// messages for the hub; an authenticating wrapper can inspect either
+// before a session exists. Everything else (state, merge, persistence)
+// lives in the stores, so this file is the only runtime-specific one on
+// the server side.
 import { LazyWatch } from 'lazy-watch';
 import { isStoreId } from './registry.js';
+import { createHub } from './hub.js';
 
 /**
  * @param {Object} options
- * @param {Object} [options.store] - a single store (served at `path`)
+ * @param {Object} [options.store] - a single store, served at `path`
  * @param {Object|((id: string) => Object|null)} [options.stores] - a registry
- *   or resolver (served at `path/<id>`)
+ *   or resolver: a hub at `path`, plain sessions at `path/<id>`
  * @param {number} [options.port=3200]
  * @param {string} [options.path='/ws'] - WebSocket path (or path prefix)
  * @param {(req: Request) => Response|null|Promise<Response|null>} [options.fetch]
@@ -22,11 +28,15 @@ import { isStoreId } from './registry.js';
  */
 export function serve({ store, stores, port = 3200, path = '/ws', fetch: fetchHandler } = {}) {
   if (!store && !stores) throw new TypeError('serve requires a store or stores');
+  if (store && stores) throw new TypeError('serve takes either a single store or stores, not both');
   const resolveStore = typeof stores === 'function' ? stores : stores ? id => stores.get(id) : null;
   const sessions = new Map();
 
-  function target(url) {
-    if (store && url.pathname === path) return { store };
+  // What a URL asks for: a session on one store, a hub, or an error response
+  function route(url) {
+    if (url.pathname === path) {
+      return store ? { open: send => store.session({ send }) } : { open: send => createHub(resolveStore, { send }) };
+    }
     if (resolveStore && url.pathname.startsWith(path + '/')) {
       let id;
       try {
@@ -36,7 +46,7 @@ export function serve({ store, stores, port = 3200, path = '/ws', fetch: fetchHa
       }
       if (!isStoreId(id)) return { error: new Response('Invalid store id', { status: 400 }) };
       const found = resolveStore(id);
-      return found ? { store: found } : { error: new Response('Unknown store', { status: 404 }) };
+      return found ? { open: send => found.session({ send }) } : { error: new Response('Unknown store', { status: 404 }) };
     }
     return null;
   }
@@ -45,10 +55,10 @@ export function serve({ store, stores, port = 3200, path = '/ws', fetch: fetchHa
     port,
     async fetch(req, server) {
       const url = new URL(req.url);
-      const t = target(url);
-      if (t) {
-        if (t.error) return t.error;
-        return server.upgrade(req, { data: { store: t.store } }) ? undefined : new Response('WebSocket upgrade failed', { status: 400 });
+      const r = route(url);
+      if (r) {
+        if (r.error) return r.error;
+        return server.upgrade(req, { data: { open: r.open } }) ? undefined : new Response('WebSocket upgrade failed', { status: 400 });
       }
       if (fetchHandler) {
         const res = await fetchHandler(req);
@@ -58,7 +68,7 @@ export function serve({ store, stores, port = 3200, path = '/ws', fetch: fetchHa
     },
     websocket: {
       open(ws) {
-        sessions.set(ws, ws.data.store.session({ send: message => ws.send(JSON.stringify(message)) }));
+        sessions.set(ws, ws.data.open(message => ws.send(JSON.stringify(message))));
       },
       message(ws, raw) {
         let msg;
