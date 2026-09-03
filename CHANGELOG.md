@@ -2,7 +2,7 @@
 
 All notable changes to lazy-storage are documented here. The format follows Keep a Changelog; versions follow Semantic Versioning.
 
-## [Unreleased]
+## [0.3.0] - 2026-09-03
 
 Three guards a deployed store needs, and three costs that no longer grow
 with the size of the state or the number of sockets. Servers and clients
