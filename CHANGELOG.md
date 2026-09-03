@@ -2,7 +2,13 @@
 
 All notable changes to lazy-storage are documented here. The format follows Keep a Changelog; versions follow Semantic Versioning.
 
-## [Unreleased]
+## [0.4.0] - 2026-09-03
+
+Row persistence on the client, deltas that survive a deploy, and the
+ceilings and hooks a public server needs. Also fixes a 0.3.0 bug where a
+reconnect answered with a delta could leave a register on a stale value.
+Storage from 0.3.0 opens as is; servers and clients should upgrade
+together.
 
 ### Added
 
