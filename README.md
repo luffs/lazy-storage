@@ -7,6 +7,10 @@ state tree: clients hold a live mirror they read and write like a plain
 object, edits sync as small JSON diffs, work continues offline, and
 everything converges when the connection is back.
 
+```bash
+npm install lazy-storage
+```
+
 ```js
 import { createClient, webSocketTransport, localStorageOutbox } from 'lazy-storage';
 

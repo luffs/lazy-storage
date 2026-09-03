@@ -62,6 +62,25 @@ test('a skeleton key added to initial appears on load even though no row mention
   assert.deepEqual(two.snapshot(), { tasks: { a: { id: 'a' } }, labels: {} });
 });
 
+test('a container written empty keeps its row beside its children, so a rebuild matches the live state after they are removed', () => {
+  const storage = memoryStorage();
+  const store = createStore({ initial: { tasks: {} }, storage });
+  store.patch({ tasks: { a: { id: 'a', assignees: {} } } });     // an empty container is a leaf row
+  store.patch({ tasks: { a: { assignees: { u1: true } } } });    // gains a child; the {} row stays
+  store.patch({ tasks: { a: { assignees: { u1: null } } } });    // loses it again (tombstone)
+  store.patch({ tasks: { a: { score: 5 } } });                   // a leaf...
+  store.patch({ tasks: { a: { score: { high: 9 } } } });         // ...that becomes a container: both rows exist, shallow-first rebuild wins
+  const live = store.snapshot();
+  assert.deepEqual(live, { tasks: { a: { id: 'a', assignees: {}, score: { high: 9 } } } });
+  const rows = storage.load().rows.map(([k, r]) => `${k}${r.deleted ? ' (tombstone)' : ''}`);
+  assert.ok(rows.includes('["tasks","a","assignees"]'), 'the empty-container row is kept');
+  assert.ok(rows.includes('["tasks","a","assignees","u1"] (tombstone)'));
+  store.dispose();
+
+  const reopened = createStore({ initial: { tasks: {} }, storage });
+  assert.deepEqual(reopened.snapshot(), live, 'the rebuilt state equals what the server held before the restart');
+});
+
 test('compacting tombstones commits the removed rows', () => {
   const storage = memoryStorage();
   const store = createStore({ initial: INITIAL, storage, now: () => 1000 });

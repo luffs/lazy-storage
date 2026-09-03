@@ -5,6 +5,13 @@
 // carry the timestamp only. Alongside the rows: the last sequence number
 // seen from each replica, and the store's version.
 //
+// An empty object is a leaf too (`assignees: {}` is one row). When such a
+// container later gains children, its `{}` row stays next to the child
+// rows on purpose: rows are applied shallow-first on load, so the empty
+// object is created and then filled, and if every child is later deleted
+// the row is what keeps the container in existence — exactly as the live
+// state has it. Dropping it would make a restart lose the empty container.
+//
 // The interface is incremental so a row-oriented backend (SQLite) writes
 // only what an op touched:
 //

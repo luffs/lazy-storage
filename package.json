@@ -1,6 +1,6 @@
 {
   "name": "lazy-storage",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Self-hosted realtime state store with offline sync, built on lazy-watch: keyed collections, last-writer-wins per field, an outbox that survives reconnects.",
   "type": "module",
   "exports": {
@@ -13,7 +13,8 @@
   },
   "files": [
     "src",
-    "README.md"
+    "README.md",
+    "CHANGELOG.md"
   ],
   "sideEffects": false,
   "engines": {
@@ -30,10 +31,24 @@
     "realtime",
     "state",
     "lazy-watch",
-    "last-writer-wins"
+    "last-writer-wins",
+    "websocket",
+    "bun"
   ],
   "dependencies": {
     "lazy-watch": "^6.2.1"
   },
+  "publishConfig": {
+    "provenance": true,
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/luffs/lazy-storage.git"
+  },
+  "bugs": {
+    "url": "https://github.com/luffs/lazy-storage/issues"
+  },
+  "homepage": "https://github.com/luffs/lazy-storage#readme",
   "license": "ISC"
 }

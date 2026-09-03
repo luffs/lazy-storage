@@ -2,7 +2,17 @@
 
 All notable changes to lazy-storage are documented here. The format follows Keep a Changelog; versions follow Semantic Versioning.
 
-## [Unreleased]
+## [0.2.0] - 2026-09-03
+
+The first published version. Since 0.1.0 (never published) the API was
+reshaped around one protocol and one route: every message names its
+store, a client always names its store and either shares a connection or
+owns one, the server keeps a hub per socket. Persistence became
+row-oriented with a SQLite adapter on Bun, and the server grew
+authentication and authorization hooks, presence, eviction, embedding into
+an existing Bun.serve, keepalive, wildcard registers, and a registry for
+many stores. The todo app in the sibling repository is the reference
+consumer.
 
 ### Removed
 
