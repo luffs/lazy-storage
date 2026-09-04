@@ -103,6 +103,9 @@ test('serve: other requests reach the app, a bad token is refused, two sockets s
 
     a1.collection('tasks').add({ id: 'x', title: 'from alice' });
     await until(() => b1.state.tasks.x?.title === 'from alice', 'bob sees the task');
+    a1.share({ editing: 'x' });
+    await until(() => b1.peers.find(p => p.replicaId === 'a1')?.data?.editing === 'x', 'bob sees what alice shares');
+    assert.equal(b1.peers.find(p => p.replicaId === 'b1').data, undefined, 'his own entry shares nothing');
     b1.state.tasks.x.done = true;
     await until(() => a1.state.tasks.x?.done === true, 'alice sees the edit');
     assert.equal(a2.state.tasks.x, undefined);

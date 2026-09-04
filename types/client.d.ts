@@ -1,7 +1,7 @@
 // Type declarations for `lazy-storage/client` (createClient, openClient)
 // and the client-side shapes the main entry builds on. Hand-written.
 import type { ChangeListener, ListenerOptions, Unsubscribe } from 'lazy-watch';
-import type { ClosedCode, ErrorCode, Op, RegisterSpec, Row, ServerMessage } from './core.js';
+import type { ClosedCode, ErrorCode, Op, Peer, RegisterSpec, Row, ServerMessage } from './core.js';
 
 export type ConnectionStatus = 'offline' | 'connecting' | 'open';
 export type ClientStatus = 'offline' | 'connecting' | 'online';
@@ -229,6 +229,8 @@ export interface ClientEvents {
   /** The outbox changed */
   sync: undefined;
   presence: unknown[];
+  /** Every live session on the store, with what it shares */
+  peers: Peer[];
   closed: Closed;
   /** What undo and redo can do changed: after a local batch, an undo, a redo, or clearHistory() */
   history: { canUndo: boolean; canRedo: boolean };
@@ -249,6 +251,16 @@ export interface Client<S extends object = any> {
   readonly version: number;
   /** Distinct users with a live session on this store (empty while offline) */
   readonly presence: unknown[];
+  /** Every live session on this store, this client's own included (by `replicaId`), with what each shares */
+  readonly peers: Peer[];
+  /** What this client shares with its peers, or undefined */
+  readonly shared: unknown;
+  /**
+   * Share a small JSON value with everyone on the store: it rides on
+   * presence, is never written, and lives as long as the session (a
+   * hello carries it, so a reconnect restores it). null clears it
+   */
+  share(data: unknown): void;
   /** Why the server closed this store for us, or null */
   readonly closed: Closed | null;
   /** True when this client started from a cached state rather than `initial` */

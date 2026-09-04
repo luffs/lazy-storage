@@ -1,7 +1,7 @@
 // Type declarations for `lazy-storage/server`: stores, storage adapters,
 // the registry, and hubs. Hand-written; the runtime is plain JS.
 import type { ChangeListener, ListenerOptions, Unsubscribe } from 'lazy-watch';
-import type { ClientMessage, Diff, Op, Path, RegisterSpec, ServerMessage, Tagged, Timestamp } from './core.js';
+import type { ClientMessage, Diff, Op, Path, Peer, RegisterSpec, ServerMessage, Tagged, Timestamp } from './core.js';
 
 export type { ClientMessage, ServerMessage, Tagged } from './core.js';
 
@@ -117,6 +117,8 @@ export interface StoreOptions<S extends object = any> {
   deltaLog?: number;
   /** The most leaves one client op may touch; default 10 000 */
   maxLeaves?: number;
+  /** The most a session may share with its peers, in bytes of JSON; default 4096 */
+  maxShare?: number;
   /** Live ops a replica may send; default `{ burst: 500, perSecond: 100 }`, false disables */
   rateLimit?: RateLimit | false;
   storage?: ServerStorage;
@@ -188,6 +190,8 @@ export interface Store<S extends object = any> {
   closeSessions(predicate: (session: Session) => boolean, message?: string): number;
   /** Distinct users with a live session */
   presence(): unknown[];
+  /** Every live session: its replica id, its user, and what it shares */
+  peers(): Peer[];
   snapshot(): S;
   /** Subscribe to accepted changes (a lazy-watch listener on the state) */
   on(listener: ChangeListener<S>, options?: ListenerOptions): Unsubscribe;

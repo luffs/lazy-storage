@@ -4,7 +4,7 @@
 import {
   createClient, openClient, createConnection, webSocketTransport, memoryOutbox, localStorageOutbox, indexedDBStorage,
   LazyWatch, compareTs, createClock, pathKey, registerSet, leaves, rebuild, randomId,
-  type Client, type ClientError, type Timestamp, type Diff, type ServerMessage, type RowStorage, type Op
+  type Client, type ClientError, type Timestamp, type Diff, type ServerMessage, type RowStorage, type Op, type Peer
 } from 'lazy-storage';
 import { createClient as createClientAgain } from 'lazy-storage/client';
 import { sqliteClientStorage } from 'lazy-storage/client/sqlite';
@@ -46,6 +46,11 @@ db.on('status', s => { const _s: 'offline' | 'connecting' | 'online' = s; });
 db.on('error', (err: ClientError) => { if (err.code === 'rate-limited') return; });
 db.on('closed', c => { const _code: string = c.code; });
 db.on('history', ({ canUndo, canRedo }) => { const _both: boolean = canUndo && canRedo; });
+db.share({ editing: id });
+const peers: Peer[] = db.peers;
+const mine: Peer | undefined = peers.find(p => p.replicaId === db.replicaId);
+db.on('peers', list => { const _n: number = list.length; });
+void mine;
 db.watch((changes, inverse, meta) => { if (meta?.origin === 'remote') return; });
 db.undo(); db.redo(); db.group(() => 1);
 const snapshot: State = LazyWatch.snapshot(db.state);

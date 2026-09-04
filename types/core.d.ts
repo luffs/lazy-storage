@@ -141,9 +141,17 @@ export type ErrorCode = 'invalid' | 'forbidden' | 'expired' | 'too-large' | 'rat
 /** `unauthorized` ends the socket itself (the request did not authenticate); the others end one store on it */
 export type ClosedCode = 'evicted' | 'forbidden' | 'unknown-store' | 'invalid-store' | 'unauthorized';
 
+/** A live session on a store, as presence lists them; `data` is what that client shares */
+export interface Peer {
+  replicaId: string;
+  user?: unknown;
+  data?: unknown;
+}
+
 export type ClientMessage =
-  | { t: 'hello'; replicaId: string; ops: Op[]; since?: number; epoch?: string | null }
+  | { t: 'hello'; replicaId: string; ops: Op[]; since?: number; epoch?: string | null; share?: unknown }
   | { t: 'op'; op: Op }
+  | { t: 'share'; data: unknown }
   | { t: 'ping' }
   | { t: 'leave' };
 
@@ -152,7 +160,7 @@ export type ServerMessage =
   | { t: 'delta'; patches: Diff[]; ts: Timestamp; seq: number; registers: string[]; v: number; epoch: string }
   | { t: 'patch'; diff: Diff; ts: Timestamp; v: number }
   | { t: 'ack'; seq: number; ts: Timestamp; correction: Diff | null }
-  | { t: 'presence'; users: unknown[] }
+  | { t: 'presence'; users: unknown[]; peers: Peer[] }
   | { t: 'closed'; code: ClosedCode; message: string }
   | { t: 'error'; seq?: number; code?: ErrorCode; message: string; now?: number; ts?: Timestamp; retryAfter?: number }
   | { t: 'pong' };

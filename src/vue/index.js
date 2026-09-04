@@ -24,17 +24,18 @@
 import { reactive, shallowRef, getCurrentScope, onScopeDispose } from 'vue';
 import { LazyWatch } from 'lazy-watch';
 
-const EVENTS = ['status', 'presence', 'sync', 'closed', 'history'];
+const EVENTS = ['status', 'presence', 'peers', 'sync', 'closed', 'history'];
 
 /**
  * @param {Object} db - a client from createClient or openClient
- * @returns {{ state: Object, status: Object, presence: Object, pending: Object, closed: Object, canUndo: Object, canRedo: Object, restored: boolean, stop: () => void }}
+ * @returns {{ state: Object, status: Object, presence: Object, peers: Object, pending: Object, closed: Object, canUndo: Object, canRedo: Object, restored: boolean, stop: () => void }}
  *   `state` is reactive; the rest of what changes are shallow refs
  */
 export function useClient(db) {
   const state = reactive(LazyWatch.snapshot(db.state));
   const status = shallowRef(db.status);
   const presence = shallowRef(db.presence);
+  const peers = shallowRef(db.peers);
   const pending = shallowRef(db.pending);
   const closed = shallowRef(db.closed);
   const canUndo = shallowRef(db.canUndo);
@@ -42,6 +43,7 @@ export function useClient(db) {
   const refresh = () => {
     status.value = db.status;
     presence.value = db.presence;
+    peers.value = db.peers;
     pending.value = db.pending;
     closed.value = db.closed;
     canUndo.value = db.canUndo;
@@ -57,5 +59,5 @@ export function useClient(db) {
     for (const off of stops.splice(0)) off();
   };
   if (getCurrentScope()) onScopeDispose(stop);
-  return { state, status, presence, pending, closed, canUndo, canRedo, restored: db.restored, stop };
+  return { state, status, presence, peers, pending, closed, canUndo, canRedo, restored: db.restored, stop };
 }

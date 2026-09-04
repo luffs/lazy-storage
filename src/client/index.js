@@ -52,7 +52,7 @@ const REMOTE = { origin: 'remote' };
 const SNAPSHOT = { origin: 'remote', snapshot: true };
 const RESTORE = { origin: 'restore' };
 const HISTORY = new Set(['undo', 'redo']);
-const EVENTS = ['status', 'error', 'sync', 'closed', 'presence', 'history'];
+const EVENTS = ['status', 'error', 'sync', 'closed', 'presence', 'peers', 'history'];
 // A hello carries at most this many ops, so it stays under any payload
 // limit after a long offline spell; the rest go as ops once the answer
 // lands, the way edits made during the hello do
@@ -170,6 +170,8 @@ function build({
   let synced = false;     // this store's snapshot has landed on this socket
   let lastStatus = 'offline';
   let presence = [];      // distinct users with a live session on this store
+  let peers = [];         // every live session on this store, with what it shares
+  let shared;             // what this client shares with them (undefined: nothing)
   let ended = null;       // { code, message } after the server closed this store for us
   let retryTimer = null;  // a hello scheduled after a rate-limit refusal
 
@@ -218,6 +220,18 @@ function build({
     if (users.length === 0 && presence.length === 0) return;
     presence = users;
     emit('presence', presence);
+  }
+
+  function setPeers(list) {
+    if (list.length === 0 && peers.length === 0) return;
+    peers = list;
+    emit('peers', peers);
+  }
+
+  /** Offline, or the store ended for us: nobody is there to see */
+  function clearPresence() {
+    setPresence([]);
+    setPeers([]);
   }
 
   /** Drop acknowledged ops (seq and below) from the outbox and its persistence */
@@ -328,6 +342,7 @@ function build({
   function hello({ full = false } = {}) {
     const message = { t: 'hello', replicaId, ops: outbox.slice(0, HELLO_LIMIT) };
     if (!full) Object.assign(message, { since: known.v, epoch: known.epoch });
+    if (shared !== undefined) message.share = shared;
     link?.send(message);
   }
 
@@ -386,6 +401,7 @@ function build({
         return;
       case 'presence':
         setPresence(Array.isArray(msg.users) ? msg.users : []);
+        setPeers(Array.isArray(msg.peers) ? msg.peers : []);
         return;
       case 'closed': {
         // Final for this store: evicted, forbidden, or unknown. Detach and
@@ -397,7 +413,7 @@ function build({
         }
         synced = false;
         if (ownsConnection) connection.close();
-        setPresence([]);
+        clearPresence();
         refreshStatus();
         emit('closed', ended);
         return;
@@ -474,7 +490,7 @@ function build({
     onMessage: handle,
     onClose() {
       synced = false;
-      setPresence([]);
+      clearPresence();
       refreshStatus();
     },
     /** The server turned the whole socket away (not signed in): final for this store too, until connect(); onClose came first */
@@ -499,7 +515,7 @@ function build({
     }
     if (ownsConnection) connection.close();
     synced = false;
-    setPresence([]);
+    clearPresence();
     refreshStatus();
   }
 
@@ -552,6 +568,20 @@ function build({
     get version() { return known.v; },
     /** Distinct users with a live session on this store (empty while offline) */
     get presence() { return presence; },
+    /** Every live session on this store, `{ replicaId, user, data }`, this client's own included (by `replicaId`) */
+    get peers() { return peers; },
+    /** What this client shares with its peers, or undefined */
+    get shared() { return shared; },
+    /**
+     * Share a small JSON value with everyone on the store: it rides on
+     * presence, is never written, and lives as long as the session (a
+     * hello carries it, so a reconnect restores it). null clears it
+     */
+    share(data) {
+      if (data !== null && data !== undefined && JSON.stringify(data) === undefined) throw new TypeError('share expects a JSON value, or null');
+      shared = data === null ? undefined : data;
+      link?.send({ t: 'share', data: shared === undefined ? null : shared });
+    },
     /** Why the server closed this store for us ({ code, message }), or null */
     get closed() { return ended; },
     connect,
@@ -564,9 +594,10 @@ function build({
     /**
      * Lifecycle events: 'status' (string), 'error' (Error, with `code` when
      * the server gave one), 'sync' (outbox changed), 'presence' (users),
-     * 'closed' ({ code, message }: the server ended this store, or the
-     * socket, for us), 'history' ({ canUndo, canRedo }: after a local
-     * batch, an undo, a redo, or clearHistory)
+     * 'peers' (every session with what it shares), 'closed' ({ code,
+     * message }: the server ended this store, or the socket, for us),
+     * 'history' ({ canUndo, canRedo }: after a local batch, an undo, a
+     * redo, or clearHistory)
      */
     on(event, fn) {
       if (!listeners[event]) throw new TypeError(`Unknown event "${event}"`);

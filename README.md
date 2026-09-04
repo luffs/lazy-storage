@@ -391,7 +391,19 @@ sessions yourself), which powers two more features:
   session whenever one joins or leaves; `db.presence` holds the list,
   `db.on('presence', users => ...)` follows it, and `store.presence()`
   answers on the server. Users are distinct by `id` (or by value; override
-  with `presenceKey`), so a user on two devices counts once.
+  with `presenceKey`), so a user on two devices counts once. A session
+  counts from its hello on.
+- **Peers.** The same broadcast lists every live session as a peer,
+  `{ replicaId, user, data }`, where `data` is whatever that client chose
+  to share: `db.share({ editing: taskId })` sets it, `null` clears it,
+  and the hello carries it, so a reconnect restores it. Shared data is
+  never written to the store; it lives as long as the session, goes out
+  as it changes (throttle a cursor yourself), and may be at most
+  `maxShare` bytes of JSON (default 4096; over that, or not JSON, the
+  share is refused with an `error` and nothing changes). `db.peers`
+  holds the list, this client's own entry included (its `replicaId` is
+  `db.replicaId`), `db.on('peers', ...)` follows it, and `store.peers()`
+  answers on the server. "Ann is editing this task" is a filter over it.
 - **Eviction.** `store.closeSessions(user => ..., message)` ends the
   sessions a predicate selects — say, everyone who was just removed from a
   team. The client receives a `closed` event with `{ code: 'evicted',
@@ -516,12 +528,12 @@ runs on the synced state and shows in the array view like any other change.
 - `createConnection({ transport, reconnect, keepalive })` → `connect()`, `close()`, `status`, `attached`, `closed` — why the server turned the socket away, or null — `on('status' | 'closed', fn)` — a socket shared by clients
 - `db.state` — the mirror (a lazy-watch proxy). Read and write it directly
 - `db.store`, `db.connection` — the store id and the connection
-- `db.presence` — users with a live session on this store; `db.closed` — `{ code, message }` after the server ended this store for us, else null
+- `db.presence` — users with a live session on this store; `db.peers` — every live session as `{ replicaId, user, data }`, this client's own included; `db.share(data)` — what this client shares with them (JSON, `null` clears), read back as `db.shared`; `db.closed` — `{ code, message }` after the server ended this store for us, else null
 - `db.collection(name)` — `add(record) → id`, `update(id, fields)`, `remove(id)`, `get(id)`, `has(id)`, `ids()`, `all()`
 - `db.list(path, { position })` — an ordered list of records: `all()`, `ids()`, `get(id)`, `has(id)`, `add(record, where) → id`, `move(id, where)`, `remove(id)`, `reconcile(ids) → written`, `keyFor(where)`; `where` is `{ before }`, `{ after }`, `{ at }`, or nothing for the end
 - `db.connect()`, `db.disconnect()`, `db.status` (`'offline' | 'connecting' | 'online'`), `db.pending`
 - `db.watch(listener)` — state changes; `meta?.origin === 'remote'` marks the server's
-- `db.on('status' | 'error' | 'sync' | 'presence' | 'closed' | 'history', fn)` — lifecycle events; a refused op is an error with a `code` (`forbidden`, `expired`, `invalid`, `too-large` drop the op; `rate-limited` keeps it and retries; `clock-skew` is handled without one); `history` carries `{ canUndo, canRedo }` after a local batch, an undo, a redo, or `clearHistory()`
+- `db.on('status' | 'error' | 'sync' | 'presence' | 'peers' | 'closed' | 'history', fn)` — lifecycle events; a refused op is an error with a `code` (`forbidden`, `expired`, `invalid`, `too-large` drop the op; `rate-limited` keeps it and retries; `clock-skew` is handled without one); `history` carries `{ canUndo, canRedo }` after a local batch, an undo, a redo, or `clearHistory()`
 - `db.undo()`, `db.redo()`, `db.canUndo`, `db.canRedo`, `db.checkpoint()`, `db.group(fn)`, `db.clearHistory()`
 - `webSocketTransport(url)`, `memoryOutbox()`, `localStorageOutbox(key)` — document adapters: `{ load(), save(outbox), saveState(cache) }`
 - `indexedDBStorage(name, { onError })` → also `settled()`, `close()`, `destroy()` — a row adapter: `{ load(), commit({ puts, deletes, meta }), replace({ rows, meta }), saveOp(op, meta), removeOp(seq, meta), dropOps(seq, meta) }`, where a delete removes the path and everything under it, `saveOp` also rewrites an op a newer one pruned, `removeOp` takes out one a newer op emptied, and `meta` is `{ replicaId, seq, version, epoch }`
@@ -534,10 +546,10 @@ runs on the synced state and shows in the array view like any other change.
 
 **Server** (`lazy-storage/server`)
 
-- `createStore({ initial, registers, readOnly, validate, maxSkew, retention, compactEvery, deltaLog, maxLeaves, rateLimit, storage, presenceKey, onError, now })`; `store.epoch` — this life of the storage
+- `createStore({ initial, registers, readOnly, validate, maxSkew, retention, compactEvery, deltaLog, maxLeaves, rateLimit, storage, presenceKey, maxShare, onError, now })`; `store.epoch` — this life of the storage
 - `store.observe(event, fn)` → unsubscribe — `'op'`, `'refused'`, `'session'`; `store.stats()` → `{ version, epoch, sessions, replicas, rows, tombstones, log }`
 - `store.session({ send, user, onEvict })` → `{ receive(message), close(), user, replicaId }` — one per connection, transport-agnostic
-- `store.closeSessions(predicate, message)` — evict sessions; `store.presence()` — distinct users with a live session
+- `store.closeSessions(predicate, message)` — evict sessions; `store.presence()` — distinct users with a live session; `store.peers()` — every live session as `{ replicaId, user, data }`
 - `store.patch(diff)` — a server-side change, timestamped and broadcast; `store.apply(op)` — a trusted op, gates skipped
 - `store.on(listener)`, `store.snapshot()`, `store.state`, `store.version`, `store.replicas`
 - `store.compact()` → `{ tombstones, replicas }` removed; `store.flush()`, `store.dispose()`
@@ -597,17 +609,18 @@ primitives anywhere, of anything at a register path).
 3. From then on each client batch goes out as an `op`. The server answers
    every op with an `ack` or an `error`, and broadcasts every accepted
    diff as a `patch` to every session on the store, the sender included.
-4. `presence` arrives whenever the users with a live session change, and
-   a `closed` message ends the store for this client. A `closed` without
+4. `presence` arrives whenever a session says hello, ends, or shares
+   something new, and a `closed` message ends the store for this client. A `closed` without
    a `store` ends the socket itself: the request did not authenticate.
 
 ### Client to server
 
 | Message | Fields | Meaning |
 |---|---|---|
-| `hello` | `replicaId`, `ops`, `since?`, `epoch?` | Connect or reconnect. `ops` is the outbox (its first 1000 ops); `since` is the store version the client has seen everything up to and `epoch` the storage life it belongs to, asking for a delta |
+| `hello` | `replicaId`, `ops`, `since?`, `epoch?`, `share?` | Connect or reconnect. `ops` is the outbox (its first 1000 ops); `since` is the store version the client has seen everything up to and `epoch` the storage life it belongs to, asking for a delta; `share` is what this client shares with its peers, restored on reconnect |
 | `op` | `op` | One batch, live |
 | `leave` | | Close this store's session; the socket stays up |
+| `share` | `data` | What this session shares with every peer, a JSON value within `maxShare`; `null` clears it. Presence goes out again if it changed |
 | `ping` | | Keepalive; answered with `pong` |
 
 ### Server to client
@@ -619,7 +632,7 @@ primitives anywhere, of anything at a register path).
 | `patch` | `diff`, `ts`, `v` | An accepted diff from any replica, and the version it made |
 | `ack` | `seq`, `ts`, `correction` | The op was merged; `correction` is a diff with the server's values at the leaves it lost, or null |
 | `error` | `seq?`, `code?`, `message`, `now?`, `ts?`, `retryAfter?` | With `seq`: that op was refused, for the reason in `code` (below). Without: the message itself was bad (not JSON, an unknown type, a hello without a replica id) |
-| `presence` | `users` | The distinct users with a live session |
+| `presence` | `users`, `peers` | The distinct users with a live session, and every session as `{ replicaId, user, data }` with what it shares; sent when a session says hello, ends, or shares something new |
 | `closed` | `code`, `message` | Final for this store on this socket; the client goes offline for it and does not reconnect on its own. Without a `store`: final for the socket, which the server then closes with code 4401; the connection stops reconnecting and every client on it reports the reason |
 | `pong` | | |
 

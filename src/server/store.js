@@ -36,6 +36,9 @@
 //       the client's whole outbox, and the store version it last saw; the
 //       server merges the ops and replies with what the client is missing
 //   { t: 'op', op }                           one live batch
+//   { t: 'share', data }                      what this session shares with
+//       every peer (see presence below); null clears it. A hello may carry
+//       it too, as `share`, so a reconnect restores it
 //   { t: 'ping' }
 // where op = { replicaId, seq, ts, diff }.
 //
@@ -56,7 +59,10 @@
 //       replica, the receiving one included) and the version it made
 //   { t: 'ack', seq, ts, correction }           `correction` is a diff with
 //       the server's values at the leaves the op lost, or null
-//   { t: 'presence', users }                    distinct users with a live session
+//   { t: 'presence', users, peers }             distinct users with a live
+//       session, and every session as a peer { replicaId, user, data },
+//       `data` being what it shares. Sent to everyone when a session says
+//       hello, ends, or shares something new; nothing here is written
 //   { t: 'closed', code, message }              this session is over
 //       (code 'evicted'; hubs also send 'forbidden', 'unknown-store', 'invalid-store')
 //   { t: 'error', seq?, code?, message, now?, ts? }  a refused op carries its
@@ -154,6 +160,8 @@ const defaultPresenceKey = user =>
  * @param {Object} [options.storage] - a storage adapter (default: memory)
  * @param {(user: any) => string} [options.presenceKey] - how presence
  *   dedupes users (default: by `id`)
+ * @param {number} [options.maxShare=4096] - the most a session may share
+ *   with its peers, in bytes of JSON; more is refused with 'too-large'
  * @param {(error: any) => void} [options.onError] - where faults that are
  *   not a client's (an observer that throws) are reported; default console
  * @param {() => number} [options.now] - wall clock (injectable for tests)
@@ -171,10 +179,12 @@ export function createStore({
   rateLimit = { burst: 500, perSecond: 100 },
   storage = memoryStorage(),
   presenceKey = defaultPresenceKey,
+  maxShare = 4096,
   onError = err => console.error('lazy-storage:', err),
   now
 } = {}) {
   if (validate !== undefined && typeof validate !== 'function') throw new TypeError('validate must be a function');
+  if (!(maxShare > 0)) throw new TypeError('maxShare must be a positive number of bytes');
   if (rateLimit && !(rateLimit.burst > 0 && rateLimit.perSecond > 0)) throw new TypeError('rateLimit needs positive burst and perSecond');
   const time = now ?? Date.now;
   const regs = registerSet(registers);
@@ -257,18 +267,41 @@ export function createStore({
     storage.commit({ ...change, version, epoch });
   }
 
+  // A session counts from its hello: that is when it has a replica id to
+  // be listed as a peer by, and with a hub, the message it was created for
   function presence() {
     const seen = new Map();
     for (const s of sessions) {
-      if (s.user === undefined) continue;
+      if (s.user === undefined || !s.replicaId) continue;
       const key = presenceKey(s.user);
       if (!seen.has(key)) seen.set(key, s.user);
     }
     return [...seen.values()];
   }
 
+  /** Every session that has said hello: its replica id, its user, and what it shares */
+  function peers() {
+    const list = [];
+    for (const s of sessions) if (s.replicaId) list.push({ replicaId: s.replicaId, user: s.user, data: s.shared });
+    return list;
+  }
+
   function broadcastPresence() {
-    broadcast({ t: 'presence', users: presence() });
+    broadcast({ t: 'presence', users: presence(), peers: peers() });
+  }
+
+  /** Set what a session shares (JSON within maxShare; null clears); true when it changed */
+  function setShared(s, data) {
+    let json;
+    if (data !== null && data !== undefined) {
+      json = JSON.stringify(data);
+      if (json === undefined) throw new RefusedError('invalid', 'Shared data must be JSON');
+      if (json.length > maxShare) throw new RefusedError('too-large', `Shared data over ${maxShare} bytes`);
+    }
+    if (json === s.sharedJson) return false;
+    s.shared = json === undefined ? undefined : data;
+    s.sharedJson = json;
+    return true;
   }
 
   /**
@@ -495,12 +528,23 @@ export function createStore({
       user,
       onEvict,
       replicaId: null,
+      shared: undefined,     // what this session shares with its peers, and its JSON
+      sharedJson: undefined,
       receive(msg) {
         if (!Utils.isPlainObject(msg)) return send({ t: 'error', message: 'Expected a message object' });
         switch (msg.t) {
           case 'hello': {
             if (typeof msg.replicaId !== 'string' || !msg.replicaId) return send({ t: 'error', message: 'hello requires a replicaId' });
+            const joined = !s.replicaId;
             s.replicaId = msg.replicaId;
+            let shared = false;
+            if (msg.share !== undefined) {
+              try {
+                shared = setShared(s, msg.share);
+              } catch (err) {
+                send({ t: 'error', code: err.code, message: err.message });
+              }
+            }
             let refused = false;
             const lost = [];
             for (const op of Array.isArray(msg.ops) ? msg.ops : []) {
@@ -516,7 +560,19 @@ export function createStore({
             // overtaken by a later op of the same hello, and the client
             // applies corrections last
             const corrections = lost.length ? [correction(lost)] : [];
-            return send(catchUp(msg.replicaId, msg.since, msg.epoch, refused, corrections));
+            send(catchUp(msg.replicaId, msg.since, msg.epoch, refused, corrections));
+            // With a replica id the session is a peer everyone can see; a
+            // re-hello on the same session changes nothing unless it shares anew
+            if (joined || shared) broadcastPresence();
+            return;
+          }
+          case 'share': {
+            try {
+              if (setShared(s, msg.data) && s.replicaId) broadcastPresence();
+            } catch (err) {
+              send({ t: 'error', code: err.code, message: err.message });
+            }
+            return;
           }
           case 'op': {
             try {
@@ -539,15 +595,12 @@ export function createStore({
       },
       close() {
         if (!sessions.delete(s)) return;
-        if (user !== undefined) broadcastPresence();
+        if (s.replicaId) broadcastPresence();
         if (observers.session.size) notify('session', { event: 'close', user, replicaId: s.replicaId, sessions: sessions.size });
       }
     };
     sessions.add(s);
-    // A user joining changes the list for everyone; an anonymous session
-    // still needs to see who is here
-    if (user !== undefined) broadcastPresence();
-    else send({ t: 'presence', users: presence() });
+    // Presence goes out once the session has said hello (see presence above)
     if (observers.session.size) notify('session', { event: 'open', user, replicaId: null, sessions: sessions.size });
     return s;
   }
@@ -593,6 +646,8 @@ export function createStore({
     closeSessions,
     /** Distinct users with a live session */
     presence,
+    /** Every live session: `{ replicaId, user, data }`, `data` being what it shares */
+    peers,
     snapshot: () => LazyWatch.snapshot(state),
     /** Subscribe to accepted changes (a LazyWatch listener on the state) */
     on: (listener, options) => LazyWatch.on(state, listener, options),

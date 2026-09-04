@@ -1,6 +1,7 @@
 // Type declarations for `lazy-storage/vue`. Hand-written.
 import type { ShallowRef, UnwrapNestedRefs } from 'vue';
 import type { Client, ClientStatus, Closed } from './client.js';
+import type { Peer } from './core.js';
 
 /** What useClient returns: a reactive mirror of the state, and the client's other facts as refs */
 export interface ClientView<S extends object = any> {
@@ -9,6 +10,8 @@ export interface ClientView<S extends object = any> {
   status: ShallowRef<ClientStatus>;
   /** Distinct users with a live session on the store */
   presence: ShallowRef<unknown[]>;
+  /** Every live session on the store, with what it shares */
+  peers: ShallowRef<Peer[]>;
   /** Unacknowledged local ops */
   pending: ShallowRef<number>;
   /** Why the server closed the store or the socket for us, or null */

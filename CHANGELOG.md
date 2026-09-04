@@ -36,6 +36,15 @@ All notable changes to lazy-storage are documented here. The format follows Keep
   a local batch, an undo, a redo, or `clearHistory()`. The undo manager
   moves its stacks after the batch it emits, so a listener on that batch
   reads them stale; this is the moment to read them
+- **Peers: what a client shares rides on presence.** `db.share(data)`
+  sets a small JSON value (`null` clears it) that is never written to
+  the store and lives as long as the session; the hello carries it, so a
+  reconnect restores it. The presence broadcast now lists every live
+  session as a peer, `{ replicaId, user, data }`, in `db.peers` (this
+  client's own entry included), the `peers` event, and `store.peers()`;
+  the Vue and React entries expose `peers` too. A share over `maxShare`
+  bytes of JSON (a new store option, default 4096), or not JSON, is
+  refused with an `error` and changes nothing
 
 ### Changed
 
@@ -46,6 +55,10 @@ All notable changes to lazy-storage are documented here. The format follows Keep
 - A transport's `onclose` receives `{ code, reason }` where the socket
   knows them; the connection reads code 4401 in case the `closed`
   message did not make it
+- Presence is broadcast when a session says hello, ends, or shares
+  something new, rather than when it opens: a peer needs its replica id,
+  which the hello brings. `store.presence()` counts a session from its
+  hello as well, and a session that never says hello is not announced
 
 ## [0.7.0] - 2026-09-04
 

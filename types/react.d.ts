@@ -1,5 +1,6 @@
 // Type declarations for `lazy-storage/react`. Hand-written.
 import type { Client, ClientStatus, Closed } from './client.js';
+import type { Peer } from './core.js';
 
 /** What useClient returns: the client's state and other facts, a new object per change */
 export interface ClientSnapshot<S extends object = any> {
@@ -8,6 +9,8 @@ export interface ClientSnapshot<S extends object = any> {
   readonly status: ClientStatus;
   /** Distinct users with a live session on the store */
   readonly presence: unknown[];
+  /** Every live session on the store, with what it shares */
+  readonly peers: Peer[];
   /** Unacknowledged local ops */
   readonly pending: number;
   /** Why the server closed the store or the socket for us, or null */

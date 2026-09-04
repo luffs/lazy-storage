@@ -19,7 +19,7 @@
 // the first mounts and closed when the last unmounts.
 import { useSyncExternalStore } from 'react';
 
-const EVENTS = ['status', 'presence', 'sync', 'closed', 'history'];
+const EVENTS = ['status', 'presence', 'peers', 'sync', 'closed', 'history'];
 const trackers = new WeakMap();
 
 /** What React reads: the state (the same proxy every time) and the client's other facts */
@@ -27,6 +27,7 @@ const read = db => ({
   state: db.state,
   status: db.status,
   presence: db.presence,
+  peers: db.peers,
   pending: db.pending,
   closed: db.closed,
   canUndo: db.canUndo,
