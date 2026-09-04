@@ -17,16 +17,15 @@ import { createClient, webSocketTransport, localStorageOutbox } from 'lazy-stora
 const db = createClient({
   transport: webSocketTransport('wss://example.com/ws?token=...'),
   store: 'todo',
-  initial: { tasks: {}, order: [] },
-  registers: ['order'],
+  initial: { tasks: [] },
+  lists: ['tasks'],                       // an ordered list of records, seen as an array
   storage: localStorageOutbox('todo')
 });
 db.connect();
 
-const tasks = db.collection('tasks');
-const id = tasks.add({ title: 'Ship it', done: false }); // synced, offline or not
-tasks.update(id, { done: true });
-db.state.order.push(id);
+db.state.tasks.push({ title: 'Ship it', done: false }); // synced, offline or not
+db.state.tasks[0].done = true;
+db.state.tasks.sort((a, b) => a.title.localeCompare(b.title));
 
 db.watch((diff, inverse, meta) => render(db.state, meta?.origin === 'remote'));
 db.undo();
@@ -37,11 +36,11 @@ import { createStore, createStores } from 'lazy-storage/server';
 import { sqliteStorage } from 'lazy-storage/server/sqlite';
 import { serve } from 'lazy-storage/server/bun';
 
-// Any number of stores in one SQLite file, one row per leaf
+// Any number of stores in one SQLite file, one row per leaf. The server
+// knows nothing of arrays: a list is a keyed map with a position per record
 const sqlite = sqliteStorage('data/app.sqlite');
 const stores = createStores(id => createStore({
-  initial: { tasks: {}, order: [] },
-  registers: ['order'],
+  initial: { tasks: {} },
   storage: sqlite.store(id)
 }));
 serve({
@@ -137,6 +136,20 @@ arrive as splices at their sorted place, moves, and field patches, tagged
 gets one in the next batch; read it back from the array rather than from
 the object you pushed. A list path cannot also be a register.
 
+### With a UI framework
+
+Two shapes work. An app that keeps its own arrays, as a Vue store or a
+drag-and-drop list does, overwrites the view's arrays with them after a
+change (`LazyWatch.overwrite(db.state.tasks, plainTasks)`) and copies them
+back on remote, undo, and redo batches; lazy-storage diffs the arrays by
+id and writes only what changed. An app that renders from the store keeps
+a reactive mirror (`LazyWatch.patch(mirror, diff)` on every batch, since
+lazy-watch mutates a plain object or array in place and Vue tracks that)
+and writes straight to `db.state`. Wrapping `db.state` in Vue's `reactive`
+does not work: remote patches land underneath Vue's proxy and nothing
+re-renders. The todo app at github.com/luffs/kimi-wa-best-todo is the
+first shape in full.
+
 ## How conflicts resolve
 
 Every op carries a hybrid-logical-clock timestamp. The server keeps the
@@ -150,7 +163,10 @@ timestamp of the last accepted write per leaf path and decides per leaf:
   partial record. A newer edit of a single field of a deleted record is
   also refused (a deleted record does not come back as one field); a
   newer *record* write, an object with an `id`, re-adds it.
-- A **register** is one leaf: the newest whole value wins.
+- An **array** is one leaf, whether an array of primitives anywhere or a
+  declared register: the newest whole value wins. A list of records is
+  not an array on the wire (see [Lists](#lists)), so its records merge
+  one by one.
 
 A client whose op lost receives a correction with the server's values and
 falls back in line. The server is the only merge point, which is what
@@ -433,7 +449,7 @@ import { serve } from 'lazy-storage/server/node';
 import { sqliteStorage } from 'lazy-storage/server/sqlite-node';
 
 const sqlite = sqliteStorage('data/state.sqlite');
-const stores = createStores(id => createStore({ initial, registers, storage: sqlite.store(id) }));
+const stores = createStores(id => createStore({ initial, storage: sqlite.store(id) }));
 const server = serve({ stores, port: 3200, authenticate, authorize });
 await once(server, 'listening');
 ```
@@ -448,8 +464,9 @@ Each client has a lazy-watch undo manager attached with a `record` filter
 that declines remote batches, so undo and redo only ever touch this
 replica's own edits, and they sync like any other edit. Because records
 are keyed, a teammate's insert does not invalidate your history; only a
-change of shape under a path you edited (a register's length, a record
-replaced by a leaf) drops the affected steps.
+change of shape under a path you edited (an array replaced whole, a record
+replaced by a leaf) drops the affected steps. With lists declared, undo
+runs on the synced state and shows in the array view like any other change.
 
 ## API
 
@@ -525,7 +542,8 @@ An **op** is one client batch:
 `seq` counts the replica's ops from 1, and the server ignores one it has
 already merged, so a resend is safe. `ts` is a hybrid-logical-clock
 timestamp `[ms, count, replicaId]`. `diff` is a plain lazy-watch diff:
-nested objects, `null` for a deletion, arrays only at register paths.
+nested objects, `null` for a deletion, and arrays as whole values (of
+primitives anywhere, of anything at a register path).
 
 ### A session, in order
 
@@ -577,7 +595,7 @@ without help from the app, which only hears an `error` event:
 
 | Code | Why | What the client does |
 |---|---|---|
-| `invalid` | The op breaks the model: an array outside a register, a malformed op | Drops the op and resyncs from a snapshot |
+| `invalid` | The op breaks the model: an array of objects outside a register, an array fragment, a malformed op | Drops the op and resyncs from a snapshot |
 | `forbidden` | A leaf under a read-only path, or `validate` refused | Same |
 | `expired` | Stamped before the retention window | Same |
 | `too-large` | More leaves than `maxLeaves` | Same |

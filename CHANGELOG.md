@@ -2,6 +2,14 @@
 
 All notable changes to lazy-storage are documented here. The format follows Keep a Changelog; versions follow Semantic Versioning.
 
+## [Unreleased]
+
+### Changed
+
+- The README's opening example, the conflict and undo notes, and the
+  examples use lists as arrays instead of an order register; a short
+  section covers the two ways to pair the array view with a UI framework
+
 ## [0.6.0] - 2026-09-04
 
 Lists stop being two things. A list of records is a keyed map with a

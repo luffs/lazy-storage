@@ -15,8 +15,7 @@ const page = join(here, '..', 'basic', 'index.html');
 const sqlite = sqliteStorage(join(here, 'state.sqlite'));
 
 const stores = createStores(id => createStore({
-  initial: { tasks: {}, order: [] },
-  registers: ['order'],
+  initial: { tasks: {} },
   storage: sqlite.store(id)
 }), { idle: 30 * 60_000 });
 

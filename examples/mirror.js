@@ -12,8 +12,9 @@ if (typeof Bun !== 'undefined') {
 }
 
 const connection = createConnection({ transport: webSocketTransport(url) });
-const db = createClient({ connection, store: 'shared', initial: { tasks: {}, order: [] }, registers: ['order'], storage });
-if (db.restored) console.log(`starting from the copy on disk (version ${db.version}, ${db.collection('tasks').ids().length} tasks)`);
+// The wire model as it is: a keyed map with positions, ordered through db.list
+const db = createClient({ connection, store: 'shared', initial: { tasks: {} }, storage });
+if (db.restored) console.log(`starting from the copy on disk (version ${db.version}, ${db.list('tasks').ids().length} tasks)`);
 
 db.on('status', status => console.log(`[${status}]`));
 db.on('presence', users => console.log(`here now: ${users.join(', ') || 'nobody'}`));
@@ -24,7 +25,7 @@ db.watch((changes, inverse, meta) => {
     else if (task.title !== undefined) console.log(`+ ${id}: ${task.title}`);
     else console.log(`~ ${id}: ${JSON.stringify(task)}`);
   }
-  if (changes.order) console.log(`order: ${changes.order.length} tasks`);
+  console.log(`order: ${db.list('tasks').all().map(t => t.title).join(' < ')}`);
 });
 db.connect();
 
