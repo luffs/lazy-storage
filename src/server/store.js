@@ -89,19 +89,10 @@ export class RefusedError extends Error {
   }
 }
 
-/**
- * Replica progress from a saved document: `{ replicas: { id: { seq, seen } } }`,
- * or the older `{ seqs: { id: seq } }` shape. A replica with no `seen` is
- * treated as seen now, so it gets a full retention window before pruning.
- */
-function loadReplicas(saved, now) {
+/** Replica progress from a saved document: `{ replicas: { id: { seq, seen } } }` */
+function loadReplicas(saved) {
   const replicas = new Map();
-  if (!saved) return replicas;
-  if (saved.replicas) {
-    for (const [id, r] of Object.entries(saved.replicas)) replicas.set(id, { seq: r.seq, seen: r.seen ?? now });
-  } else {
-    for (const [id, seq] of Object.entries(saved.seqs ?? {})) replicas.set(id, { seq, seen: now });
-  }
+  for (const [id, r] of Object.entries(saved?.replicas ?? {})) replicas.set(id, { seq: r.seq, seen: r.seen });
   return replicas;
 }
 
@@ -191,13 +182,13 @@ export function createStore({
   const saved = storage.load();
   const state = new LazyWatch(rebuild(initial, saved ? saved.rows.map(([key, row]) => [key, row.deleted ? null : row.value]) : []));
   const clocks = new ClockMap(saved ? saved.rows.map(([key, row]) => [key, row.deleted ? { ts: row.ts, deleted: true } : { ts: row.ts }]) : []);
-  const replicas = loadReplicas(saved, time());
+  const replicas = loadReplicas(saved);
   let version = saved ? saved.version : 0;
-  // Versions count from 0 for the life of a store's storage. The epoch
-  // tells one life from the next, so a client whose cache remembers a
-  // version of storage that has since been wiped gets a snapshot, not a
-  // delta computed against a different history
-  const epoch = typeof saved?.epoch === 'string' && saved.epoch ? saved.epoch : randomId();
+  // Versions count from 0 for the life of a store's storage. The epoch,
+  // minted with the storage, tells one life from the next, so a client
+  // whose cache remembers a version of storage that has since been wiped
+  // gets a snapshot, not a delta computed against a different history
+  const epoch = saved ? saved.epoch : randomId();
   const clock = createClock('server', now);
   const sessions = new Set();
   let serverSeq = replicas.get('server')?.seq ?? 0;
@@ -627,12 +618,6 @@ export function createStore({
     },
     /** Forget what the retention window no longer needs; returns { tombstones, replicas } removed */
     compact,
-    /** Forget tombstones older than a timestamp; returns how many */
-    compactTombstones(olderThan) {
-      const removed = compactTombstones(clocks, olderThan);
-      if (removed.length) commit({ upserts: [], deletes: removed });
-      return removed.length;
-    },
     flush: () => storage.flush(),
     dispose() {
       storage.flush();

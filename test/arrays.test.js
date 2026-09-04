@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { LazyWatch } from 'lazy-watch';
-import { createStore, memoryStorage, orderToPositions } from '../src/server/index.js';
+import { createStore, memoryStorage } from '../src/server/index.js';
 import { createClient } from '../src/client/index.js';
 import { leaves, expandRegisters } from '../src/core/model.js';
 import { registerSet } from '../src/core/paths.js';
@@ -72,33 +72,3 @@ test('rows and the state cache hold undeclared arrays as leaves', async () => {
   assert.deepEqual(rebuild({}, [['["x"]', [1, 2]]]), { x: [1, 2] });
 });
 
-test('orderToPositions gives every record a position in the register\'s order and deletes the register, wildcards included', () => {
-  const store = createStore({ initial: { tasks: {}, order: [] }, registers: ['order', 'tasks/*/subOrder'] });
-  store.patch({
-    tasks: {
-      a: { id: 'a', subs: { s1: { id: 's1' }, s2: { id: 's2' } }, subOrder: ['s2', 's1'] },
-      b: { id: 'b', subs: { s3: { id: 's3' } } },
-      c: { id: 'c' }
-    },
-    order: ['c', 'a', 'ghost', 'a']
-  });
-  assert.deepEqual(orderToPositions(store, { list: 'tasks', order: 'order' }), { lists: 1, records: 3 });
-  const tasks = store.snapshot().tasks;
-  assert.deepEqual(Object.entries(tasks).sort(([, p], [, q]) => (p.pos < q.pos ? -1 : 1)).map(([id]) => id), ['c', 'a', 'b'], 'listed first, in order; the rest by id');
-  assert.equal(store.snapshot().order, undefined, 'the register is gone');
-
-  assert.deepEqual(orderToPositions(store, { list: 'tasks/*/subs', order: 'tasks/*/subOrder', position: 'rank' }), { lists: 2, records: 3 });
-  const after = store.snapshot().tasks;
-  assert.deepEqual(Object.entries(after.a.subs).sort(([, p], [, q]) => (p.rank < q.rank ? -1 : 1)).map(([id]) => id), ['s2', 's1']);
-  assert.equal(after.a.subOrder, undefined);
-  assert.equal(typeof after.b.subs.s3.rank, 'string', 'a list without a register still gets positions');
-  assert.equal(after.c.subs, undefined, 'a task without the list is left alone');
-
-  const net = createNetwork(store);
-  const client = createClient({ transport: net.link().factory, reconnect: false, store: 'main', initial: { tasks: {} }, replicaId: 'r' });
-  client.connect();
-  return net.settle().then(() => {
-    assert.deepEqual(client.list('tasks').ids(), ['c', 'a', 'b'], 'a client without any register declaration reads the migrated order');
-    assert.deepEqual(client.list('tasks/a/subs', { position: 'rank' }).ids(), ['s2', 's1']);
-  });
-});

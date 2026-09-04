@@ -14,8 +14,8 @@ export type StoredRow =
 
 export interface ReplicaProgress {
   seq: number;
-  /** The store's clock when the replica's last op arrived; null when unknown */
-  seen: number | null;
+  /** The store's clock when the replica's last op arrived */
+  seen: number;
 }
 
 export interface LogEntry {
@@ -25,12 +25,10 @@ export interface LogEntry {
 
 export interface StorageDocument {
   rows: Array<[key: string, row: StoredRow]>;
-  replicas?: Record<string, ReplicaProgress>;
-  /** The shape from before `seen` was recorded; still accepted */
-  seqs?: Record<string, number>;
+  replicas: Record<string, ReplicaProgress>;
   version: number;
-  /** Null until the store mints one */
-  epoch?: string | null;
+  /** Minted by the store with its first commit */
+  epoch: string;
   /** The persisted delta log, ascending by version, when the adapter keeps it */
   log?: LogEntry[];
 }
@@ -198,8 +196,6 @@ export interface Store<S extends object = any> {
   stats(): StoreStats;
   /** Forget what the retention window no longer needs */
   compact(): { tombstones: number; replicas: number };
-  /** Forget tombstones older than a timestamp; returns how many */
-  compactTombstones(olderThan: Timestamp): number;
   flush(): void;
   dispose(): void;
 }
@@ -254,18 +250,6 @@ export interface Hub {
 }
 
 export function createHub(resolveStore: StoreResolver, options: HubOptions): Hub;
-
-export interface OrderMigration {
-  /** The keyed map's path pattern (register syntax, `*` allowed) */
-  list: RegisterSpec;
-  /** The order register's path pattern; its `*`s match the list's in turn */
-  order: RegisterSpec;
-  /** The field to write (default 'pos') */
-  position?: string;
-}
-
-/** Give every record of a list a position in its order register's order, and delete the register, in one patch */
-export function orderToPositions(store: Store, mapping: OrderMigration): { lists: number; records: number };
 
 /** A message's JSON, encoded once and remembered on the object, however many sockets it goes to */
 export function toJSON(message: object): string;

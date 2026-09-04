@@ -10,13 +10,13 @@ const INITIAL = { tasks: {} };
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 /** An adapter that records every call */
-function recording({ split = true } = {}) {
+function recording() {
   const calls = [];
   const adapter = {
     load: () => null,
-    save: doc => calls.push(['save', structuredClone(doc)])
+    save: doc => calls.push(['save', structuredClone(doc)]),
+    saveState: cache => calls.push(['saveState', structuredClone(cache)])
   };
-  if (split) adapter.saveState = cache => calls.push(['saveState', structuredClone(cache)]);
   return { adapter, calls };
 }
 
@@ -47,22 +47,6 @@ test('a local op writes the outbox at once and the state a moment later, once, w
   a.dispose();
 });
 
-test('an adapter without saveState gets the state inside the outbox document, as before', async () => {
-  const { adapter, calls } = recording({ split: false });
-  const store = createStore({ initial: INITIAL });
-  const net = createNetwork(store);
-  const a = createClient({ transport: net.link().factory, reconnect: false, store: 'main', initial: INITIAL, storage: adapter, replicaId: 'a' });
-  a.connect();
-  await net.settle();
-  a.collection('tasks').add({ id: 't1' });
-  await net.settle();
-  await sleep(80);
-  const last = calls.at(-1)[1];
-  assert.deepEqual(Object.keys(last).sort(), ['epoch', 'ops', 'replicaId', 'seq', 'state', 'version']);
-  assert.equal(last.state.tasks.t1.id, 't1');
-  a.dispose();
-});
-
 test('a restore replays the outbox over the cached state, so a state written before the last ops still comes up current', () => {
   const op = (seq, diff) => ({ replicaId: 'a', seq, ts: [1000 + seq, 0, 'a'], diff });
   const storage = {
@@ -87,7 +71,7 @@ test('a restore replays the outbox over the cached state, so a state written bef
   client.dispose();
 });
 
-test('the localStorage adapter keeps the outbox and the state under separate keys and still reads the old single document', () => {
+test('the localStorage adapter keeps the outbox and the state under separate keys', () => {
   const backing = new Map();
   const previous = globalThis.localStorage;
   globalThis.localStorage = {
@@ -104,10 +88,6 @@ test('the localStorage adapter keeps the outbox and the state under separate key
     assert.deepEqual([...backing.keys()].sort(), ['app:outbox', 'app:outbox:state']);
     assert.deepEqual(adapter.load(), { replicaId: 'a', seq: 1, ops: [], state: { tasks: {} }, version: 3, epoch: 'e' });
     assert.equal(JSON.parse(backing.get('app:outbox')).state, undefined, 'the outbox document does not carry the state');
-
-    backing.clear();
-    backing.set('old:outbox', JSON.stringify({ replicaId: 'b', seq: 2, ops: [], state: { tasks: { x: { id: 'x' } } } }));
-    assert.deepEqual(localStorageOutbox('old:outbox').load(), { replicaId: 'b', seq: 2, ops: [], state: { tasks: { x: { id: 'x' } } } });
   } finally {
     if (previous === undefined) delete globalThis.localStorage;
     else globalThis.localStorage = previous;

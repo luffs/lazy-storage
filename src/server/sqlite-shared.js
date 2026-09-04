@@ -61,10 +61,6 @@ export function sqliteStorageOn({ exec, prepare, transaction, close, db }, { fil
   if (wal && file !== ':memory:') exec('PRAGMA journal_mode = WAL;');
   exec('PRAGMA synchronous = NORMAL;');
   exec(SCHEMA);
-  // Databases from before 0.3.0 lack `replicas.seen` (NULL: unknown) and `stores.epoch` (NULL: the store mints one)
-  const columns = table => prepare(`PRAGMA table_info(${table})`).all().map(c => c.name);
-  if (!columns('replicas').includes('seen')) exec('ALTER TABLE replicas ADD COLUMN seen INTEGER');
-  if (!columns('stores').includes('epoch')) exec('ALTER TABLE stores ADD COLUMN epoch TEXT');
 
   const q = {
     upsert: prepare(`
@@ -78,7 +74,7 @@ export function sqliteStorageOn({ exec, prepare, transaction, close, db }, { fil
     version: prepare('SELECT version, epoch FROM stores WHERE store = ?'),
     setVersion: prepare(`
       INSERT INTO stores (store, version, epoch) VALUES (?, ?, ?)
-      ON CONFLICT (store) DO UPDATE SET version = excluded.version, epoch = COALESCE(excluded.epoch, stores.epoch)`),
+      ON CONFLICT (store) DO UPDATE SET version = excluded.version, epoch = excluded.epoch`),
     replicas: prepare('SELECT replica, seq, seen FROM replicas WHERE store = ?'),
     setReplica: prepare(`
       INSERT INTO replicas (store, replica, seq, seen) VALUES (?, ?, ?, ?)
@@ -99,11 +95,11 @@ export function sqliteStorageOn({ exec, prepare, transaction, close, db }, { fil
     for (const [key, row] of change.upserts) {
       q.upsert.run(id, key, row.deleted ? null : JSON.stringify(row.value), row.ts[0], row.ts[1], row.ts[2], row.deleted ? 1 : 0);
     }
-    if (change.replica) q.setReplica.run(id, change.replica.id, change.replica.seq, change.replica.seen ?? null);
+    if (change.replica) q.setReplica.run(id, change.replica.id, change.replica.seq, change.replica.seen);
     for (const replica of change.forgetReplicas ?? []) q.forgetReplica.run(id, replica);
     if (change.log) q.putLog.run(id, change.log.v, JSON.stringify(change.log.diff));
     if (Number.isInteger(change.logFloor)) q.pruneLog.run(id, change.logFloor);
-    q.setVersion.run(id, change.version, change.epoch ?? null);
+    q.setVersion.run(id, change.version, change.epoch);
   });
 
   const remove = transaction(id => {
@@ -131,9 +127,9 @@ export function sqliteStorageOn({ exec, prepare, transaction, close, db }, { fil
               ? { ts: [r.ts_ms, r.ts_count, r.ts_replica], deleted: true }
               : { value: JSON.parse(r.value), ts: [r.ts_ms, r.ts_count, r.ts_replica] }
           ]);
-          const replicas = Object.fromEntries(q.replicas.all(id).map(r => [r.replica, { seq: r.seq, seen: r.seen ?? null }]));
+          const replicas = Object.fromEntries(q.replicas.all(id).map(r => [r.replica, { seq: r.seq, seen: r.seen }]));
           const log = q.log.all(id).map(r => ({ v: r.v, diff: JSON.parse(r.diff) }));
-          return { rows, replicas, version: meta.version, epoch: meta.epoch ?? null, log };
+          return { rows, replicas, version: meta.version, epoch: meta.epoch, log };
         },
         commit(change) {
           commit(id, change);

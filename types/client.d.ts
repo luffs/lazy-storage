@@ -81,13 +81,12 @@ export interface StateCache {
 
 /**
  * A document adapter keeps the outbox as one document, written with every
- * op, and the state as another, written debounced. Without `saveState`
- * the state rides inside `save`.
+ * op, and the state as another, written debounced.
  */
 export interface DocumentStorage {
   load(): (OutboxDocument & Partial<StateCache>) | null;
-  save(document: OutboxDocument & Partial<StateCache>): void;
-  saveState?(cache: StateCache): void;
+  save(outbox: OutboxDocument): void;
+  saveState(cache: StateCache): void;
 }
 
 export interface RowDocument extends OutboxDocument {

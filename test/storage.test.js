@@ -67,16 +67,6 @@ test('a store mints an epoch once and keeps it across reopens; a wiped storage g
   assert.notEqual(fresh.epoch, one.epoch);
 });
 
-test('a store reads a document from before replica progress carried `seen`', () => {
-  const storage = memoryStorage();
-  storage.load = () => ({ rows: [['["tasks","a","id"]', { value: 'a', ts: T(10, 'old') }]], seqs: { old: 4 }, version: 1 });
-  const store = createStore({ initial: INITIAL, storage, now: () => 5_000_000 });
-  assert.deepEqual(store.snapshot().tasks, { a: { id: 'a' } });
-  assert.deepEqual(store.replicas, ['old']);
-  const dup = store.apply({ replicaId: 'old', seq: 4, ts: T(10, 'old'), diff: { tasks: { a: { id: 'z' } } } });
-  assert.equal(dup.duplicate, true, 'the old sequence numbers still count');
-});
-
 test('the store persists every accepted op as rows and rebuilds state as initial plus rows', () => {
   const storage = memoryStorage();
   const one = createStore({ initial: INITIAL, registers: ['order'], storage });
@@ -131,15 +121,6 @@ test('a container written empty keeps its row beside its children, so a rebuild 
 
   const reopened = createStore({ initial: { tasks: {} }, storage });
   assert.deepEqual(reopened.snapshot(), live, 'the rebuilt state equals what the server held before the restart');
-});
-
-test('compacting tombstones commits the removed rows', () => {
-  const storage = memoryStorage();
-  const store = createStore({ initial: INITIAL, storage, now: () => 1000 });
-  store.patch({ tasks: { a: { id: 'a' } } });
-  store.patch({ tasks: { a: null } });
-  assert.equal(store.compactTombstones([2000, 0, 'z']), 1);
-  assert.deepEqual(storage.load().rows, []);
 });
 
 test('the JSON file adapter round-trips through disk, atomically and debounced', async () => {

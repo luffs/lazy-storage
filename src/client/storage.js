@@ -8,10 +8,9 @@
 // since it costs a serialization of everything. An adapter keeps the two
 // apart so an op never pays for the state.
 //
-//   load()             -> null | { replicaId, seq, ops, state?, version? }
+//   load()             -> null | { replicaId, seq, ops, state?, version?, epoch? }
 //   save(outbox)       -> void   outbox = { replicaId, seq, ops }
-//   saveState(cache)   -> void   cache = { state, version } (optional; without
-//                                it the client puts the state in `save`)
+//   saveState(cache)   -> void   cache = { state, version, epoch }
 
 export function memoryOutbox() {
   let outbox = null;
@@ -50,7 +49,6 @@ export function localStorageOutbox(key = 'lazy-storage') {
       const outbox = read(key);
       if (!outbox) return null;
       const cache = read(stateKey);
-      // A document from before the split carried the state itself
       return cache && typeof cache === 'object' ? { ...outbox, ...cache } : outbox;
     },
     save: outbox => write(key, outbox),

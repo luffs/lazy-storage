@@ -31,7 +31,6 @@
 // as `log: [{ v, diff }]` on load, so a restarted server still answers
 // reconnects with deltas. The memory and SQLite adapters do; the JSON
 // file adapter does not, to keep its document small.
-// The store also accepts the older `seqs: { replicaId: seq }` from load.
 // `null` from load means "never seen": the store starts from `initial`.
 // Document-oriented adapters (memory, JSON file) apply commits to an
 // in-memory copy and write the whole document.
@@ -42,12 +41,7 @@ import { dirname, resolve } from 'node:path';
 function document(initial = null, { keepLog = false } = {}) {
   const rows = new Map(initial ? initial.rows : []);
   let log = keepLog && Array.isArray(initial?.log) ? initial.log.map(e => structuredClone(e)) : [];
-  // A document written before `seen` existed holds `seqs`
-  const replicas = initial
-    ? Object.fromEntries(initial.replicas
-      ? Object.entries(initial.replicas).map(([id, r]) => [id, { ...r }])
-      : Object.entries(initial.seqs ?? {}).map(([id, seq]) => [id, { seq, seen: null }]))
-    : {};
+  const replicas = initial ? structuredClone(initial.replicas ?? {}) : {};
   let version = initial ? initial.version : 0;
   let epoch = initial?.epoch ?? null;
   let seen = initial !== null;
@@ -59,7 +53,7 @@ function document(initial = null, { keepLog = false } = {}) {
       seen = true;
       for (const key of change.deletes) rows.delete(key);
       for (const [key, row] of change.upserts) rows.set(key, structuredClone(row));
-      if (change.replica) replicas[change.replica.id] = { seq: change.replica.seq, seen: change.replica.seen ?? null };
+      if (change.replica) replicas[change.replica.id] = { seq: change.replica.seq, seen: change.replica.seen };
       for (const id of change.forgetReplicas ?? []) delete replicas[id];
       version = change.version;
       if (change.epoch !== undefined) epoch = change.epoch;

@@ -2,7 +2,7 @@
 
 All notable changes to lazy-storage are documented here. The format follows Keep a Changelog; versions follow Semantic Versioning.
 
-## [Unreleased]
+## [0.7.0] - 2026-09-04
 
 ### Added
 
@@ -22,6 +22,20 @@ All notable changes to lazy-storage are documented here. The format follows Keep
 - The README's opening example, the conflict and undo notes, and the
   examples use lists as arrays instead of an order register; a short
   section covers the two ways to pair the array view with a UI framework
+
+### Removed
+
+- **Compatibility with what versions before 0.3.0 wrote.** The store and
+  the memory adapter no longer read the old `seqs` shape, the SQLite
+  adapters no longer add the `seen` and `epoch` columns on open, and
+  `localStorageOutbox` no longer reads the single document that carried
+  the state inside the outbox. A document adapter must implement
+  `saveState`; the fallback that put the state inside `save` is gone.
+  Storage written by 0.3.0 or later opens as before
+- `store.compactTombstones(olderThan)`: `compact()` and the retention
+  window replaced it; the core `compactTombstones` stays
+- `orderToPositions`: the order-register migration. Lists have carried
+  positions since 0.6.0 and every known store has been migrated
 
 ## [0.6.0] - 2026-09-04
 

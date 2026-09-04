@@ -55,36 +55,3 @@ test('a store round-trips through node:sqlite: rows, replicas, epoch, and the de
   }
 });
 
-test('a database from before 0.3.0 gains the new columns and tables on open', { skip: !sqliteStorage }, async () => {
-  const { DatabaseSync } = await import('node:sqlite');
-  const dir = mkdtempSync(join(tmpdir(), 'lazy-storage-node-sqlite-old-'));
-  const old = join(dir, 'old.sqlite');
-  try {
-    const legacy = new DatabaseSync(old);
-    legacy.exec(`
-      CREATE TABLE leaves (store TEXT NOT NULL, path TEXT NOT NULL, value TEXT, ts_ms INTEGER NOT NULL, ts_count INTEGER NOT NULL,
-        ts_replica TEXT NOT NULL, deleted INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (store, path)) WITHOUT ROWID;
-      CREATE TABLE stores (store TEXT PRIMARY KEY, version INTEGER NOT NULL DEFAULT 0) WITHOUT ROWID;
-      CREATE TABLE replicas (store TEXT NOT NULL, replica TEXT NOT NULL, seq INTEGER NOT NULL, PRIMARY KEY (store, replica)) WITHOUT ROWID;
-      INSERT INTO leaves VALUES ('t', '["tasks","a","id"]', '"a"', 10, 0, 'r1', 0);
-      INSERT INTO stores VALUES ('t', 1);
-      INSERT INTO replicas VALUES ('t', 'r1', 7);
-    `);
-    legacy.close();
-    const sqlite = sqliteStorage(old);
-    const loaded = sqlite.store('t').load();
-    assert.deepEqual(loaded.replicas, { r1: { seq: 7, seen: null } });
-    assert.equal(loaded.epoch, null);
-    assert.deepEqual(loaded.log, []);
-    const store = createStore({ initial: INITIAL, storage: sqlite.store('t'), now: () => 5_000_000 });
-    assert.deepEqual(store.snapshot().tasks, { a: { id: 'a' } });
-    store.patch({ marker: 1 });
-    assert.equal(sqlite.store('t').load().epoch, store.epoch);
-    store.dispose();
-    sqlite.close();
-  } finally {
-    for (let attempt = 0; attempt < 5; attempt++) {
-      try { rmSync(dir, { recursive: true, force: true }); break; } catch { /* retry */ }
-    }
-  }
-});

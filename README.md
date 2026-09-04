@@ -104,12 +104,6 @@ the order back with `tasks.reconcile(ids)`, which writes the fewest
 positions that make the sort agree: the longest run of records already in
 order keeps its keys. Records without a position sort last until placed.
 
-Moving from an order register: `orderToPositions(store, { list: 'tasks',
-order: 'taskOrder' })` on the server gives every record a position in the
-register's order and deletes the register in one patch, wildcards
-included (`{ list: 'tasks/*/subtasks', order: 'tasks/*/subtaskOrder' }`).
-Then drop the register from both sides' declarations.
-
 ### Plain arrays
 
 Declare the list paths and the client presents them as arrays:
@@ -276,10 +270,7 @@ everything and accepts ops of any age.
 An adapter records a replica's progress as `{ seq, seen }`, where `seen`
 is the store's clock when its last op arrived, and the store's `epoch`, a
 random id minted once per life of the storage (it is how a client's cached
-version is told apart from one that belongs to storage since wiped). A
-database from before 0.3.0 opens as is (SQLite gains the columns on open),
-its replicas get a full window before they are pruned, and the store
-mints its epoch on the first commit.
+version is told apart from one that belongs to storage since wiped).
 
 ## Multiple stores
 
@@ -484,7 +475,7 @@ runs on the synced state and shows in the array view like any other change.
 - `db.watch(listener)` — state changes; `meta?.origin === 'remote'` marks the server's
 - `db.on('status' | 'error' | 'sync' | 'presence' | 'closed', fn)` — lifecycle events; a refused op is an error with a `code` (`forbidden`, `expired`, `invalid`, `too-large` drop the op; `rate-limited` keeps it and retries; `clock-skew` is handled without one)
 - `db.undo()`, `db.redo()`, `db.canUndo`, `db.canRedo`, `db.checkpoint()`, `db.group(fn)`, `db.clearHistory()`
-- `webSocketTransport(url)`, `memoryOutbox()`, `localStorageOutbox(key)` — document adapters: `{ load(), save(outbox), saveState(cache) }`; without `saveState` the state rides inside `save`
+- `webSocketTransport(url)`, `memoryOutbox()`, `localStorageOutbox(key)` — document adapters: `{ load(), save(outbox), saveState(cache) }`
 - `indexedDBStorage(name, { onError })` → also `settled()`, `close()`, `destroy()` — a row adapter: `{ load(), commit({ puts, deletes, meta }), replace({ rows, meta }), saveOp(op, meta), dropOps(seq, meta) }`, where a delete removes the path and everything under it and `meta` is `{ replicaId, seq, version, epoch }`
 
 **Bun client** (`lazy-storage/client/sqlite`): `sqliteClientStorage(file, { wal })` → a row adapter on bun:sqlite, plus `db` and `close()`.
@@ -497,10 +488,9 @@ runs on the synced state and shows in the array view like any other change.
 - `store.closeSessions(predicate, message)` — evict sessions; `store.presence()` — distinct users with a live session
 - `store.patch(diff)` — a server-side change, timestamped and broadcast; `store.apply(op)` — a trusted op, gates skipped
 - `store.on(listener)`, `store.snapshot()`, `store.state`, `store.version`, `store.replicas`
-- `store.compact()` → `{ tombstones, replicas }` removed; `store.compactTombstones(olderThan)`, `store.flush()`, `store.dispose()`
+- `store.compact()` → `{ tombstones, replicas }` removed; `store.flush()`, `store.dispose()`
 - `memoryStorage()`, `jsonFileStorage(path, { debounce })`
 - `createStores(factory, { idle, sweepEvery, now })` → `get(id)`, `has(id)`, `ids()`, `release(id)`, `sweep()`, `dispose()`; `isStoreId(id)`
-- `orderToPositions(store, { list, order, position })` → `{ lists, records }` — migrate an order register to positions
 - `createHub(resolveStore, { send, user, authorize, onError })` → `{ receive(message), close(), stores, user }` — the server side of a multiplexed connection, session-shaped
 - `toJSON(message)` — a message's JSON, encoded once however many sockets it goes to; use it in a transport of your own so a broadcast is not re-encoded per socket (`tagStore(message, id)` is what a hub does)
 

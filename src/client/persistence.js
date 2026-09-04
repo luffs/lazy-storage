@@ -2,10 +2,10 @@
 //
 // Two kinds of adapter, told apart by whether `commit` exists:
 //
-// A DOCUMENT adapter ({ load, save, saveState? }) keeps the outbox as one
+// A DOCUMENT adapter ({ load, save, saveState }) keeps the outbox as one
 // document, written whenever it changes (it is small), and the state as
 // another, written debounced because it costs a serialization of
-// everything. Without `saveState` the state rides inside `save`.
+// everything.
 //
 // A ROW adapter ({ load, commit, replace, saveOp, dropOps }) keeps one row
 // per leaf and one per pending op, so a batch costs the leaves it
@@ -76,24 +76,17 @@ export function createPersistence({ storage, cache, regs, state, meta, ops, onEr
     };
   }
 
-  const split = cache && typeof storage.saveState === 'function';
   let timer = null;
-  const outbox = () => {
+  function writeOutbox() {
     const { replicaId, seq } = meta();
-    return { replicaId, seq, ops: ops() };
-  };
+    storage.save({ replicaId, seq, ops: ops() });
+  }
   function writeState() {
     clearTimeout(timer);
     timer = null;
     if (!cache) return;
     const { version, epoch } = meta();
-    const snapshot = LazyWatch.snapshot(state());
-    if (split) storage.saveState({ state: snapshot, version, epoch });
-    else storage.save({ ...outbox(), state: snapshot, version, epoch });
-  }
-  function writeOutbox() {
-    if (cache && !split) return writeState();
-    storage.save(outbox());
+    storage.saveState({ state: LazyWatch.snapshot(state()), version, epoch });
   }
   function stateSoon() {
     if (!cache || timer) return;
