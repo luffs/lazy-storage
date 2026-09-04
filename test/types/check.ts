@@ -203,3 +203,21 @@ viewDb.state.tasks[0].subtasks = [{ id: 's', title: 'nested' }];
 const wireSide: object = viewDb.wire;
 const positioned = viewDb.list('tasks').all();
 void [wireSide, positioned];
+
+// --- Presence options -----------------------------------------------------------
+
+createStore<State>({
+  initial: { tasks: {}, order: [] },
+  presence: {
+    key: user => String((user as { id: string }).id),
+    user: user => ({ id: (user as { id: string }).id }),
+    validate: (data, { user, replicaId, store: self }) => { void user; void replicaId; void self; return data; },
+    every: 50,
+    maxShare: 1024
+  }
+});
+createStore<State>({ initial: { tasks: {}, order: [] }, presence: true });
+const quiet = createClient<State>({ store: 'mirror', connection, presence: false });
+quiet.dispose();
+// @ts-expect-error presence is a boolean or options
+createStore<State>({ initial: { tasks: {}, order: [] }, presence: 'yes' });

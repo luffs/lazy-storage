@@ -2,7 +2,7 @@
 
 All notable changes to lazy-storage are documented here. The format follows Keep a Changelog; versions follow Semantic Versioning.
 
-## [Unreleased]
+## [0.8.0] - 2026-09-04
 
 ### Added
 
@@ -36,21 +36,19 @@ All notable changes to lazy-storage are documented here. The format follows Keep
   a local batch, an undo, a redo, or `clearHistory()`. The undo manager
   moves its stacks after the batch it emits, so a listener on that batch
   reads them stale; this is the moment to read them
-- **Peers: what a client shares rides on presence.** `db.share(data)`
-  sets a small JSON value (`null` clears it) that is never written to
-  the store and lives as long as the session; the hello carries it, so a
-  reconnect restores it. The presence broadcast now lists every live
-  session as a peer, `{ replicaId, user, data }`, in `db.peers` (this
-  client's own entry included), the `peers` event, and `store.peers()`;
-  the Vue and React entries expose `peers` too. A share over `maxShare`
-  bytes of JSON (a new store option, default 4096), or not JSON, is
-  refused with an `error` and changes nothing. Presence travels as
-  deltas: the whole list goes only to a session that has just said
-  hello, then `left`, `joined`, and `shared` for what changed, one small
-  message to every session per flush; `presenceEvery` (a new store
-  option, milliseconds, default 0) caps that at one message per window,
-  changes within it going out together, so a busy room or a reconnect
-  storm costs each socket a message per window rather than one per change
+- **Peers: what a client shares rides on presence.** With presence on,
+  `db.share(data)` sets a small JSON value (`null` clears it) that is
+  never written to the store and lives as long as the session; the hello
+  carries it, so a reconnect restores it. Every live session is a peer,
+  `{ replicaId, user, key, data }`, in `db.peers` (this client's own
+  entry included), the `peers` event, and `store.peers()`; the Vue and
+  React entries expose `peers` too. Presence travels as deltas: the
+  whole list goes only to a session that has just said hello, then
+  `left`, `joined`, and `shared` for what changed, one small message to
+  every session per flush, batched per turn of the event loop or per
+  `presence.every`. A share over `presence.maxShare` bytes of JSON
+  (default 4096), not JSON, or turned away by `presence.validate` is
+  answered with an `error` and changes nothing
 
 ### Changed
 
@@ -61,12 +59,23 @@ All notable changes to lazy-storage are documented here. The format follows Keep
 - A transport's `onclose` receives `{ code, reason }` where the socket
   knows them; the connection reads code 4401 in case the `closed`
   message did not make it
-- Presence is broadcast when a session says hello, ends, or shares
-  something new, rather than when it opens: a peer needs its replica id,
-  which the hello brings. `store.presence()` counts a session from its
-  hello as well, and a session that never says hello is not announced. The presence message no
-  longer carries `users`: peers carry `key`, what `presenceKey` groups
-  users by, and the client derives its presence list from them
+- **Presence is off by default and set up as one option.**
+  `createStore({ presence })` takes `false` (the default: nothing is
+  broadcast, `store.presence()` and `store.peers()` are empty, a share is
+  refused with `forbidden`), `true`, or `{ key, user, validate, every,
+  maxShare }`. `key` replaces `presenceKey`; `user` chooses what of a
+  user its peers see (default: all of it), which a server whose
+  `authenticate` returns roles or tokens should narrow;
+  `validate(data, { user, replicaId, store })` judges a share the way
+  `validate` judges an op; `every` caps presence at one message per that
+  many milliseconds. A client that never reads presence passes
+  `presence: false` to `createClient`: its hello says so, the server
+  sends it none, and it may still share. Presence goes out when a
+  session says hello, ends, or shares anew, rather than when it opens,
+  since a peer needs the replica id the hello brings; a session that
+  never says hello is not announced. The presence message no longer
+  carries `users`: peers carry `key`, and the client derives its
+  presence list from them
 
 ## [0.7.0] - 2026-09-04
 

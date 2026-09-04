@@ -13,7 +13,7 @@ const tick = () => new Promise(resolve => setImmediate(resolve));
 const plain = value => JSON.parse(JSON.stringify(value));
 
 test('useClient: a reactive mirror of the state and refs for the rest, remote batches included; the effect scope stops it', async () => {
-  const store = createStore({ initial: INITIAL });
+  const store = createStore({ initial: INITIAL, presence: true });
   const net = createNetwork(store);
   const a = net.client({ replicaId: 'a', initial: INITIAL }, { user: { id: 'u1', name: 'Ann' } });
   const b = net.client({ replicaId: 'b', initial: INITIAL }, { user: { id: 'u2', name: 'Bo' } });

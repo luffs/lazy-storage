@@ -13,7 +13,7 @@ const h = React.createElement;
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
 test('useClient re-renders for local and remote batches, undo, the outbox, status, and presence; one subscription per client, closed with the last component', async () => {
-  const store = createStore({ initial: { tasks: {} } });
+  const store = createStore({ initial: { tasks: {} }, presence: true });
   const net = createNetwork(store);
   const a = net.client({ replicaId: 'a', initial: { tasks: [] }, lists: ['tasks'] }, { user: { id: 'u1', name: 'Ann' } });
   const b = net.client({ replicaId: 'b', initial: { tasks: [] }, lists: ['tasks'] }, { user: { id: 'u2', name: 'Bo' } });

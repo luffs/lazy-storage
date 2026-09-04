@@ -94,6 +94,30 @@ export interface RateLimit {
   perSecond: number;
 }
 
+/** What `presence.validate` sees with a share */
+export interface ShareContext<S extends object = any> {
+  user: unknown;
+  replicaId: string;
+  store: Store<S>;
+}
+
+export interface PresenceOptions<S extends object = any> {
+  /** What presence groups users by; default `id`, else the user's JSON */
+  key?(user: unknown): string;
+  /** What of a user its peers see, and `presence()` shows; default all of it */
+  user?(user: unknown): unknown;
+  /**
+   * Judges what a session shares, as `validate` judges an op: false or a
+   * throw refuses it (code `forbidden`), a value is shared instead, true
+   * or nothing lets it through. Clearing a share is never judged
+   */
+  validate?(data: unknown, context: ShareContext<S>): boolean | unknown | void;
+  /** At most one presence message per this many milliseconds, changes within the window going out together; default 0 (one per turn of the event loop) */
+  every?: number;
+  /** The most a session may share, in bytes of JSON; default 4096 */
+  maxShare?: number;
+}
+
 export interface StoreOptions<S extends object = any> {
   /** The skeleton: state when nothing is persisted, and the base rows are applied onto */
   initial?: S;
@@ -117,15 +141,15 @@ export interface StoreOptions<S extends object = any> {
   deltaLog?: number;
   /** The most leaves one client op may touch; default 10 000 */
   maxLeaves?: number;
-  /** The most a session may share with its peers, in bytes of JSON; default 4096 */
-  maxShare?: number;
-  /** At most one presence message per this many milliseconds, changes within the window going out together; default 0 (one per turn of the event loop) */
-  presenceEvery?: number;
   /** Live ops a replica may send; default `{ burst: 500, perSecond: 100 }`, false disables */
   rateLimit?: RateLimit | false;
   storage?: ServerStorage;
-  /** How presence dedupes users (default: by `id`) */
-  presenceKey?(user: unknown): string;
+  /**
+   * Whether sessions learn of each other; default false (nothing broadcast,
+   * `presence()` and `peers()` empty, a share refused with `forbidden`).
+   * true turns it on with the defaults; an object sets any of its options
+   */
+  presence?: boolean | PresenceOptions<S>;
   /** Server faults that are nobody's request; default console */
   onError?(error: unknown): void;
   /** Wall clock (injectable for tests) */

@@ -156,7 +156,7 @@ export interface PeerShare {
 }
 
 export type ClientMessage =
-  | { t: 'hello'; replicaId: string; ops: Op[]; since?: number; epoch?: string | null; share?: unknown }
+  | { t: 'hello'; replicaId: string; ops: Op[]; since?: number; epoch?: string | null; share?: unknown; presence?: false }
   | { t: 'op'; op: Op }
   | { t: 'share'; data: unknown }
   | { t: 'ping' }

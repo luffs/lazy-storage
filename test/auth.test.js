@@ -10,7 +10,7 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 // A hub endpoint whose sessions carry the link's user, like an authenticated transport
 function hubSetup(authorize) {
-  const stores = createStores(() => createStore({ initial: INITIAL }));
+  const stores = createStores(() => createStore({ initial: INITIAL, presence: true }));
   const net = createNetwork({ session: ({ send, user }) => createHub(id => stores.get(id), { send, user, authorize }) });
   const connect = user => {
     const link = net.link({ user });
@@ -83,7 +83,7 @@ test('eviction closes the store for that user, reaches the client as final, and 
 });
 
 test('an evicted client that owns its connection closes it and does not reconnect on its own', async () => {
-  const store = createStore({ initial: INITIAL });
+  const store = createStore({ initial: INITIAL, presence: true });
   const net = createNetwork(store);
   const a = net.client({ replicaId: 'a', initial: INITIAL }, { user: { id: 'u1' } });
   const b = net.client({ replicaId: 'b', initial: INITIAL }, { user: { id: 'u2' } });
@@ -100,7 +100,7 @@ test('an evicted client that owns its connection closes it and does not reconnec
 });
 
 test('presence lists distinct users, counts a user once across devices, and skips anonymous sessions', async () => {
-  const store = createStore({ initial: INITIAL });
+  const store = createStore({ initial: INITIAL, presence: true });
   const net = createNetwork(store);
   const seen = [];
   const a = net.client({ replicaId: 'a', initial: INITIAL }, { user: { id: 'u1', name: 'Ann' } });

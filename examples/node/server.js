@@ -16,7 +16,8 @@ const sqlite = sqliteStorage(join(here, 'state.sqlite'));
 
 const stores = createStores(id => createStore({
   initial: { tasks: {} },
-  storage: sqlite.store(id)
+  storage: sqlite.store(id),
+  presence: true   // the pages show who is here
 }), { idle: 30 * 60_000 });
 
 const types = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8' };

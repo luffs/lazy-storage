@@ -15,7 +15,8 @@ const sqlite = sqliteStorage(join(here, 'state.sqlite'));
 // the page uses
 const stores = createStores(id => createStore({
   initial: { tasks: {} },
-  storage: sqlite.store(id)
+  storage: sqlite.store(id),
+  presence: true   // the pages show who is here
 }), { idle: 30 * 60_000 });
 
 const server = serve({

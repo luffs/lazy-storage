@@ -50,7 +50,7 @@ test('serve: other requests reach the app, a bad token is refused, two sockets s
   const answers = [];
   const stores = createStores(id => {
     if (!id.startsWith('t')) return null;
-    const store = createStore({ initial: INITIAL });
+    const store = createStore({ initial: INITIAL, presence: true });
     const session = store.session;
     store.session = opts => session({ ...opts, send: m => { if (m.t === 'snapshot' || m.t === 'delta') answers.push(m.t); opts.send(m); } });
     return store;

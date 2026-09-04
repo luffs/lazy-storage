@@ -38,7 +38,9 @@
 //   { t: 'op', op }                           one live batch
 //   { t: 'share', data }                      what this session shares with
 //       every peer (see presence below); null clears it. A hello may carry
-//       it too, as `share`, so a reconnect restores it
+//       it too, as `share`, so a reconnect restores it, and `presence:
+//       false` in a hello asks not to be sent presence at all. Refused
+//       with 'forbidden' while the store's presence is off
 //   { t: 'ping' }
 // where op = { replicaId, seq, ts, diff }.
 //
@@ -65,8 +67,9 @@
 //       after its hello is answered; from then on it gets
 //   { t: 'presence', left?, joined?, shared? }  what changed, applied in
 //       that order: replica ids gone, peers arrived, { replicaId, data }
-//       for peers sharing anew. Changes are batched (see presenceEvery);
-//       nothing here is written
+//       for peers sharing anew. Changes are batched (see presence.every);
+//       nothing here is written, and none of it is sent while the store's
+//       presence is off (the default)
 //   { t: 'closed', code, message }              this session is over
 //       (code 'evicted'; hubs also send 'forbidden', 'unknown-store', 'invalid-store')
 //   { t: 'error', seq?, code?, message, now?, ts? }  a refused op carries its
@@ -90,6 +93,19 @@ const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
 
 /** A client op the store would not merge; `code` travels to the client */
+/** The `presence` option as the store uses it: null when off, else its hooks and limits with the defaults filled in */
+function presenceOptions(presence) {
+  if (!presence) return null;
+  const given = presence === true ? {} : presence;
+  if (!Utils.isPlainObject(given)) throw new TypeError('presence must be true, false, or an options object');
+  const { key = defaultPresenceKey, user = u => u, validate, every = 0, maxShare = 4096 } = given;
+  if (typeof key !== 'function' || typeof user !== 'function') throw new TypeError('presence.key and presence.user must be functions');
+  if (validate !== undefined && typeof validate !== 'function') throw new TypeError('presence.validate must be a function');
+  if (!(every >= 0)) throw new TypeError('presence.every must be a number of milliseconds');
+  if (!(maxShare > 0)) throw new TypeError('presence.maxShare must be a positive number of bytes');
+  return { key, user, validate, every, maxShare };
+}
+
 export class RefusedError extends Error {
   constructor(code, message, extra) {
     super(message);
@@ -162,14 +178,26 @@ const defaultPresenceKey = user =>
  *   hello are not counted (they are bounded by the payload limit). `false`
  *   disables
  * @param {Object} [options.storage] - a storage adapter (default: memory)
- * @param {(user: any) => string} [options.presenceKey] - how presence
- *   dedupes users (default: by `id`)
- * @param {number} [options.maxShare=4096] - the most a session may share
- *   with its peers, in bytes of JSON; more is refused with 'too-large'
- * @param {number} [options.presenceEvery=0] - at most one presence message
+ * @param {boolean|Object} [options.presence=false] - whether sessions
+ *   learn of each other. Off, nothing is broadcast, `presence()` and
+ *   `peers()` are empty, and a share is refused with 'forbidden'. `true`
+ *   turns it on with the defaults below; an object sets any of:
+ * @param {(user: any) => string} [options.presence.key] - what presence
+ *   groups users by (default: `id`, else the user's JSON)
+ * @param {(user: any) => any} [options.presence.user] - what of a user its
+ *   peers see (default: all of it); the server's own `presence()` shows
+ *   the same
+ * @param {(data: any, context: { user: any, replicaId: string, store: Object }) => boolean|any|void} [options.presence.validate]
+ *   judges what a session shares, the way `validate` judges an op: return
+ *   false or throw to refuse it (code 'forbidden', the error's message
+ *   reaching the client), return a value to share that instead, return
+ *   true or nothing to let it through. Clearing a share is never judged
+ * @param {number} [options.presence.every=0] - at most one presence message
  *   per this many milliseconds (wall clock): changes within the window go
  *   out together, a session's later share replacing its earlier one. 0
  *   still sends what one turn of the event loop brought as one message
+ * @param {number} [options.presence.maxShare=4096] - the most a session
+ *   may share, in bytes of JSON; more is refused with 'too-large'
  * @param {(error: any) => void} [options.onError] - where faults that are
  *   not a client's (an observer that throws) are reported; default console
  * @param {() => number} [options.now] - wall clock (injectable for tests)
@@ -186,15 +214,12 @@ export function createStore({
   maxLeaves = 10_000,
   rateLimit = { burst: 500, perSecond: 100 },
   storage = memoryStorage(),
-  presenceKey = defaultPresenceKey,
-  maxShare = 4096,
-  presenceEvery = 0,
+  presence: presenceOption = false,   // `presence` below is the list
   onError = err => console.error('lazy-storage:', err),
   now
 } = {}) {
   if (validate !== undefined && typeof validate !== 'function') throw new TypeError('validate must be a function');
-  if (!(maxShare > 0)) throw new TypeError('maxShare must be a positive number of bytes');
-  if (!(presenceEvery >= 0)) throw new TypeError('presenceEvery must be a number of milliseconds');
+  const pres = presenceOptions(presenceOption);
   if (rateLimit && !(rateLimit.burst > 0 && rateLimit.perSecond > 0)) throw new TypeError('rateLimit needs positive burst and perSecond');
   const time = now ?? Date.now;
   const regs = registerSet(registers);
@@ -278,13 +303,15 @@ export function createStore({
   }
 
   // A session counts from its hello: that is when it has a replica id to
-  // be listed as a peer by, and with a hub, the message it was created for
+  // be listed as a peer by, and with a hub, the message it was created for.
+  // Users are shown as `presence.user` renders them, here and to peers
   function presence() {
     const seen = new Map();
+    if (!pres) return [];
     for (const s of sessions) {
       if (s.user === undefined || !s.replicaId) continue;
-      const key = presenceKey(s.user);
-      if (!seen.has(key)) seen.set(key, s.user);
+      const key = pres.key(s.user);
+      if (!seen.has(key)) seen.set(key, pres.user(s.user));
     }
     return [...seen.values()];
   }
@@ -293,23 +320,24 @@ export function createStore({
   function peerOf(s) {
     const peer = { replicaId: s.replicaId };
     if (s.user !== undefined) {
-      peer.user = s.user;
-      peer.key = presenceKey(s.user);
+      peer.user = pres.user(s.user);
+      peer.key = pres.key(s.user);
     }
     if (s.shared !== undefined) peer.data = s.shared;
     return peer;
   }
 
-  /** Every session that has said hello */
+  /** Every session that has said hello (none while presence is off) */
   function peers() {
     const list = [];
+    if (!pres) return list;
     for (const s of sessions) if (s.replicaId) list.push(peerOf(s));
     return list;
   }
 
   // Presence travels as deltas. A session joining, leaving, or sharing
   // anew is noted here and goes out with the next flush, at most once per
-  // `presenceEvery`, so a burst (a deploy's reconnect storm, a busy room's
+  // `presence.every`, so a burst (a deploy's reconnect storm, a busy room's
   // shares) costs every socket one small message per window rather than
   // the whole list per change; within a window a session's later share
   // replaces its earlier one, and a join followed by a leave is just the
@@ -320,12 +348,13 @@ export function createStore({
   let flushedAt = -Infinity;
 
   function noteChange(s, what) {
+    if (!pres) return;
     let entry = pending.get(s);
     if (!entry) pending.set(s, (entry = { joined: false, left: false, shared: false }));
     if (what === 'leave') Object.assign(entry, { joined: false, shared: false, left: true });
     else entry[what === 'join' ? 'joined' : 'shared'] = true;
     if (cancelFlush) return;
-    const wait = presenceEvery > 0 ? Math.max(0, flushedAt + presenceEvery - Date.now()) : 0;
+    const wait = pres.every > 0 ? Math.max(0, flushedAt + pres.every - Date.now()) : 0;
     let timer;
     if (wait > 0) {
       timer = setTimeout(flushPresence, wait);
@@ -359,16 +388,39 @@ export function createStore({
     if (left.length) message.left = left;
     if (joined.length) message.joined = joined;
     if (shared.length) message.shared = shared;
-    broadcast(message);
+    // Encoded once; a session that opted out of presence in its hello is skipped
+    toJSON(message);
+    for (const s of sessions) if (s.presence) s.send(message);
   }
 
-  /** Set what a session shares (JSON within maxShare; null clears); true when it changed */
+  /**
+   * Set what a session shares (JSON within maxShare, as `presence.validate`
+   * lets it through or replaces it; null clears); true when it changed
+   */
   function setShared(s, data) {
+    if (!pres) throw new RefusedError('forbidden', 'Presence is off on this store');
     let json;
     if (data !== null && data !== undefined) {
       json = JSON.stringify(data);
       if (json === undefined) throw new RefusedError('invalid', 'Shared data must be JSON');
-      if (json.length > maxShare) throw new RefusedError('too-large', `Shared data over ${maxShare} bytes`);
+      if (json.length > pres.maxShare) throw new RefusedError('too-large', `Shared data over ${pres.maxShare} bytes`);
+      if (pres.validate) {
+        let verdict;
+        try {
+          verdict = pres.validate(data, { user: s.user, replicaId: s.replicaId, store: self });
+        } catch (err) {
+          throw new RefusedError('forbidden', err?.message || 'Share refused');
+        }
+        if (verdict === false) throw new RefusedError('forbidden', 'Share refused');
+        if (verdict !== true && verdict !== undefined) {
+          data = verdict;
+          json = JSON.stringify(data);
+          if (json === undefined) {
+            onError(new TypeError('presence.validate must return true, false, a JSON value, or nothing'));
+            throw new RefusedError('forbidden', 'Share refused');
+          }
+        }
+      }
     }
     if (json === s.sharedJson) return false;
     s.shared = json === undefined ? undefined : data;
@@ -602,6 +654,7 @@ export function createStore({
       replicaId: null,
       shared: undefined,     // what this session shares with its peers, and its JSON
       sharedJson: undefined,
+      presence: true,        // whether it wants to hear of its peers (its hello may say no)
       receive(msg) {
         if (!Utils.isPlainObject(msg)) return send({ t: 'error', message: 'Expected a message object' });
         switch (msg.t) {
@@ -609,6 +662,7 @@ export function createStore({
             if (typeof msg.replicaId !== 'string' || !msg.replicaId) return send({ t: 'error', message: 'hello requires a replicaId' });
             const joined = !s.replicaId;
             s.replicaId = msg.replicaId;
+            if (msg.presence === false) s.presence = false;
             let shared = false;
             if (msg.share !== undefined) {
               try {
@@ -636,8 +690,8 @@ export function createStore({
             // The newcomer gets the whole picture now; everyone else hears
             // of it with the next flush. A re-hello on the same session
             // changes nothing unless it shares anew
-            if (joined) {
-              send({ t: 'presence', peers: peers() });
+            if (joined && pres) {
+              if (s.presence) send({ t: 'presence', peers: peers() });
               noteChange(s, 'join');
             } else if (shared) {
               noteChange(s, 'share');

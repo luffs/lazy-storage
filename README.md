@@ -387,31 +387,44 @@ decides what a client may write:
 The user rides on the session (`store.session({ send, user })` if you drive
 sessions yourself), which powers two more features:
 
-- **Presence.** The store broadcasts the distinct users with a live
-  session whenever one joins or leaves; `db.presence` holds the list,
-  `db.on('presence', users => ...)` follows it, and `store.presence()`
-  answers on the server. Users are distinct by `id` (or by value; override
-  with `presenceKey`), so a user on two devices counts once. A session
-  counts from its hello on.
-- **Peers.** The same broadcast lists every live session as a peer,
-  `{ replicaId, user, data }`, where `data` is whatever that client chose
-  to share: `db.share({ editing: taskId })` sets it, `null` clears it,
-  and the hello carries it, so a reconnect restores it. Shared data is
-  never written to the store; it lives as long as the session, goes out
-  as it changes (throttle a cursor yourself), and may be at most
-  `maxShare` bytes of JSON (default 4096; over that, or not JSON, the
-  share is refused with an `error` and nothing changes). `db.peers`
-  holds the list, this client's own entry included (its `replicaId` is
-  `db.replicaId`), `db.on('peers', ...)` follows it, and `store.peers()`
-  answers on the server. "Ann is editing this task" is a filter over it.
-  A change costs every session one small message: the whole list goes
-  only to a session that has just said hello, and after that only what
-  changed (a peer arriving, leaving, or sharing anew), batched per turn
-  of the server's event loop. `presenceEvery` on the store sends at most
-  one such message per that many milliseconds, changes within the window
-  going out together and a session's later share replacing its earlier
-  one, so a busy room or a deploy's reconnect storm costs each socket a
-  message per window rather than one per change.
+- **Presence.** Off by default: sessions do not learn of each other.
+  `createStore({ presence: true })` turns it on, and the store then
+  tells every session who else is there; `db.presence` holds the
+  distinct users with a live session, `db.on('presence', users => ...)`
+  follows it, and `store.presence()` answers on the server. A session
+  counts from its hello on. Instead of `true`, an object sets what
+  presence does: `key(user)` is what users are distinct by (default
+  `id`, else the user's JSON, so a user on two devices counts once);
+  `user(user)` is what of a user its peers see, and the default is all
+  of it, so a server whose `authenticate` returns roles or tokens should
+  pick the public fields here; `validate`, `every`, and `maxShare` are
+  below. A client that never reads presence, a mirror say, passes
+  `presence: false` to `createClient`: its hello says so and the server
+  sends it none of this, though it may still share.
+- **Peers.** With presence on, every live session is a peer,
+  `{ replicaId, user, key, data }`, where `data` is whatever that client
+  chose to share: `db.share({ editing: taskId })` sets it, `null` clears
+  it, and the hello carries it, so a reconnect restores it. Shared data
+  is never written to the store; it lives as long as the session and
+  goes out as it changes (throttle a cursor yourself). It must be JSON
+  within `presence.maxShare` bytes (default 4096), and
+  `presence.validate(data, { user, replicaId, store })` judges it the
+  way `validate` judges an op: return `false` or throw to refuse it
+  (the client hears an `error` with code `forbidden`), return a value to
+  share that instead (strip a field, stamp in the user's id so a peer
+  cannot claim to be someone else), return `true` or nothing to let it
+  through. `db.peers` holds the list, this client's own entry included
+  (its `replicaId` is `db.replicaId`), `db.on('peers', ...)` follows it,
+  and `store.peers()` answers on the server. "Ann is editing this task"
+  is a filter over it. A change costs every session one small message:
+  the whole list goes only to a session that has just said hello, and
+  after that only what changed (a peer arriving, leaving, or sharing
+  anew), batched per turn of the server's event loop. `presence.every`
+  sends at most one such message per that many milliseconds, changes
+  within the window going out together and a session's later share
+  replacing its earlier one, so a busy room or a deploy's reconnect
+  storm costs each socket a message per window rather than one per
+  change.
 - **Eviction.** `store.closeSessions(user => ..., message)` ends the
   sessions a predicate selects — say, everyone who was just removed from a
   team. The client receives a `closed` event with `{ code: 'evicted',
@@ -437,12 +450,14 @@ A public server needs a few ceilings, all on by default:
   the client keeps the op and resends its outbox in a hello after that,
   so nothing is lost and a runaway client is throttled rather than
   broken. Ops inside a hello are not counted. `false` turns it off.
-- **Presence rate.** Presence travels as deltas, one small message to
-  every session per change, batched per turn of the event loop;
-  `presenceEvery` on the store (milliseconds, default 0) caps that at
-  one message per window, and `maxShare` (default 4096 bytes of JSON)
-  bounds what a session may share. A room of N sessions then costs N
-  small messages per window however many of them join, leave, or share.
+- **Presence rate.** Presence is off unless a store asks for it. On, it
+  travels as deltas, one small message to every session per change,
+  batched per turn of the event loop; `presence.every` (milliseconds,
+  default 0) caps that at one message per window, `presence.maxShare`
+  (default 4096 bytes of JSON) bounds what a session may share, and a
+  client that never reads presence opts out of receiving it. A room of
+  N sessions then costs N small messages per window however many of
+  them join, leave, or share.
 
 **Memory follows the stores in use** when the registry is given an idle
 time: `createStores(factory, { idle: 30 * 60_000 })` releases a store
@@ -537,7 +552,7 @@ runs on the synced state and shows in the array view like any other change.
 
 **Client** (`lazy-storage`)
 
-- `createClient({ store, connection | transport, initial, registers, lists, position, replicaId, storage, cache, undo, undoLimit, reconnect, now })`; `db.restored` — started from the cached state; `db.version` — the store version this client has seen everything up to; `db.wire` — the synced state under a lists view
+- `createClient({ store, connection | transport, initial, registers, lists, position, replicaId, storage, cache, undo, undoLimit, reconnect, presence, now })`; `db.restored` — started from the cached state; `db.version` — the store version this client has seen everything up to; `db.wire` — the synced state under a lists view
 - `openClient(options)` → `Promise<db>` — the same, for a storage adapter whose `load()` returns a promise
 - `createConnection({ transport, reconnect, keepalive })` → `connect()`, `close()`, `status`, `attached`, `closed` — why the server turned the socket away, or null — `on('status' | 'closed', fn)` — a socket shared by clients
 - `db.state` — the mirror (a lazy-watch proxy). Read and write it directly
@@ -560,7 +575,7 @@ runs on the synced state and shows in the array view like any other change.
 
 **Server** (`lazy-storage/server`)
 
-- `createStore({ initial, registers, readOnly, validate, maxSkew, retention, compactEvery, deltaLog, maxLeaves, rateLimit, storage, presenceKey, maxShare, presenceEvery, onError, now })`; `store.epoch` — this life of the storage
+- `createStore({ initial, registers, readOnly, validate, maxSkew, retention, compactEvery, deltaLog, maxLeaves, rateLimit, storage, presence, onError, now })` — `presence` is `false` (default), `true`, or `{ key, user, validate, every, maxShare }`; `store.epoch` — this life of the storage
 - `store.observe(event, fn)` → unsubscribe — `'op'`, `'refused'`, `'session'`; `store.stats()` → `{ version, epoch, sessions, replicas, rows, tombstones, log }`
 - `store.session({ send, user, onEvict })` → `{ receive(message), close(), user, replicaId }` — one per connection, transport-agnostic
 - `store.closeSessions(predicate, message)` — evict sessions; `store.presence()` — distinct users with a live session; `store.peers()` — every live session as `{ replicaId, user, data }`
@@ -631,10 +646,10 @@ primitives anywhere, of anything at a register path).
 
 | Message | Fields | Meaning |
 |---|---|---|
-| `hello` | `replicaId`, `ops`, `since?`, `epoch?`, `share?` | Connect or reconnect. `ops` is the outbox (its first 1000 ops); `since` is the store version the client has seen everything up to and `epoch` the storage life it belongs to, asking for a delta; `share` is what this client shares with its peers, restored on reconnect |
+| `hello` | `replicaId`, `ops`, `since?`, `epoch?`, `share?` | Connect or reconnect. `ops` is the outbox (its first 1000 ops); `since` is the store version the client has seen everything up to and `epoch` the storage life it belongs to, asking for a delta; `share` is what this client shares with its peers, restored on reconnect; `presence: false` asks not to be sent presence |
 | `op` | `op` | One batch, live |
 | `leave` | | Close this store's session; the socket stays up |
-| `share` | `data` | What this session shares with every peer, a JSON value within `maxShare`; `null` clears it. Presence goes out again if it changed |
+| `share` | `data` | What this session shares with every peer, a JSON value within `presence.maxShare` that `presence.validate` lets through; `null` clears it. Presence goes out again if it changed; refused with `forbidden` while the store's presence is off |
 | `ping` | | Keepalive; answered with `pong` |
 
 ### Server to client
@@ -646,7 +661,7 @@ primitives anywhere, of anything at a register path).
 | `patch` | `diff`, `ts`, `v` | An accepted diff from any replica, and the version it made |
 | `ack` | `seq`, `ts`, `correction` | The op was merged; `correction` is a diff with the server's values at the leaves it lost, or null |
 | `error` | `seq?`, `code?`, `message`, `now?`, `ts?`, `retryAfter?` | With `seq`: that op was refused, for the reason in `code` (below). Without: the message itself was bad (not JSON, an unknown type, a hello without a replica id) |
-| `presence` | `peers`, or `left?`, `joined?`, `shared?` | With `peers`: every session as `{ replicaId, user, key, data }`, `key` being what presence groups users by and `data` what the session shares; sent right after the hello is answered. Otherwise a delta, applied in the order `left` (replica ids), `joined` (peers), `shared` (`{ replicaId, data }`), batched per `presenceEvery` |
+| `presence` | `peers`, or `left?`, `joined?`, `shared?` | With `peers`: every session as `{ replicaId, user, key, data }`, `key` being what presence groups users by and `data` what the session shares; sent right after the hello is answered. Otherwise a delta, applied in the order `left` (replica ids), `joined` (peers), `shared` (`{ replicaId, data }`), batched per `presence.every`. Only with the store's presence on, and never to a session whose hello opted out |
 | `closed` | `code`, `message` | Final for this store on this socket; the client goes offline for it and does not reconnect on its own. Without a `store`: final for the socket, which the server then closes with code 4401; the connection stops reconnecting and every client on it reports the reason |
 | `pong` | | |
 

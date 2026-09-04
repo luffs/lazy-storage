@@ -23,7 +23,7 @@ const users = {
 const answers = [];   // what stores answered hellos with, in order
 const stores = createStores(id => {
   if (!id.startsWith('t')) return null;
-  const store = createStore({ initial: INITIAL });
+  const store = createStore({ initial: INITIAL, presence: true });
   const session = store.session;
   store.session = opts => session({ ...opts, send: m => { if (m.t === 'snapshot' || m.t === 'delta') answers.push(m.t); opts.send(m); } });
   return store;

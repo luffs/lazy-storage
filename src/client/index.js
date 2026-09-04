@@ -86,6 +86,10 @@ const HELLO_LIMIT = 1000;
  * @param {number} [options.undoLimit=100]
  * @param {{min: number, max: number}|false} [options.reconnect] - retry
  *   backoff for an owned connection; false disables automatic reconnects
+ * @param {boolean} [options.presence=true] - false asks the server (in
+ *   the hello) not to send presence to this client, which then never has
+ *   peers; a mirror that never reads them spares every change's message.
+ *   It may still share
  * @param {() => number} [options.now] - wall clock (injectable for tests)
  */
 export function createClient(options = {}) {
@@ -121,6 +125,7 @@ function build({
   undo = true,
   undoLimit = 100,
   reconnect = { min: 500, max: 10_000 },
+  presence: wantsPresence = true,   // `presence` below is the list
   now
 }, saved) {
   if (typeof storeId !== 'string' || !storeId) throw new TypeError('createClient requires a store id');
@@ -389,6 +394,7 @@ function build({
     const message = { t: 'hello', replicaId, ops: outbox.slice(0, HELLO_LIMIT) };
     if (!full) Object.assign(message, { since: known.v, epoch: known.epoch });
     if (shared !== undefined) message.share = shared;
+    if (!wantsPresence) message.presence = false;
     link?.send(message);
   }
 

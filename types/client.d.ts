@@ -162,6 +162,8 @@ export interface ClientOptionsBase<S extends object = any> {
   undoLimit?: number;
   /** Retry backoff for an owned connection; false disables automatic reconnects */
   reconnect?: ReconnectOptions | false;
+  /** false asks the server not to send presence to this client, which then never has peers; it may still share (default true) */
+  presence?: boolean;
   /** Wall clock (injectable for tests) */
   now?: () => number;
 }

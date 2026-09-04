@@ -63,7 +63,7 @@ export function createNetwork(target) {
         queue.push(() => {
           if (!link.online) { t.onclose?.(); return; }
           // Open before the session exists: a real socket can send from the
-          // moment the server's open handler runs (presence goes out there)
+          // moment the server's open handler runs
           t.open = true;
           session = store.session({
             // Gate at send time, not delivery: like a real socket, messages
