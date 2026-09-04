@@ -42,6 +42,7 @@ import { memoryOutbox } from './storage.js';
 import { createConnection } from './connection.js';
 import { createPersistence, isRowAdapter } from './persistence.js';
 import { createList } from './list.js';
+import { createFacade, wireInitial } from './facade.js';
 
 const { Utils } = LazyWatch;
 const REMOTE = { origin: 'remote' };
@@ -63,8 +64,15 @@ const HELLO_LIMIT = 1000;
  *   transport.js) for a connection this client owns
  * @param {Object} [options.initial] - state before the first snapshot
  * @param {Array<string|string[]>} [options.registers] - whole-value paths
- *   (arrays may live only here); must match the server's, which reports a
- *   mismatch as an error with code 'registers-mismatch' on every snapshot
+ *   (arrays of anything as one value); must match the server's, which
+ *   reports a mismatch as an error with code 'registers-mismatch' on every
+ *   snapshot
+ * @param {Array<string|string[]>} [options.lists] - list paths (register
+ *   syntax) that `state` presents as plain arrays of records, in position
+ *   order, while the wire keeps keyed maps with positions (see facade.js).
+ *   With lists declared, `db.state` is that view and `db.wire` the synced
+ *   state underneath; `initial` may use arrays at those paths
+ * @param {string} [options.position='pos'] - the position field on list records
  * @param {string} [options.replicaId] - defaults to the persisted one, else random
  * @param {Object} [options.storage] - outbox and state-cache persistence
  *   (default: memory). An adapter whose load() returns a promise needs
@@ -102,6 +110,8 @@ function build({
   transport,
   initial = {},
   registers = [],
+  lists = [],
+  position = 'pos',
   replicaId,
   storage,
   cache = true,
@@ -118,6 +128,11 @@ function build({
   const regs = registerSet(registers);
   const declared = regs.patterns.map(p => p.join('/')).sort();
   const rows = isRowAdapter(storage);
+  if (lists.length) {
+    const listed = registerSet(lists);
+    for (const pattern of listed.patterns) if (regs.matches(pattern)) throw new TypeError(`"${pattern.join('/')}" cannot be both a list and a register`);
+    initial = wireInitial(initial, lists, position);
+  }
 
   if (!Utils.isPlainObject(saved)) saved = null;
   replicaId = replicaId ?? saved?.replicaId ?? randomId();
@@ -170,6 +185,11 @@ function build({
   const undoManager = undo
     ? LazyWatch.createUndoManager(state, { limit: undoLimit, record: meta => !meta || HISTORY.has(meta.origin) })
     : null;
+
+  // With lists declared, the app works on a view with arrays (facade.js)
+  // that follows the wire state and feeds its edits back into it
+  const facade = lists.length ? createFacade({ wire: state, lists, position }) : null;
+  const exposed = facade ? facade.view : state;
 
   function emit(event, payload) {
     for (const fn of listeners[event]) {
@@ -439,8 +459,10 @@ function build({
   }
 
   return {
-    /** The mirrored state: read and write it like a plain object */
-    state,
+    /** The mirrored state: read and write it like a plain object (with lists declared, the view with arrays) */
+    state: exposed,
+    /** The synced state underneath: keyed maps with positions; the same object as `state` without lists */
+    wire: state,
     replicaId,
     store: storeId,
     connection,
@@ -456,10 +478,10 @@ function build({
     connect,
     disconnect,
     collection,
-    /** An ordered list of records under `path`: a keyed map with a position on each record (see list.js) */
-    list: (path, options) => createList(state, path, options),
-    /** Subscribe to state changes (a LazyWatch listener; meta.origin tells remote from local) */
-    watch: (listener, options) => LazyWatch.on(state, listener, options),
+    /** An ordered list of records under `path` on the wire: a keyed map with a position on each record (see list.js) */
+    list: (path, options) => createList(state, path, { position, ...options }),
+    /** Subscribe to changes of `state` (a LazyWatch listener; meta.origin tells remote from local) */
+    watch: (listener, options) => LazyWatch.on(exposed, listener, options),
     /**
      * Lifecycle events: 'status' (string), 'error' (Error, with `code` when
      * the server gave one), 'sync' (outbox changed), 'presence' (users),
@@ -484,6 +506,7 @@ function build({
       clearTimeout(retryTimer);
       persistence.flush();
       stopStatus();
+      facade?.dispose();
       undoManager?.dispose();
       LazyWatch.dispose(state);
     }

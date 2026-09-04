@@ -165,3 +165,12 @@ async function node() {
   return [port, nodeSqlite] as const;
 }
 void node;
+
+// --- Lists as arrays ------------------------------------------------------------------
+interface ViewState { tasks: Array<{ id: string; title: string; done: boolean; subtasks?: Array<{ id: string; title: string }> }> }
+const viewDb = createClient<ViewState>({ connection, store: 'team-2', initial: { tasks: [] }, lists: ['tasks', 'tasks/*/subtasks'] });
+viewDb.state.tasks.push({ id: 'x', title: 'array-shaped', done: false });
+viewDb.state.tasks[0].subtasks = [{ id: 's', title: 'nested' }];
+const wireSide: object = viewDb.wire;
+const positioned = viewDb.list('tasks').all();
+void [wireSide, positioned];

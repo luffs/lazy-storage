@@ -111,6 +111,32 @@ register's order and deletes the register in one patch, wildcards
 included (`{ list: 'tasks/*/subtasks', order: 'tasks/*/subtaskOrder' }`).
 Then drop the register from both sides' declarations.
 
+### Plain arrays
+
+Declare the list paths and the client presents them as arrays:
+
+```js
+const db = createClient({ connection, store: 'team-1', initial: { tasks: [] }, lists: ['tasks', 'tasks/*/subtasks'] });
+db.state.tasks.push({ title: 'Milk' });             // an id is minted and written back
+db.state.tasks.splice(1, 0, { title: 'Eggs' });
+db.state.tasks[0].done = true;
+db.state.tasks[0].subtasks = [{ title: 'Skimmed' }];
+db.state.tasks = db.state.tasks.filter(t => !t.done); // or sort, reverse, reorder
+```
+
+`db.state` is then a view: the same tree with every list as a real array
+in position order, records carrying their `id` and no position. The synced
+state underneath, `db.wire`, keeps the keyed maps with positions, and
+everything else (persistence, deltas, undo, `db.list`) works on it as
+before. The client keeps the two in step: an edit inside a record maps its
+index to the record's id; a splice, a reorder, or a replaced array resyncs
+that list by id, deleting what left, adding what appeared, and writing the
+fewest positions that make the wire order match. Changes from others
+arrive as splices at their sorted place, moves, and field patches, tagged
+`origin: 'remote'` for the app's listeners. A record pushed without an id
+gets one in the next batch; read it back from the array rather than from
+the object you pushed. A list path cannot also be a register.
+
 ## How conflicts resolve
 
 Every op carries a hybrid-logical-clock timestamp. The server keeps the
@@ -429,7 +455,7 @@ replaced by a leaf) drops the affected steps.
 
 **Client** (`lazy-storage`)
 
-- `createClient({ store, connection | transport, initial, registers, replicaId, storage, cache, undo, undoLimit, reconnect, now })`; `db.restored` — started from the cached state; `db.version` — the store version this client has seen everything up to
+- `createClient({ store, connection | transport, initial, registers, lists, position, replicaId, storage, cache, undo, undoLimit, reconnect, now })`; `db.restored` — started from the cached state; `db.version` — the store version this client has seen everything up to; `db.wire` — the synced state under a lists view
 - `openClient(options)` → `Promise<db>` — the same, for a storage adapter whose `load()` returns a promise
 - `createConnection({ transport, reconnect, keepalive })` → `connect()`, `close()`, `status`, `attached`, `on('status', fn)` — a socket shared by clients
 - `db.state` — the mirror (a lazy-watch proxy). Read and write it directly

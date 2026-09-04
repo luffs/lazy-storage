@@ -126,8 +126,17 @@ export interface ClientOptionsBase<S extends object = any> {
   store: string;
   /** State before the first snapshot (and the skeleton under a cached state) */
   initial?: S;
-  /** Whole-value paths; must match the server's */
+  /** Whole-value paths (arrays of anything as one value); must match the server's */
   registers?: RegisterSpec[];
+  /**
+   * List paths that `state` presents as plain arrays of records in
+   * position order, while the wire keeps keyed maps with positions. With
+   * lists declared, `state` is that view and `wire` the synced state
+   * underneath; `initial` may use arrays at those paths
+   */
+  lists?: RegisterSpec[];
+  /** The position field on list records (default 'pos') */
+  position?: string;
   /** Defaults to the persisted one, else random */
   replicaId?: string;
   /** Outbox and state-cache persistence (default: memory) */
@@ -210,8 +219,10 @@ export interface ClientEvents {
 }
 
 export interface Client<S extends object = any> {
-  /** The mirrored state: read and write it like a plain object */
+  /** The mirrored state: read and write it like a plain object (with lists declared, the view with arrays) */
   readonly state: S;
+  /** The synced state underneath: keyed maps with positions; the same object as `state` without lists */
+  readonly wire: object;
   readonly replicaId: string;
   readonly store: string;
   readonly connection: Connection;

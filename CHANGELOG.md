@@ -25,6 +25,17 @@ whole value anywhere, undeclared. Order registers keep working, and
 
 ### Added
 
+- **Plain arrays in the client's state.** `createClient({ lists: ['tasks',
+  'tasks/*/subtasks'] })` makes `db.state` a view in which every list is a
+  real array in position order, records carrying their id and no
+  position; `db.wire` is the synced state underneath, keyed maps with
+  positions, and persistence, deltas, undo, and `db.list` work on it as
+  before. Pushes, splices, index edits, sorts, and whole-array
+  replacements are translated into record adds, deletes, field writes,
+  and the fewest position changes that make the wire order match; changes
+  from others arrive as splices at their sorted place, moves, and field
+  patches tagged `origin: 'remote'`. A record pushed without an id gets
+  one in the next batch. Tested with a randomized three-client fuzz
 - **`db.list(path)`: ordered lists without a register.** Every record
   carries a position key (`pos` by default); the list's order is the keys'
   string order, ties by id, unpositioned records last. `add` (at the end,
