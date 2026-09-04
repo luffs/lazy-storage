@@ -4,6 +4,19 @@ All notable changes to lazy-storage are documented here. The format follows Keep
 
 ## [Unreleased]
 
+### Added
+
+- **Vue and React examples.** `examples/vue` (Composition API),
+  `examples/vue-options` (single-file components with the Options API,
+  compiled in the browser: an App that owns the client and a list
+  component), and `examples/react` are the
+  shared list as framework apps, served by either example server at
+  `/vue`, `/vue-options`, and `/react` on the same store as the basic
+  page, with no build step (the framework comes from a CDN through an
+  import map). The Vue ones read a reactive mirror patched on every batch
+  and write to the client; the React one reads the client's state and
+  re-renders on every batch
+
 ### Changed
 
 - The README's opening example, the conflict and undo notes, and the

@@ -34,6 +34,8 @@ const server = serve({
   request(req, res) {
     const { pathname } = new URL(req.url, 'http://localhost');
     if (pathname === '/') return send(res, page);
+    if (['/vue', '/vue-options', '/react'].includes(pathname)) return send(res, join(here, '..', pathname.slice(1), 'index.html'));
+    if (pathname.startsWith('/vue-options/')) return send(res, join(here, '..', 'vue-options', pathname.slice('/vue-options/'.length)));
     if (pathname.startsWith('/lib/lazy-storage/')) return send(res, join(root, 'src', pathname.slice('/lib/lazy-storage/'.length)));
     if (pathname.startsWith('/lib/lazy-watch/')) return send(res, join(root, 'node_modules', 'lazy-watch', 'src', pathname.slice('/lib/lazy-watch/'.length)));
     res.statusCode = 404;

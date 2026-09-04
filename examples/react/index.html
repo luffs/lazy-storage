@@ -1,0 +1,103 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shared list (React)</title>
+<style>
+  body { font: 16px/1.4 system-ui, sans-serif; max-width: 32rem; margin: 3rem auto; padding: 0 1rem; color: #222; background: #fff; }
+  h1 { font-size: 1.4rem; }
+  .status, .presence { color: #666; font-size: 0.9rem; min-height: 1.4em; }
+  form { display: flex; gap: 0.5rem; margin: 1rem 0; }
+  input[type=text] { flex: 1; font: inherit; padding: 0.4rem 0.6rem; }
+  button { font: inherit; padding: 0.4rem 0.8rem; }
+  ul { list-style: none; padding: 0; }
+  li { display: flex; align-items: center; gap: 0.6rem; padding: 0.35rem 0; border-bottom: 1px solid #eee; }
+  li.done span { text-decoration: line-through; color: #999; }
+  li span { flex: 1; }
+  li button { padding: 0.1rem 0.5rem; }
+</style>
+
+<div id="root"></div>
+
+<script type="importmap">
+  {
+    "imports": {
+      "react": "https://esm.sh/react@19",
+      "react-dom/client": "https://esm.sh/react-dom@19/client",
+      "htm": "https://esm.sh/htm@3",
+      "lazy-storage": "/lib/lazy-storage/index.js",
+      "lazy-watch": "/lib/lazy-watch/lazy-watch.js"
+    }
+  }
+</script>
+<script type="module">
+  import React, { useEffect, useState } from 'react';
+  import { createRoot } from 'react-dom/client';
+  import htm from 'htm';
+  import { createClient, createConnection, webSocketTransport, localStorageOutbox } from 'lazy-storage';
+
+  const html = htm.bind(React.createElement);   // JSX without a build step
+  const name = new URLSearchParams(location.search).get('name') || localStorage.getItem('example:name') || prompt('Your name?') || 'anonymous';
+  localStorage.setItem('example:name', name);
+
+  // The same `shared` store as the other example pages, seen as an array
+  const connection = createConnection({
+    transport: webSocketTransport(() => `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws?name=${encodeURIComponent(name)}`)
+  });
+  const db = createClient({ connection, store: 'shared', initial: { tasks: [] }, lists: ['tasks'], storage: localStorageOutbox('example:react') });
+
+  /**
+   * React needs no mirror: components read the client's state directly and
+   * re-render on every batch, local or remote, and on every change of the
+   * outbox. Writes go straight to the client.
+   */
+  function useDb(db) {
+    const [, rerender] = useState(0);
+    const [status, setStatus] = useState(db.status);
+    const [presence, setPresence] = useState(db.presence);
+    useEffect(() => {
+      const stops = [
+        db.watch(() => rerender(n => n + 1)),
+        db.on('sync', () => rerender(n => n + 1)),
+        db.on('status', setStatus),
+        db.on('presence', setPresence)
+      ];
+      return () => stops.forEach(stop => stop());
+    }, [db]);
+    return { status, presence };
+  }
+
+  function App() {
+    const { status, presence } = useDb(db);
+    const [title, setTitle] = useState('');
+    const at = id => db.state.tasks.findIndex(task => task.id === id);
+    const add = event => {
+      event.preventDefault();
+      const text = title.trim();
+      if (!text) return;
+      db.state.tasks.push({ title: text, done: false });          // an id is minted and written back
+      setTitle('');
+    };
+    return html`
+      <h1>Shared list (React)</h1>
+      <p className="status">${status === 'online' ? `Online as ${name}` : status === 'connecting' ? 'Connecting…' : `Offline as ${name}`}</p>
+      <form onSubmit=${add}>
+        <input type="text" value=${title} onChange=${e => setTitle(e.target.value)} placeholder="Add a task" autoComplete="off" autoFocus />
+        <button>Add</button>
+      </form>
+      <ul>
+        ${db.state.tasks.map(task => html`
+          <li key=${task.id} className=${task.done ? 'done' : ''}>
+            <input type="checkbox" checked=${Boolean(task.done)} onChange=${e => { db.state.tasks[at(task.id)].done = e.target.checked; }} />
+            <span>${task.title}</span>
+            <button onClick=${() => db.state.tasks.splice(at(task.id), 1)}>x</button>
+          </li>
+        `)}
+      </ul>
+      <p className="presence">${presence.length ? `Here now: ${presence.join(', ')}` : ''}</p>
+      <p><button onClick=${() => db.undo()}>Undo</button> <button onClick=${() => db.redo()}>Redo</button></p>
+    `;
+  }
+
+  createRoot(document.getElementById('root')).render(html`<${App} />`);
+  db.connect();
+</script>

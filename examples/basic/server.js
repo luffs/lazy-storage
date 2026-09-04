@@ -23,10 +23,13 @@ const server = serve({
   stores,
   // Who is asking: the name in the query string (a real app checks a token)
   authenticate: req => new URL(req.url).searchParams.get('name') || null,
-  // Static files: the page, and the library plus lazy-watch under /lib
+  // Static files: this page at /, the framework pages at /vue, /vue-options,
+  // and /react (all on the same store), and the library plus lazy-watch under /lib
   fetch(req) {
     const { pathname } = new URL(req.url);
     if (pathname === '/') return new Response(Bun.file(join(here, 'index.html')));
+    if (['/vue', '/vue-options', '/react'].includes(pathname)) return new Response(Bun.file(join(here, '..', pathname.slice(1), 'index.html')));
+    if (pathname.startsWith('/vue-options/')) return new Response(Bun.file(join(here, '..', 'vue-options', pathname.slice('/vue-options/'.length))));
     if (pathname.startsWith('/lib/lazy-storage/')) return new Response(Bun.file(join(root, 'src', pathname.slice('/lib/lazy-storage/'.length))));
     if (pathname.startsWith('/lib/lazy-watch/')) return new Response(Bun.file(join(root, 'node_modules', 'lazy-watch', 'src', pathname.slice('/lib/lazy-watch/'.length))));
     return null;

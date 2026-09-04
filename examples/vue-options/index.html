@@ -1,0 +1,46 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shared list (Vue SFC, Options API)</title>
+<style>
+  body { font: 16px/1.4 system-ui, sans-serif; max-width: 32rem; margin: 3rem auto; padding: 0 1rem; color: #222; background: #fff; }
+</style>
+
+<div id="app"></div>
+
+<script type="importmap">
+  {
+    "imports": {
+      "vue": "https://unpkg.com/vue@3/dist/vue.esm-browser.prod.js",
+      "vue3-sfc-loader": "https://cdn.jsdelivr.net/npm/vue3-sfc-loader@0.9.5/dist/vue3-sfc-loader.esm.js",
+      "lazy-storage": "/lib/lazy-storage/index.js",
+      "lazy-watch": "/lib/lazy-watch/lazy-watch.js"
+    }
+  }
+</script>
+<script type="module">
+  // App.vue and SharedList.vue are single-file components (Options API)
+  // compiled in the browser by vue3-sfc-loader, so the example needs no
+  // build step. A real app would use Vite; the components are the same
+  // either way. App.vue owns the client; SharedList.vue is the list.
+  import * as vue from 'vue';
+  import * as lazyStorage from 'lazy-storage';
+  import { loadModule } from 'vue3-sfc-loader';
+
+  const options = {
+    // What the component's imports resolve to
+    moduleCache: { vue, 'lazy-storage': lazyStorage },
+    async getFile(url) {
+      const res = await fetch(url);
+      if (!res.ok) throw Object.assign(new Error(`${res.status} ${url}`), { res });
+      return { getContentData: asBinary => (asBinary ? res.arrayBuffer() : res.text()) };
+    },
+    addStyle(text) {
+      const style = document.createElement('style');
+      style.textContent = text;
+      document.head.appendChild(style);
+    }
+  };
+
+  vue.createApp(vue.defineAsyncComponent(() => loadModule('/vue-options/App.vue', options))).mount('#app');
+</script>

@@ -1,0 +1,97 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shared list (Vue)</title>
+<style>
+  body { font: 16px/1.4 system-ui, sans-serif; max-width: 32rem; margin: 3rem auto; padding: 0 1rem; color: #222; background: #fff; }
+  h1 { font-size: 1.4rem; }
+  .status, .presence { color: #666; font-size: 0.9rem; min-height: 1.4em; }
+  form { display: flex; gap: 0.5rem; margin: 1rem 0; }
+  input[type=text] { flex: 1; font: inherit; padding: 0.4rem 0.6rem; }
+  button { font: inherit; padding: 0.4rem 0.8rem; }
+  ul { list-style: none; padding: 0; }
+  li { display: flex; align-items: center; gap: 0.6rem; padding: 0.35rem 0; border-bottom: 1px solid #eee; }
+  li.done span { text-decoration: line-through; color: #999; }
+  li span { flex: 1; }
+  li button { padding: 0.1rem 0.5rem; }
+</style>
+
+<div id="app">
+  <h1>Shared list (Vue)</h1>
+  <p class="status">{{ statusText }}</p>
+  <form @submit.prevent="add">
+    <input type="text" v-model="title" placeholder="Add a task" autocomplete="off" autofocus>
+    <button>Add</button>
+  </form>
+  <ul>
+    <li v-for="task in store.tasks" :key="task.id" :class="{ done: task.done }">
+      <input type="checkbox" :checked="task.done" @change="toggle(task.id, $event.target.checked)">
+      <span>{{ task.title }}</span>
+      <button @click="remove(task.id)">x</button>
+    </li>
+  </ul>
+  <p class="presence">{{ presence.length ? 'Here now: ' + presence.join(', ') : '' }}</p>
+  <p><button @click="db.undo()">Undo</button> <button @click="db.redo()">Redo</button></p>
+</div>
+
+<script type="importmap">
+  {
+    "imports": {
+      "vue": "https://unpkg.com/vue@3/dist/vue.esm-browser.prod.js",
+      "lazy-storage": "/lib/lazy-storage/index.js",
+      "lazy-watch": "/lib/lazy-watch/lazy-watch.js"
+    }
+  }
+</script>
+<script type="module">
+  import { createApp, reactive, ref, computed } from 'vue';
+  import { LazyWatch, createClient, createConnection, webSocketTransport, localStorageOutbox } from 'lazy-storage';
+
+  const name = new URLSearchParams(location.search).get('name') || localStorage.getItem('example:name') || prompt('Your name?') || 'anonymous';
+  localStorage.setItem('example:name', name);
+
+  // The same `shared` store as the other example pages, seen as an array
+  const connection = createConnection({
+    transport: webSocketTransport(() => `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws?name=${encodeURIComponent(name)}`)
+  });
+  const db = createClient({ connection, store: 'shared', initial: { tasks: [] }, lists: ['tasks'], storage: localStorageOutbox('example:vue') });
+
+  /**
+   * Vue reads a reactive mirror of the client's state and writes to the
+   * client. Every batch the client sees, local or remote, is applied to the
+   * mirror in place (lazy-watch patches plain objects and arrays, which Vue
+   * tracks), so components re-render for a teammate's edit exactly as for
+   * their own. Wrapping db.state in reactive() would not work: remote
+   * patches land underneath Vue's proxy and nothing would re-render.
+   */
+  function useStore(db) {
+    const store = reactive(LazyWatch.snapshot(db.state));
+    db.watch(diff => LazyWatch.patch(store, diff));
+    const status = ref(db.status);
+    const presence = ref([]);
+    db.on('status', next => { status.value = next; });
+    db.on('presence', users => { presence.value = users; });
+    return { store, status, presence };
+  }
+
+  createApp({
+    setup() {
+      const { store, status, presence } = useStore(db);
+      const title = ref('');
+      const statusText = computed(() => (status.value === 'online' ? `Online as ${name}` : status.value === 'connecting' ? 'Connecting…' : `Offline as ${name}`));
+      const at = id => db.state.tasks.findIndex(task => task.id === id);
+      return {
+        db, store, presence, title, statusText,
+        add() {
+          const text = title.value.trim();
+          if (!text) return;
+          db.state.tasks.push({ title: text, done: false });      // an id is minted and written back
+          title.value = '';
+        },
+        toggle(id, done) { db.state.tasks[at(id)].done = done; },
+        remove(id) { db.state.tasks.splice(at(id), 1); }
+      };
+    }
+  }).mount('#app');
+  db.connect();
+</script>

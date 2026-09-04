@@ -9,6 +9,17 @@ no build step.
   tabs (or two browsers): edits appear everywhere, survive a reload while
   offline, and the server keeps them in `examples/basic/state.sqlite`.
   The page is 80 lines of vanilla JavaScript; the server 40.
+- **`vue/`**, **`vue-options/`**, and **`react/`** — the same list as a
+  Vue app (Composition API, inline), Vue single-file components (Options
+  API: `App.vue` owns the client, `SharedList.vue` is the list; compiled
+  in the browser by vue3-sfc-loader), and a React app, served by either
+  server at http://localhost:3200/vue,
+  http://localhost:3200/vue-options, and http://localhost:3200/react, on
+  the same store as the basic page, so all of them can be open at once.
+  Each loads its framework from a CDN through an import map, so there is
+  no build step. The Vue ones read a reactive mirror patched on every
+  batch and write to the client; React reads the client's state directly
+  and re-renders on every batch.
 - **`node/`** — the same page served by Node instead of Bun, with the `ws`
   package for sockets and `node:sqlite` for storage (Node 22.13 or later).
   `node examples/node/server.js`.
