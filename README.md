@@ -404,6 +404,14 @@ sessions yourself), which powers two more features:
   holds the list, this client's own entry included (its `replicaId` is
   `db.replicaId`), `db.on('peers', ...)` follows it, and `store.peers()`
   answers on the server. "Ann is editing this task" is a filter over it.
+  A change costs every session one small message: the whole list goes
+  only to a session that has just said hello, and after that only what
+  changed (a peer arriving, leaving, or sharing anew), batched per turn
+  of the server's event loop. `presenceEvery` on the store sends at most
+  one such message per that many milliseconds, changes within the window
+  going out together and a session's later share replacing its earlier
+  one, so a busy room or a deploy's reconnect storm costs each socket a
+  message per window rather than one per change.
 - **Eviction.** `store.closeSessions(user => ..., message)` ends the
   sessions a predicate selects — say, everyone who was just removed from a
   team. The client receives a `closed` event with `{ code: 'evicted',
@@ -429,6 +437,12 @@ A public server needs a few ceilings, all on by default:
   the client keeps the op and resends its outbox in a hello after that,
   so nothing is lost and a runaway client is throttled rather than
   broken. Ops inside a hello are not counted. `false` turns it off.
+- **Presence rate.** Presence travels as deltas, one small message to
+  every session per change, batched per turn of the event loop;
+  `presenceEvery` on the store (milliseconds, default 0) caps that at
+  one message per window, and `maxShare` (default 4096 bytes of JSON)
+  bounds what a session may share. A room of N sessions then costs N
+  small messages per window however many of them join, leave, or share.
 
 **Memory follows the stores in use** when the registry is given an idle
 time: `createStores(factory, { idle: 30 * 60_000 })` releases a store
@@ -546,7 +560,7 @@ runs on the synced state and shows in the array view like any other change.
 
 **Server** (`lazy-storage/server`)
 
-- `createStore({ initial, registers, readOnly, validate, maxSkew, retention, compactEvery, deltaLog, maxLeaves, rateLimit, storage, presenceKey, maxShare, onError, now })`; `store.epoch` — this life of the storage
+- `createStore({ initial, registers, readOnly, validate, maxSkew, retention, compactEvery, deltaLog, maxLeaves, rateLimit, storage, presenceKey, maxShare, presenceEvery, onError, now })`; `store.epoch` — this life of the storage
 - `store.observe(event, fn)` → unsubscribe — `'op'`, `'refused'`, `'session'`; `store.stats()` → `{ version, epoch, sessions, replicas, rows, tombstones, log }`
 - `store.session({ send, user, onEvict })` → `{ receive(message), close(), user, replicaId }` — one per connection, transport-agnostic
 - `store.closeSessions(predicate, message)` — evict sessions; `store.presence()` — distinct users with a live session; `store.peers()` — every live session as `{ replicaId, user, data }`
@@ -632,7 +646,7 @@ primitives anywhere, of anything at a register path).
 | `patch` | `diff`, `ts`, `v` | An accepted diff from any replica, and the version it made |
 | `ack` | `seq`, `ts`, `correction` | The op was merged; `correction` is a diff with the server's values at the leaves it lost, or null |
 | `error` | `seq?`, `code?`, `message`, `now?`, `ts?`, `retryAfter?` | With `seq`: that op was refused, for the reason in `code` (below). Without: the message itself was bad (not JSON, an unknown type, a hello without a replica id) |
-| `presence` | `users`, `peers` | The distinct users with a live session, and every session as `{ replicaId, user, data }` with what it shares; sent when a session says hello, ends, or shares something new |
+| `presence` | `peers`, or `left?`, `joined?`, `shared?` | With `peers`: every session as `{ replicaId, user, key, data }`, `key` being what presence groups users by and `data` what the session shares; sent right after the hello is answered. Otherwise a delta, applied in the order `left` (replica ids), `joined` (peers), `shared` (`{ replicaId, data }`), batched per `presenceEvery` |
 | `closed` | `code`, `message` | Final for this store on this socket; the client goes offline for it and does not reconnect on its own. Without a `store`: final for the socket, which the server then closes with code 4401; the connection stops reconnecting and every client on it reports the reason |
 | `pong` | | |
 

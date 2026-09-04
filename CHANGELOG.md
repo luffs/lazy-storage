@@ -44,7 +44,13 @@ All notable changes to lazy-storage are documented here. The format follows Keep
   client's own entry included), the `peers` event, and `store.peers()`;
   the Vue and React entries expose `peers` too. A share over `maxShare`
   bytes of JSON (a new store option, default 4096), or not JSON, is
-  refused with an `error` and changes nothing
+  refused with an `error` and changes nothing. Presence travels as
+  deltas: the whole list goes only to a session that has just said
+  hello, then `left`, `joined`, and `shared` for what changed, one small
+  message to every session per flush; `presenceEvery` (a new store
+  option, milliseconds, default 0) caps that at one message per window,
+  changes within it going out together, so a busy room or a reconnect
+  storm costs each socket a message per window rather than one per change
 
 ### Changed
 
@@ -58,7 +64,9 @@ All notable changes to lazy-storage are documented here. The format follows Keep
 - Presence is broadcast when a session says hello, ends, or shares
   something new, rather than when it opens: a peer needs its replica id,
   which the hello brings. `store.presence()` counts a session from its
-  hello as well, and a session that never says hello is not announced
+  hello as well, and a session that never says hello is not announced. The presence message no
+  longer carries `users`: peers carry `key`, what `presenceKey` groups
+  users by, and the client derives its presence list from them
 
 ## [0.7.0] - 2026-09-04
 

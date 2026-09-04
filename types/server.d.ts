@@ -119,6 +119,8 @@ export interface StoreOptions<S extends object = any> {
   maxLeaves?: number;
   /** The most a session may share with its peers, in bytes of JSON; default 4096 */
   maxShare?: number;
+  /** At most one presence message per this many milliseconds, changes within the window going out together; default 0 (one per turn of the event loop) */
+  presenceEvery?: number;
   /** Live ops a replica may send; default `{ burst: 500, perSecond: 100 }`, false disables */
   rateLimit?: RateLimit | false;
   storage?: ServerStorage;

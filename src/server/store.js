@@ -59,10 +59,14 @@
 //       replica, the receiving one included) and the version it made
 //   { t: 'ack', seq, ts, correction }           `correction` is a diff with
 //       the server's values at the leaves the op lost, or null
-//   { t: 'presence', users, peers }             distinct users with a live
-//       session, and every session as a peer { replicaId, user, data },
-//       `data` being what it shares. Sent to everyone when a session says
-//       hello, ends, or shares something new; nothing here is written
+//   { t: 'presence', peers }                    every session as a peer
+//       { replicaId, user, key, data }: `key` is what presence groups
+//       users by, `data` what the session shares. Sent to a session right
+//       after its hello is answered; from then on it gets
+//   { t: 'presence', left?, joined?, shared? }  what changed, applied in
+//       that order: replica ids gone, peers arrived, { replicaId, data }
+//       for peers sharing anew. Changes are batched (see presenceEvery);
+//       nothing here is written
 //   { t: 'closed', code, message }              this session is over
 //       (code 'evicted'; hubs also send 'forbidden', 'unknown-store', 'invalid-store')
 //   { t: 'error', seq?, code?, message, now?, ts? }  a refused op carries its
@@ -162,6 +166,10 @@ const defaultPresenceKey = user =>
  *   dedupes users (default: by `id`)
  * @param {number} [options.maxShare=4096] - the most a session may share
  *   with its peers, in bytes of JSON; more is refused with 'too-large'
+ * @param {number} [options.presenceEvery=0] - at most one presence message
+ *   per this many milliseconds (wall clock): changes within the window go
+ *   out together, a session's later share replacing its earlier one. 0
+ *   still sends what one turn of the event loop brought as one message
  * @param {(error: any) => void} [options.onError] - where faults that are
  *   not a client's (an observer that throws) are reported; default console
  * @param {() => number} [options.now] - wall clock (injectable for tests)
@@ -180,11 +188,13 @@ export function createStore({
   storage = memoryStorage(),
   presenceKey = defaultPresenceKey,
   maxShare = 4096,
+  presenceEvery = 0,
   onError = err => console.error('lazy-storage:', err),
   now
 } = {}) {
   if (validate !== undefined && typeof validate !== 'function') throw new TypeError('validate must be a function');
   if (!(maxShare > 0)) throw new TypeError('maxShare must be a positive number of bytes');
+  if (!(presenceEvery >= 0)) throw new TypeError('presenceEvery must be a number of milliseconds');
   if (rateLimit && !(rateLimit.burst > 0 && rateLimit.perSecond > 0)) throw new TypeError('rateLimit needs positive burst and perSecond');
   const time = now ?? Date.now;
   const regs = registerSet(registers);
@@ -279,15 +289,77 @@ export function createStore({
     return [...seen.values()];
   }
 
-  /** Every session that has said hello: its replica id, its user, and what it shares */
+  /** A session as its peers see it: replica id, user with the key presence groups by, and what it shares */
+  function peerOf(s) {
+    const peer = { replicaId: s.replicaId };
+    if (s.user !== undefined) {
+      peer.user = s.user;
+      peer.key = presenceKey(s.user);
+    }
+    if (s.shared !== undefined) peer.data = s.shared;
+    return peer;
+  }
+
+  /** Every session that has said hello */
   function peers() {
     const list = [];
-    for (const s of sessions) if (s.replicaId) list.push({ replicaId: s.replicaId, user: s.user, data: s.shared });
+    for (const s of sessions) if (s.replicaId) list.push(peerOf(s));
     return list;
   }
 
-  function broadcastPresence() {
-    broadcast({ t: 'presence', users: presence(), peers: peers() });
+  // Presence travels as deltas. A session joining, leaving, or sharing
+  // anew is noted here and goes out with the next flush, at most once per
+  // `presenceEvery`, so a burst (a deploy's reconnect storm, a busy room's
+  // shares) costs every socket one small message per window rather than
+  // the whole list per change; within a window a session's later share
+  // replaces its earlier one, and a join followed by a leave is just the
+  // leave (harmless where the join was never heard of). Only a newcomer
+  // gets the whole list, right after its hello is answered.
+  let pending = new Map();   // session -> { joined, left, shared } since the last flush
+  let cancelFlush = null;    // cancels the scheduled flush; null when none is
+  let flushedAt = -Infinity;
+
+  function noteChange(s, what) {
+    let entry = pending.get(s);
+    if (!entry) pending.set(s, (entry = { joined: false, left: false, shared: false }));
+    if (what === 'leave') Object.assign(entry, { joined: false, shared: false, left: true });
+    else entry[what === 'join' ? 'joined' : 'shared'] = true;
+    if (cancelFlush) return;
+    const wait = presenceEvery > 0 ? Math.max(0, flushedAt + presenceEvery - Date.now()) : 0;
+    let timer;
+    if (wait > 0) {
+      timer = setTimeout(flushPresence, wait);
+      cancelFlush = () => clearTimeout(timer);
+    } else if (typeof setImmediate === 'function') {
+      // After this turn of the event loop, so what one poll of the sockets brought goes out together
+      timer = setImmediate(flushPresence);
+      cancelFlush = () => clearImmediate(timer);
+    } else {
+      timer = setTimeout(flushPresence, 0);
+      cancelFlush = () => clearTimeout(timer);
+    }
+    if (typeof timer?.unref === 'function') timer.unref();
+  }
+
+  function flushPresence() {
+    cancelFlush = null;
+    flushedAt = Date.now();
+    const changes = pending;
+    pending = new Map();
+    const joined = [];
+    const left = [];
+    const shared = [];
+    for (const [s, entry] of changes) {
+      if (entry.left) left.push(s.replicaId);
+      else if (entry.joined) joined.push(peerOf(s));
+      else if (entry.shared) shared.push(s.shared === undefined ? { replicaId: s.replicaId } : { replicaId: s.replicaId, data: s.shared });
+    }
+    if (!joined.length && !left.length && !shared.length) return;
+    const message = { t: 'presence' };
+    if (left.length) message.left = left;
+    if (joined.length) message.joined = joined;
+    if (shared.length) message.shared = shared;
+    broadcast(message);
   }
 
   /** Set what a session shares (JSON within maxShare; null clears); true when it changed */
@@ -561,14 +633,20 @@ export function createStore({
             // applies corrections last
             const corrections = lost.length ? [correction(lost)] : [];
             send(catchUp(msg.replicaId, msg.since, msg.epoch, refused, corrections));
-            // With a replica id the session is a peer everyone can see; a
-            // re-hello on the same session changes nothing unless it shares anew
-            if (joined || shared) broadcastPresence();
+            // The newcomer gets the whole picture now; everyone else hears
+            // of it with the next flush. A re-hello on the same session
+            // changes nothing unless it shares anew
+            if (joined) {
+              send({ t: 'presence', peers: peers() });
+              noteChange(s, 'join');
+            } else if (shared) {
+              noteChange(s, 'share');
+            }
             return;
           }
           case 'share': {
             try {
-              if (setShared(s, msg.data) && s.replicaId) broadcastPresence();
+              if (setShared(s, msg.data) && s.replicaId) noteChange(s, 'share');
             } catch (err) {
               send({ t: 'error', code: err.code, message: err.message });
             }
@@ -595,7 +673,7 @@ export function createStore({
       },
       close() {
         if (!sessions.delete(s)) return;
-        if (s.replicaId) broadcastPresence();
+        if (s.replicaId) noteChange(s, 'leave');
         if (observers.session.size) notify('session', { event: 'close', user, replicaId: s.replicaId, sessions: sessions.size });
       }
     };
@@ -677,6 +755,10 @@ export function createStore({
     dispose() {
       storage.flush();
       for (const s of [...sessions]) s.close();
+      // Nobody is left to tell
+      cancelFlush?.();
+      cancelFlush = null;
+      pending = new Map();
       LazyWatch.dispose(state);
     }
   };

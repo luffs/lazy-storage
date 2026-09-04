@@ -169,8 +169,9 @@ function build({
   let link = null;        // attachment to the connection while connected
   let synced = false;     // this store's snapshot has landed on this socket
   let lastStatus = 'offline';
-  let presence = [];      // distinct users with a live session on this store
-  let peers = [];         // every live session on this store, with what it shares
+  let presence = [];      // distinct users with a live session on this store, derived from the peers
+  let peerMap = new Map(); // replicaId -> peer: every live session on this store, with what it shares
+  let peers = [];         // the same as a list
   let shared;             // what this client shares with them (undefined: nothing)
   let ended = null;       // { code, message } after the server closed this store for us
   let retryTimer = null;  // a hello scheduled after a rate-limit refusal
@@ -217,21 +218,66 @@ function build({
   const stopStatus = connection.on('status', refreshStatus);
 
   function setPresence(users) {
-    if (users.length === 0 && presence.length === 0) return;
+    if (JSON.stringify(users) === JSON.stringify(presence)) return;
     presence = users;
     emit('presence', presence);
   }
 
-  function setPeers(list) {
-    if (list.length === 0 && peers.length === 0) return;
-    peers = list;
+  /** The users behind the peers, distinct by the key the server groups them with, in order of arrival */
+  function usersOf() {
+    const seen = new Map();
+    for (const peer of peerMap.values()) if (peer.key !== undefined && !seen.has(peer.key)) seen.set(peer.key, peer.user);
+    return [...seen.values()];
+  }
+
+  const isPeer = peer => Utils.isPlainObject(peer) && typeof peer.replicaId === 'string';
+  const sameJSON = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
+  /**
+   * Presence arrived: the whole list (`peers`, right after our hello), or
+   * what changed since (`left`, `joined`, `shared`, applied in that
+   * order). What is already known as it is, our own join among it, is
+   * no change
+   */
+  function applyPresence(msg) {
+    let changed = false;
+    let users = false;
+    if (Array.isArray(msg.peers)) {
+      const before = [...peerMap.values()];
+      peerMap = new Map();
+      for (const peer of msg.peers) if (isPeer(peer)) peerMap.set(peer.replicaId, peer);
+      changed = users = !sameJSON(before, [...peerMap.values()]);
+    } else {
+      for (const id of Array.isArray(msg.left) ? msg.left : []) if (peerMap.delete(id)) changed = users = true;
+      for (const peer of Array.isArray(msg.joined) ? msg.joined : []) {
+        if (!isPeer(peer) || sameJSON(peerMap.get(peer.replicaId), peer)) continue;
+        peerMap.set(peer.replicaId, peer);
+        changed = users = true;
+      }
+      for (const share of Array.isArray(msg.shared) ? msg.shared : []) {
+        const peer = Utils.isPlainObject(share) ? peerMap.get(share.replicaId) : undefined;
+        if (!peer || sameJSON(peer.data, share.data)) continue;
+        const next = { ...peer };
+        if (share.data === undefined) delete next.data;
+        else next.data = share.data;
+        peerMap.set(peer.replicaId, next);
+        changed = true;
+      }
+    }
+    if (!changed) return;
+    peers = [...peerMap.values()];
     emit('peers', peers);
+    if (users) setPresence(usersOf());
   }
 
   /** Offline, or the store ended for us: nobody is there to see */
   function clearPresence() {
+    peerMap = new Map();
+    if (peers.length) {
+      peers = [];
+      emit('peers', peers);
+    }
     setPresence([]);
-    setPeers([]);
   }
 
   /** Drop acknowledged ops (seq and below) from the outbox and its persistence */
@@ -400,8 +446,7 @@ function build({
         emit('sync');
         return;
       case 'presence':
-        setPresence(Array.isArray(msg.users) ? msg.users : []);
-        setPeers(Array.isArray(msg.peers) ? msg.peers : []);
+        applyPresence(msg);
         return;
       case 'closed': {
         // Final for this store: evicted, forbidden, or unknown. Detach and
@@ -568,7 +613,7 @@ function build({
     get version() { return known.v; },
     /** Distinct users with a live session on this store (empty while offline) */
     get presence() { return presence; },
-    /** Every live session on this store, `{ replicaId, user, data }`, this client's own included (by `replicaId`) */
+    /** Every live session on this store, `{ replicaId, user, key, data }`, this client's own included (by `replicaId`); `key` is what presence groups users by */
     get peers() { return peers; },
     /** What this client shares with its peers, or undefined */
     get shared() { return shared; },
