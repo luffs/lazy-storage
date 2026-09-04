@@ -127,18 +127,18 @@ test('a newer deletion beats an older concurrent edit, and the editor drops the 
   assert.deepEqual(snap(b), store.snapshot());
 });
 
-test('an array outside a register is reverted locally, reported, and never sent', async () => {
+test('an array of records outside a register is reverted locally, reported, and never sent', async () => {
   const { store, net } = setup();
   const a = net.client({ replicaId: 'a', initial: INITIAL, registers: REGISTERS });
   await net.settle();
   const errors = [];
   a.on('error', err => errors.push(err));
 
-  a.state.tags = ['urgent'];
+  a.state.tags = [{ id: 'urgent' }];
   await net.settle();
 
   assert.equal(errors.length, 1);
-  assert.match(errors[0].message, /Arrays are not allowed at "tags"/);
+  assert.match(errors[0].message, /The array at "tags" holds objects/);
   assert.equal(a.state.tags, undefined, 'the write was rolled back');
   assert.equal(a.pending, 0, 'nothing was queued');
   assert.equal(store.state.tags, undefined);

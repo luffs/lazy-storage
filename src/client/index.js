@@ -41,6 +41,7 @@ import { randomId } from '../core/ids.js';
 import { memoryOutbox } from './storage.js';
 import { createConnection } from './connection.js';
 import { createPersistence, isRowAdapter } from './persistence.js';
+import { createList } from './list.js';
 
 const { Utils } = LazyWatch;
 const REMOTE = { origin: 'remote' };
@@ -455,6 +456,8 @@ function build({
     connect,
     disconnect,
     collection,
+    /** An ordered list of records under `path`: a keyed map with a position on each record (see list.js) */
+    list: (path, options) => createList(state, path, options),
     /** Subscribe to state changes (a LazyWatch listener; meta.origin tells remote from local) */
     watch: (listener, options) => LazyWatch.on(state, listener, options),
     /**

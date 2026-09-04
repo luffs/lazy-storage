@@ -64,12 +64,52 @@ change addresses a record by identity, so two people adding, editing, or
 removing different records never collide, and an edit made on a stale
 replica still lands on the record it meant.
 
-Arrays are allowed only at declared **registers**: paths whose value is one
-unit, written wholesale and resolved as a whole (an ordering of ids, a set
-of tags). A `*` segment matches any one segment, so `tasks/*/subtaskOrder`
-declares one register per task. Anywhere else an array write is reverted
-on the client and reported through the `error` event, and refused by the
-server.
+Arrays are **whole values**. An array of primitives (a set of tags, a list
+of ids, a pair of coordinates) may live anywhere; it is written and merged
+as one leaf, so the newer array wins as a unit. An array holding objects
+is refused, on the client (reverted and reported through the `error`
+event) and on the server, because a list of records with unit semantics
+would lose one person's add whenever another person reordered. A list of
+records is a keyed map with a position on each record, below. The
+`registers` option remains for storing an array of anything as one value
+on purpose: a `*` segment matches any one segment, so `tasks/*/subtaskOrder`
+declares one register per task, and a client whose declaration differs
+from the server's is told so.
+
+## Lists
+
+An ordered list of records is a keyed map whose records each carry a
+**position key**, and `db.list(path)` is its ordered view:
+
+```js
+const tasks = db.list('tasks');                    // state.tasks, an object keyed by id
+tasks.all()                                        // records sorted by position, ties by id
+const id = tasks.add({ title: 'Milk' });           // at the end; or { before: id }, { after: id }, { at: index }
+tasks.move(id, { at: 0 });
+tasks.remove(id);
+db.list(['tasks', id, 'subtasks']).add({ title: 'Skimmed' });   // nested lists are just paths
+```
+
+An add or a move writes one field, `pos`, on one record, and nothing else
+in the list changes. So two people inserting at the same spot while apart
+both keep their records, in the same order everywhere (ties fall to the
+id); a move never loses to an unrelated edit; and a deletion is just the
+record's deletion. The server needs no declaration and holds no order
+register. Keys are short strings that sort as strings: appending counts
+up (`a0`, `a1`, ... `az`, `b00`), and only inserting between two existing
+keys lengthens one, by a character every few inserts at the very same
+spot.
+
+An app that keeps its own array (a drag-and-drop list, a Vue store) hands
+the order back with `tasks.reconcile(ids)`, which writes the fewest
+positions that make the sort agree: the longest run of records already in
+order keeps its keys. Records without a position sort last until placed.
+
+Moving from an order register: `orderToPositions(store, { list: 'tasks',
+order: 'taskOrder' })` on the server gives every record a position in the
+register's order and deletes the register in one patch, wildcards
+included (`{ list: 'tasks/*/subtasks', order: 'tasks/*/subtaskOrder' }`).
+Then drop the register from both sides' declarations.
 
 ## How conflicts resolve
 
@@ -396,6 +436,7 @@ replaced by a leaf) drops the affected steps.
 - `db.store`, `db.connection` — the store id and the connection
 - `db.presence` — users with a live session on this store; `db.closed` — `{ code, message }` after the server ended this store for us, else null
 - `db.collection(name)` — `add(record) → id`, `update(id, fields)`, `remove(id)`, `get(id)`, `has(id)`, `ids()`, `all()`
+- `db.list(path, { position })` — an ordered list of records: `all()`, `ids()`, `get(id)`, `has(id)`, `add(record, where) → id`, `move(id, where)`, `remove(id)`, `reconcile(ids) → written`, `keyFor(where)`; `where` is `{ before }`, `{ after }`, `{ at }`, or nothing for the end
 - `db.connect()`, `db.disconnect()`, `db.status` (`'offline' | 'connecting' | 'online'`), `db.pending`
 - `db.watch(listener)` — state changes; `meta?.origin === 'remote'` marks the server's
 - `db.on('status' | 'error' | 'sync' | 'presence' | 'closed', fn)` — lifecycle events; a refused op is an error with a `code` (`forbidden`, `expired`, `invalid`, `too-large` drop the op; `rate-limited` keeps it and retries; `clock-skew` is handled without one)
@@ -416,6 +457,7 @@ replaced by a leaf) drops the affected steps.
 - `store.compact()` → `{ tombstones, replicas }` removed; `store.compactTombstones(olderThan)`, `store.flush()`, `store.dispose()`
 - `memoryStorage()`, `jsonFileStorage(path, { debounce })`
 - `createStores(factory, { idle, sweepEvery, now })` → `get(id)`, `has(id)`, `ids()`, `release(id)`, `sweep()`, `dispose()`; `isStoreId(id)`
+- `orderToPositions(store, { list, order, position })` → `{ lists, records }` — migrate an order register to positions
 - `createHub(resolveStore, { send, user, authorize, onError })` → `{ receive(message), close(), stores, user }` — the server side of a multiplexed connection, session-shaped
 - `toJSON(message)` — a message's JSON, encoded once however many sockets it goes to; use it in a transport of your own so a broadcast is not re-encoded per socket (`tagStore(message, id)` is what a hub does)
 
@@ -437,7 +479,8 @@ the Node entry's need `@types/node`.
 
 **Core** (`lazy-storage/core`): the pieces both sides share — `createClock`,
 `compareTs`, `mergeOp`, `leaves`, `expandRegisters`, `rebuild`, `registerSet`,
-`compactTombstones`, `randomId`.
+`compactTombstones`, `randomId`, and the position keys: `keyBetween(a, b)`,
+`keysBetween(a, b, n)`, `comparePositions`, `isPositionKey`.
 
 ## Wire protocol
 

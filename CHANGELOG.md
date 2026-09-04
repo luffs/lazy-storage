@@ -16,6 +16,43 @@ All notable changes to lazy-storage are documented here. The format follows Keep
   Node server test waited on the same missing event and hung the Node 22
   CI job until it was cancelled
 
+## [Unreleased]
+
+Lists stop being two things. A list of records is a keyed map with a
+position on each record, ordered by `db.list`; an array of primitives is a
+whole value anywhere, undeclared. Order registers keep working, and
+`orderToPositions` migrates them.
+
+### Added
+
+- **`db.list(path)`: ordered lists without a register.** Every record
+  carries a position key (`pos` by default); the list's order is the keys'
+  string order, ties by id, unpositioned records last. `add` (at the end,
+  or `{ before }`, `{ after }`, `{ at }`), `move`, `remove`, `all`, `ids`,
+  `get`, `has`, and `reconcile(ids)`, which takes the order an app shows
+  and writes the fewest positions that make the sort agree. An add or a
+  move writes one field on one record, so concurrent inserts at the same
+  spot both survive and a move never loses to an unrelated edit. Nested
+  lists are just paths. The server needs no declaration
+- **Position keys** in core: `keyBetween(a, b)`, `keysBetween(a, b, n)`,
+  `comparePositions`, `isPositionKey`. Fractional indexing over base 62
+  with a length-prefixed integer part, so appends and prepends count
+  compactly and only inserts between two keys grow a fraction
+- `orderToPositions(store, { list, order, position })` on the server:
+  gives every record of a list a position in its order register's order,
+  deletes the register, in one patch; `*` patterns migrate a list per
+  record
+
+### Changed
+
+- **Arrays of primitives are whole values anywhere**, no declaration
+  needed: written and merged as one leaf, and a client expands lazy-watch's
+  fragments from the live value for any array it touches. An array
+  holding objects is still refused, now with a message pointing at
+  `db.list`, unless its path is a declared register. Fragments arriving at
+  the server are refused as before. The `registers` option and the
+  mismatch check are unchanged for what is declared
+
 ## [0.5.1] - 2026-09-03
 
 ### Changed

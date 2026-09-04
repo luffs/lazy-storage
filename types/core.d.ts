@@ -85,6 +85,18 @@ export function assertModel(diff: Diff, registers: RegisterSet): void;
 /** Replace every register fragment in a diff with the register's whole value from the live state */
 export function expandRegisters(diff: Diff, registers: RegisterSet, state: object): Diff;
 export function fromLeaves(entries: Leaf[]): Diff;
+/** An array whose every element is a primitive or null: a whole value anywhere in the state */
+export function isPrimitiveArray(value: unknown): value is Array<string | number | boolean | null>;
+
+// --- Positions (ordered lists) --------------------------------------------------------
+
+/** A key strictly between `a` and `b`; null on a side means no bound. Both null: the first key */
+export function keyBetween(a: string | null, b: string | null): string;
+/** `n` ordered keys strictly between `a` and `b` */
+export function keysBetween(a: string | null, b: string | null, n: number): string[];
+export function isPositionKey(key: unknown): key is string;
+/** By key, a missing key last, ties by id */
+export function comparePositions(keyA: unknown, idA: string, keyB: unknown, idB: string): number;
 /** `initial` with rows applied on top, shallow paths first; a `null` value deletes the path */
 export function rebuild<S extends object>(initial: S, rows: Row[]): S;
 export function isArrayish(value: unknown): boolean;

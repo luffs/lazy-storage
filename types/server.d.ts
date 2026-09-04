@@ -255,6 +255,18 @@ export interface Hub {
 
 export function createHub(resolveStore: StoreResolver, options: HubOptions): Hub;
 
+export interface OrderMigration {
+  /** The keyed map's path pattern (register syntax, `*` allowed) */
+  list: RegisterSpec;
+  /** The order register's path pattern; its `*`s match the list's in turn */
+  order: RegisterSpec;
+  /** The field to write (default 'pos') */
+  position?: string;
+}
+
+/** Give every record of a list a position in its order register's order, and delete the register, in one patch */
+export function orderToPositions(store: Store, mapping: OrderMigration): { lists: number; records: number };
+
 /** A message's JSON, encoded once and remembered on the object, however many sockets it goes to */
 export function toJSON(message: object): string;
 /** `{ ...message, store }`, keeping the payload's remembered JSON */

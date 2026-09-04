@@ -7,12 +7,13 @@ import { registerSet } from '../src/core/paths.js';
 const T = (ms, id = 'x') => [ms, 0, id];
 const NONE = registerSet([]);
 
-test('leaves flattens objects, keeps null as a deletion, and rejects arrays outside registers', () => {
+test('leaves flattens objects, keeps null as a deletion, takes primitive arrays whole, and rejects arrays of records outside registers', () => {
   assert.deepEqual(
     leaves({ tasks: { a: { title: 'A', done: false }, b: null }, n: 1 }, NONE),
     [[['tasks', 'a', 'title'], 'A'], [['tasks', 'a', 'done'], false], [['tasks', 'b'], null], [['n'], 1]]
   );
-  assert.throws(() => leaves({ tags: ['x'] }, NONE), ModelError);
+  assert.deepEqual(leaves({ tags: ['x'] }, NONE), [[['tags'], ['x']]], 'an array of primitives is one leaf anywhere');
+  assert.throws(() => leaves({ tags: [{ id: 'x' }] }, NONE), ModelError);
   assert.throws(() => leaves({ tags: { 0: 'x', $length: 1 } }, NONE), ModelError);
   const regs = registerSet(['order']);
   assert.deepEqual(leaves({ order: ['b', 'a'] }, regs), [[['order'], ['b', 'a']]]);
@@ -29,7 +30,7 @@ test('register patterns may use * for one segment, declaring a register per reco
     leaves({ tasks: { a: { subtaskOrder: ['s2', 's1'], title: 'A' } }, order: ['a'] }, regs),
     [[['tasks', 'a', 'subtaskOrder'], ['s2', 's1']], [['tasks', 'a', 'title'], 'A'], [['order'], ['a']]]
   );
-  assert.throws(() => leaves({ tasks: { a: { tags: ['x'] } } }, regs), ModelError, 'an array at a non-matching path is still refused');
+  assert.throws(() => leaves({ tasks: { a: { subtasks: [{ id: 'x' }] } } }, regs), ModelError, 'an array of records at a non-matching path is refused');
   const state = { tasks: { a: { subtaskOrder: ['s1', 's2', 's3'] } } };
   assert.deepEqual(
     expandRegisters({ tasks: { a: { subtaskOrder: { 2: 's3', $length: 3 }, title: 'A' } } }, regs, state),

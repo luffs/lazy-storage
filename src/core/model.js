@@ -1,15 +1,19 @@
 // model.js - The data model lazy-storage imposes on top of lazy-watch
 //
-// State is a tree of plain objects and JSON leaves. Lists are objects
-// keyed by id (see lazy-watch's "Lists as Keyed Maps" recipe), so an edit
+// State is a tree of plain objects and JSON leaves. Lists of records are
+// objects keyed by id (see lazy-watch's "Lists as Keyed Maps" recipe) with
+// a position on each record for their order (client/list.js), so an edit
 // or deletion addresses a record by identity and two writers never
-// collide on a position. Arrays are allowed only at declared REGISTER
-// paths, where the whole value is one unit: written wholesale, resolved
-// last-writer-wins as a unit (an ordering of ids, a set of tags).
+// collide on a slot. Arrays are whole values: an array of primitives (a
+// set of tags, a list of ids, a pair of coordinates) may live anywhere
+// and is written and merged as one leaf, last-writer-wins as a unit. An
+// array holding objects is refused, since giving a list of records unit
+// semantics loses concurrent edits, unless its path is a declared
+// REGISTER, which stores any array as one value on purpose.
 //
 // A diff is flattened into LEAVES, [path, value], for the merge: objects
-// recurse, `null` is a deletion leaf, primitives and register values are
-// leaves. The merge decides per leaf and rebuilds the accepted diff.
+// recurse, `null` is a deletion leaf, primitives and arrays are leaves.
+// The merge decides per leaf and rebuilds the accepted diff.
 //
 // `registers` everywhere below is the matcher from registerSet(): patterns
 // may contain `*` segments, so 'tasks/*/subtaskOrder' declares one
@@ -31,9 +35,14 @@ export class ModelError extends TypeError {
 export const isArrayish = value =>
   Array.isArray(value) || (Utils.isPlainObject(value) && Utils.hasArrayMarker(value));
 
+/** An array whose every element is a primitive (or null): a whole value anywhere */
+export const isPrimitiveArray = value =>
+  Array.isArray(value) && value.every(item => item === null || (typeof item !== 'object' && typeof item !== 'function'));
+
 /**
- * Flatten a diff into leaves. Throws a ModelError for an array outside a
- * register, or an array fragment at a register (registers are whole values).
+ * Flatten a diff into leaves. Throws a ModelError for an array fragment
+ * (arrays travel whole), or for an array holding objects outside a
+ * register (a list of records belongs in a keyed map).
  * @param {Object} diff
  * @param {{ matches: (path: string[]) => boolean }} registers - from registerSet()
  * @param {string[]} [path]
@@ -47,16 +56,20 @@ export function leaves(diff, registers, path = [], out = []) {
   for (const key of Object.keys(diff)) {
     const value = diff[key];
     const p = [...path, key];
-    if (registers.matches(p)) {
-      if (Utils.isPlainObject(value) && Utils.hasArrayMarker(value)) {
-        throw new ModelError(`Register "${p.join('/')}" must be written as a whole value, not an array fragment`, p);
+    if (Utils.isPlainObject(value) && Utils.hasArrayMarker(value)) {
+      throw new ModelError(`The array at "${p.join('/')}" must be written as a whole value, not a fragment`, p);
+    }
+    if (Array.isArray(value)) {
+      if (!registers.matches(p) && !isPrimitiveArray(value)) {
+        throw new ModelError(
+          `The array at "${p.join('/')}" holds objects: keep a list of records as an object keyed by id with positions (db.list), or declare the path a register to store the array as one value`, p);
       }
       out.push([p, value]);
       continue;
     }
-    if (isArrayish(value)) {
-      throw new ModelError(
-        `Arrays are not allowed at "${p.join('/')}": store lists as objects keyed by id, or declare the path a register`, p);
+    if (registers.matches(p)) {
+      out.push([p, value]);
+      continue;
     }
     if (Utils.isPlainObject(value) && Object.keys(value).length > 0) {
       leaves(value, registers, p, out);
@@ -74,18 +87,17 @@ export function assertModel(diff, registers) {
 
 /**
  * lazy-watch emits array changes as fragments ({ 2: 'c', $length: 3 }).
- * Registers travel as whole values, so replace every register node the
- * diff touches with a deep copy of the register's current value from the
- * live state (`null` when it was deleted).
+ * Arrays travel as whole values, so replace every array the diff touches
+ * (a fragment, a whole array, or a register node) with a deep copy of its
+ * current value from the live state (`null` when it was deleted).
  * @param {Object} diff
  * @param {{ matches: (path: string[]) => boolean, size: number }} registers
  * @param {Object} state - live state (a LazyWatch proxy or plain object)
  */
 export function expandRegisters(diff, registers, state) {
-  if (registers.size === 0) return diff;
-  // Only the registers the diff touches are read, and each is copied on
-  // its own: snapshotting the whole state here would make every local
-  // batch cost as much as the state is large
+  // Only the arrays the diff touches are read, and each is copied on its
+  // own: snapshotting the whole state here would make every local batch
+  // cost as much as the state is large
   const copy = value => {
     if (value === undefined) return null;
     if (value === null || typeof value !== 'object') return value;
@@ -96,7 +108,8 @@ export function expandRegisters(diff, registers, state) {
     const out = {};
     for (const key of Object.keys(node)) {
       const p = [...path, key];
-      out[key] = registers.matches(p) ? copy(valueAt(state, p)) : walk(node[key], p);
+      const value = node[key];
+      out[key] = registers.matches(p) || isArrayish(value) ? copy(valueAt(state, p)) : walk(value, p);
     }
     return out;
   };

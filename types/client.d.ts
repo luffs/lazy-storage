@@ -166,6 +166,40 @@ export interface Collection<T extends { id?: string } = any> {
   all(): T[];
 }
 
+/** Where a record goes: before or after another, at an index, or (nothing) at the end */
+export interface ListSlot {
+  before?: string;
+  after?: string;
+  at?: number;
+}
+
+/**
+ * An ordered list of records: a keyed map under `path` with a position
+ * key on every record. Adds and moves write one field on one record.
+ */
+export interface List<T extends { id?: string } = any> {
+  readonly path: string[];
+  /** Records in list order: by position, ties by id, unpositioned last */
+  all(): T[];
+  ids(): string[];
+  get(id: string): T | undefined;
+  has(id: string): boolean;
+  /** Add a record; its id is minted unless provided. Returns the id */
+  add(record: Omit<T, 'id'> & { id?: string }, where?: ListSlot): string;
+  /** Move a record; false when it does not exist. Writes nothing when it is already there */
+  move(id: string, where?: ListSlot): boolean;
+  remove(id: string): boolean;
+  /** Make the list sort as `ids`, writing the fewest positions; returns how many. Unlisted records follow */
+  reconcile(ids: Iterable<string>): number;
+  /** The key a record would get for `where` */
+  keyFor(where?: ListSlot): string;
+}
+
+export interface ListOptions {
+  /** The field holding the position key (default 'pos') */
+  position?: string;
+}
+
 export interface ClientEvents {
   status: ClientStatus;
   error: ClientError;
@@ -198,6 +232,8 @@ export interface Client<S extends object = any> {
   /** Detach this store; an owned connection closes, a shared one stays up for the others */
   disconnect(): void;
   collection<T extends { id?: string } = any>(name: string): Collection<T>;
+  /** An ordered list of records under `path` ('tasks', 'tasks/x/subtasks', or segments) */
+  list<T extends { id?: string } = any>(path: string | string[], options?: ListOptions): List<T>;
   /** Subscribe to state changes; `meta?.origin === 'remote'` marks the server's */
   watch(listener: ChangeListener<S>, options?: ListenerOptions): Unsubscribe;
   on<E extends keyof ClientEvents>(event: E, fn: (payload: ClientEvents[E]) => void): Unsubscribe;
