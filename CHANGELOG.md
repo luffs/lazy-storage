@@ -23,6 +23,19 @@ All notable changes to lazy-storage are documented here. The format follows Keep
   `connection.on('closed')` carry the reason, and every client on it
   reports it as its own `closed`. `connect()` is the way back once the
   app has fresh credentials: the transport factory runs afresh
+- **Vue and React entries.** `lazy-storage/vue` exports `useClient(db)`:
+  a reactive mirror of the client's state, patched in place on every
+  batch, local or remote, with refs for its status, presence, outbox
+  size, closed reason, and undo state; it stops with the component (or
+  the current effect scope), and fills `data()` in the Options API as
+  well. `lazy-storage/react` exports `useClient(db)`, which reads the
+  client's state and facts through `useSyncExternalStore` with one
+  subscription per client, and `trackClient(db)` underneath it. Both
+  frameworks are optional peers; the examples use the entries
+- A `history` event on the client, carrying `{ canUndo, canRedo }` after
+  a local batch, an undo, a redo, or `clearHistory()`. The undo manager
+  moves its stacks after the batch it emits, so a listener on that batch
+  reads them stale; this is the moment to read them
 
 ### Changed
 

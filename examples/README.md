@@ -17,9 +17,10 @@ no build step.
   http://localhost:3200/vue-options, and http://localhost:3200/react, on
   the same store as the basic page, so all of them can be open at once.
   Each loads its framework from a CDN through an import map, so there is
-  no build step. The Vue ones read a reactive mirror patched on every
-  batch and write to the client; React reads the client's state directly
-  and re-renders on every batch.
+  no build step. The Vue ones use `useClient` from `lazy-storage/vue` (a
+  reactive mirror patched on every batch, and writes to the client); the
+  React one `useClient` from `lazy-storage/react` (the client's state
+  read directly, re-rendered on every batch).
 - **`node/`** — the same page served by Node instead of Bun, with the `ws`
   package for sockets and `node:sqlite` for storage (Node 22.13 or later).
   `node examples/node/server.js`.

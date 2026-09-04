@@ -52,7 +52,7 @@ const REMOTE = { origin: 'remote' };
 const SNAPSHOT = { origin: 'remote', snapshot: true };
 const RESTORE = { origin: 'restore' };
 const HISTORY = new Set(['undo', 'redo']);
-const EVENTS = ['status', 'error', 'sync', 'closed', 'presence'];
+const EVENTS = ['status', 'error', 'sync', 'closed', 'presence', 'history'];
 // A hello carries at most this many ops, so it stays under any payload
 // limit after a long offline spell; the rest go as ops once the answer
 // lands, the way edits made during the hello do
@@ -306,7 +306,20 @@ function build({
     persistence.batch(expanded, meta);
     if (status() === 'online') link.send({ t: 'op', op });
     emit('sync');
+    // The undo manager listens ahead of this, so the batch is in history by now
+    if (undoManager) emit('history', history());
   });
+
+  /** What undo and redo can do right now, for the 'history' event */
+  const history = () => ({ canUndo: undoManager.canUndo, canRedo: undoManager.canRedo });
+
+  /** Run an undo-manager method, then report where history stands: its stacks move after the batch it emits */
+  function travel(method) {
+    if (!undoManager) return false;
+    const done = undoManager[method]();
+    if (done !== false) emit('history', history());
+    return done;
+  }
 
   /**
    * The (re)connect message: the outbox (its first HELLO_LIMIT ops) and,
@@ -551,20 +564,22 @@ function build({
     /**
      * Lifecycle events: 'status' (string), 'error' (Error, with `code` when
      * the server gave one), 'sync' (outbox changed), 'presence' (users),
-     * 'closed' ({ code, message }: the server ended this store for us)
+     * 'closed' ({ code, message }: the server ended this store, or the
+     * socket, for us), 'history' ({ canUndo, canRedo }: after a local
+     * batch, an undo, a redo, or clearHistory)
      */
     on(event, fn) {
       if (!listeners[event]) throw new TypeError(`Unknown event "${event}"`);
       listeners[event].add(fn);
       return () => listeners[event].delete(fn);
     },
-    undo: () => (undoManager ? undoManager.undo() : false),
-    redo: () => (undoManager ? undoManager.redo() : false),
+    undo: () => travel('undo'),
+    redo: () => travel('redo'),
     get canUndo() { return undoManager ? undoManager.canUndo : false; },
     get canRedo() { return undoManager ? undoManager.canRedo : false; },
     checkpoint: () => undoManager?.checkpoint(),
     group: fn => (undoManager ? undoManager.group(fn) : fn()),
-    clearHistory: () => undoManager?.clear(),
+    clearHistory: () => { travel('clear'); },
     /** True when this client started from a cached state rather than `initial` */
     restored,
     dispose() {

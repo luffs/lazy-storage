@@ -25,15 +25,17 @@
       "react-dom/client": "https://esm.sh/react-dom@19/client",
       "htm": "https://esm.sh/htm@3",
       "lazy-storage": "/lib/lazy-storage/index.js",
+      "lazy-storage/react": "/lib/lazy-storage/react/index.js",
       "lazy-watch": "/lib/lazy-watch/lazy-watch.js"
     }
   }
 </script>
 <script type="module">
-  import React, { useEffect, useState } from 'react';
+  import React, { useState } from 'react';
   import { createRoot } from 'react-dom/client';
   import htm from 'htm';
   import { createClient, createConnection, webSocketTransport, localStorageOutbox } from 'lazy-storage';
+  import { useClient } from 'lazy-storage/react';
 
   const html = htm.bind(React.createElement);   // JSX without a build step
   const name = new URLSearchParams(location.search).get('name') || localStorage.getItem('example:name') || prompt('Your name?') || 'anonymous';
@@ -45,29 +47,12 @@
   });
   const db = createClient({ connection, store: 'shared', initial: { tasks: [] }, lists: ['tasks'], storage: localStorageOutbox('example:react') });
 
-  /**
-   * React needs no mirror: components read the client's state directly and
-   * re-render on every batch, local or remote, and on every change of the
-   * outbox. Writes go straight to the client.
-   */
-  function useDb(db) {
-    const [, rerender] = useState(0);
-    const [status, setStatus] = useState(db.status);
-    const [presence, setPresence] = useState(db.presence);
-    useEffect(() => {
-      const stops = [
-        db.watch(() => rerender(n => n + 1)),
-        db.on('sync', () => rerender(n => n + 1)),
-        db.on('status', setStatus),
-        db.on('presence', setPresence)
-      ];
-      return () => stops.forEach(stop => stop());
-    }, [db]);
-    return { status, presence };
-  }
-
   function App() {
-    const { status, presence } = useDb(db);
+    // React needs no mirror: the component reads the client's state and
+    // re-renders on every batch, local or remote, and on every change of
+    // the outbox, status, or presence (see lazy-storage/react). Writes go
+    // straight to db.state
+    const { state, status, presence } = useClient(db);
     const [title, setTitle] = useState('');
     const at = id => db.state.tasks.findIndex(task => task.id === id);
     const add = event => {
@@ -85,7 +70,7 @@
         <button>Add</button>
       </form>
       <ul>
-        ${db.state.tasks.map(task => html`
+        ${state.tasks.map(task => html`
           <li key=${task.id} className=${task.done ? 'done' : ''}>
             <input type="checkbox" checked=${Boolean(task.done)} onChange=${e => { db.state.tasks[at(task.id)].done = e.target.checked; }} />
             <span>${task.title}</span>

@@ -20,6 +20,14 @@
       "types": "./types/client-sqlite.d.ts",
       "default": "./src/client/sqlite-bun.js"
     },
+    "./vue": {
+      "types": "./types/vue.d.ts",
+      "default": "./src/vue/index.js"
+    },
+    "./react": {
+      "types": "./types/react.d.ts",
+      "default": "./src/react/index.js"
+    },
     "./server": {
       "types": "./types/server.d.ts",
       "default": "./src/server/index.js"
@@ -66,7 +74,9 @@
     "lazy-watch",
     "last-writer-wins",
     "websocket",
-    "bun"
+    "bun",
+    "vue",
+    "react"
   ],
   "dependencies": {
     "lazy-watch": "^6.2.1"
@@ -85,16 +95,29 @@
   "homepage": "https://github.com/luffs/lazy-storage#readme",
   "license": "ISC",
   "devDependencies": {
+    "@happy-dom/global-registrator": "^20.14.0",
     "@types/node": "^26.4.1",
     "fake-indexeddb": "6.2.5",
+    "happy-dom": "^20.14.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
     "typescript": "^7.0.2",
+    "vue": "^3.5.42",
     "ws": "^8.21.3"
   },
   "types": "./types/index.d.ts",
   "peerDependencies": {
+    "react": ">=18",
+    "vue": ">=3.2",
     "ws": ">=8"
   },
   "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    },
+    "vue": {
+      "optional": true
+    },
     "ws": {
       "optional": true
     }

@@ -15,6 +15,8 @@ import {
 import { createHandlers, serve } from 'lazy-storage/server/bun';
 import { sqliteStorage } from 'lazy-storage/server/sqlite';
 import { mergeOp } from 'lazy-storage/core';
+import { useClient as useClientVue } from 'lazy-storage/vue';
+import { useClient as useClientReact, trackClient } from 'lazy-storage/react';
 
 interface Task { id: string; title: string; done: boolean }
 interface State { tasks: Record<string, Task>; order: string[] }
@@ -43,6 +45,7 @@ const version: number = db.version;
 db.on('status', s => { const _s: 'offline' | 'connecting' | 'online' = s; });
 db.on('error', (err: ClientError) => { if (err.code === 'rate-limited') return; });
 db.on('closed', c => { const _code: string = c.code; });
+db.on('history', ({ canUndo, canRedo }) => { const _both: boolean = canUndo && canRedo; });
 db.watch((changes, inverse, meta) => { if (meta?.origin === 'remote') return; });
 db.undo(); db.redo(); db.group(() => 1);
 const snapshot: State = LazyWatch.snapshot(db.state);
@@ -57,6 +60,27 @@ db.status = 'online';
 
 const owned = createClientAgain({ store: 'solo', transport: webSocketTransport('ws://localhost:3200/ws'), storage: memoryOutbox(), cache: false });
 owned.disconnect();
+
+// --- Framework entries -------------------------------------------------------
+
+const view = useClientVue(db);
+const mirrored: string | undefined = view.state.tasks.a?.title;
+const online: boolean = view.status.value === 'online';
+const undoable: boolean = view.canUndo.value;
+view.stop();
+// @ts-expect-error the mirror's status is a ref
+const notARef: string = view.status;
+
+const snap = useClientReact(db);
+const same: State = snap.state;
+const queued: number = snap.pending;
+const reason: string | undefined = snap.closed?.code;
+const tracker = trackClient(db);
+const unsubscribe: () => void = tracker.subscribe(() => {});
+unsubscribe();
+// @ts-expect-error a snapshot is read-only
+snap.pending = 0;
+void mirrored; void online; void undoable; void same; void queued; void reason;
 
 async function browser() {
   const storage = indexedDBStorage('app:team-1', { onError: e => console.warn(e) });

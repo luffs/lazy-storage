@@ -24,7 +24,7 @@
     <button>Add</button>
   </form>
   <ul>
-    <li v-for="task in store.tasks" :key="task.id" :class="{ done: task.done }">
+    <li v-for="task in state.tasks" :key="task.id" :class="{ done: task.done }">
       <input type="checkbox" :checked="task.done" @change="toggle(task.id, $event.target.checked)">
       <span>{{ task.title }}</span>
       <button @click="remove(task.id)">x</button>
@@ -39,13 +39,15 @@
     "imports": {
       "vue": "https://unpkg.com/vue@3/dist/vue.esm-browser.prod.js",
       "lazy-storage": "/lib/lazy-storage/index.js",
+      "lazy-storage/vue": "/lib/lazy-storage/vue/index.js",
       "lazy-watch": "/lib/lazy-watch/lazy-watch.js"
     }
   }
 </script>
 <script type="module">
-  import { createApp, reactive, ref, computed } from 'vue';
-  import { LazyWatch, createClient, createConnection, webSocketTransport, localStorageOutbox } from 'lazy-storage';
+  import { createApp, ref, computed } from 'vue';
+  import { createClient, createConnection, webSocketTransport, localStorageOutbox } from 'lazy-storage';
+  import { useClient } from 'lazy-storage/vue';
 
   const name = new URLSearchParams(location.search).get('name') || localStorage.getItem('example:name') || prompt('Your name?') || 'anonymous';
   localStorage.setItem('example:name', name);
@@ -56,32 +58,17 @@
   });
   const db = createClient({ connection, store: 'shared', initial: { tasks: [] }, lists: ['tasks'], storage: localStorageOutbox('example:vue') });
 
-  /**
-   * Vue reads a reactive mirror of the client's state and writes to the
-   * client. Every batch the client sees, local or remote, is applied to the
-   * mirror in place (lazy-watch patches plain objects and arrays, which Vue
-   * tracks), so components re-render for a teammate's edit exactly as for
-   * their own. Wrapping db.state in reactive() would not work: remote
-   * patches land underneath Vue's proxy and nothing would re-render.
-   */
-  function useStore(db) {
-    const store = reactive(LazyWatch.snapshot(db.state));
-    db.watch(diff => LazyWatch.patch(store, diff));
-    const status = ref(db.status);
-    const presence = ref([]);
-    db.on('status', next => { status.value = next; });
-    db.on('presence', users => { presence.value = users; });
-    return { store, status, presence };
-  }
-
   createApp({
     setup() {
-      const { store, status, presence } = useStore(db);
+      // A reactive mirror of the client's state, patched on every batch,
+      // local or remote, plus refs for status and presence (see
+      // lazy-storage/vue). Reads come from the mirror; writes go to db.state
+      const { state, status, presence } = useClient(db);
       const title = ref('');
       const statusText = computed(() => (status.value === 'online' ? `Online as ${name}` : status.value === 'connecting' ? 'Connecting…' : `Offline as ${name}`));
       const at = id => db.state.tasks.findIndex(task => task.id === id);
       return {
-        db, store, presence, title, statusText,
+        db, state, presence, title, statusText,
         add() {
           const text = title.value.trim();
           if (!text) return;

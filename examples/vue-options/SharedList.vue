@@ -4,23 +4,24 @@
     <button>Add</button>
   </form>
   <ul>
-    <li v-for="task in store.tasks" :key="task.id" :class="{ done: task.done }">
+    <li v-for="task in state.tasks" :key="task.id" :class="{ done: task.done }">
       <input type="checkbox" :checked="task.done" @change="toggle(task.id, $event.target.checked)">
       <span>{{ task.title }}</span>
       <button @click="remove(task.id)">x</button>
     </li>
   </ul>
-  <p><button @click="undo">Undo</button> <button @click="redo">Redo</button></p>
+  <p><button :disabled="!canUndo" @click="undo">Undo</button> <button :disabled="!canRedo" @click="redo">Redo</button></p>
 </template>
 
 <script>
-import { LazyWatch } from 'lazy-storage';
+import { useClient } from 'lazy-storage/vue';
 
 /**
- * The list itself. `store` is a reactive mirror of the client's state:
+ * The list itself. `state` is a reactive mirror of the client's state:
  * every batch the client sees, local or remote, is applied to it in
  * place, which Vue tracks, so a teammate's edit renders exactly like our
- * own. Methods write to the client, never to the mirror.
+ * own. Methods write to the client, never to the mirror. The mirror stops
+ * following when the component unmounts.
  */
 export default {
   name: 'SharedList',
@@ -28,13 +29,7 @@ export default {
     db: { type: Object, required: true }
   },
   data() {
-    return { store: LazyWatch.snapshot(this.db.state), title: '' };
-  },
-  created() {
-    this.stop = this.db.watch(diff => LazyWatch.patch(this.store, diff));
-  },
-  unmounted() {
-    this.stop();
+    return { ...useClient(this.db), title: '' };
   },
   methods: {
     at(id) { return this.db.state.tasks.findIndex(task => task.id === id); },

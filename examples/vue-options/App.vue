@@ -8,6 +8,7 @@
 <script>
 import { markRaw } from 'vue';
 import { createClient, createConnection, webSocketTransport, localStorageOutbox } from 'lazy-storage';
+import { useClient } from 'lazy-storage/vue';
 import SharedList from './SharedList.vue';
 
 // Who we are: `?name=` in the URL, else what this browser remembers, else ask
@@ -17,8 +18,8 @@ localStorage.setItem('example:name', name);
 /**
  * The app owns the connection and the client, and hands the client to the
  * components that use it. `markRaw` keeps Vue from wrapping the client
- * (and lazy-storage's proxies inside it) in its own reactivity; components
- * mirror what they need from it, see SharedList.vue.
+ * (and lazy-storage's proxies inside it) in its own reactivity; what a
+ * component shows of it comes from useClient, see SharedList.vue.
  */
 export default {
   name: 'App',
@@ -28,7 +29,8 @@ export default {
       transport: webSocketTransport(() => `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws?name=${encodeURIComponent(name)}`)
     });
     const db = createClient({ connection, store: 'shared', initial: { tasks: [] }, lists: ['tasks'], storage: localStorageOutbox('example:vue-sfc') });
-    return { db: markRaw(db), status: db.status, presence: [] };
+    const { status, presence } = useClient(db);   // refs, unwrapped as data; they stop with the component
+    return { db: markRaw(db), status, presence };
   },
   computed: {
     statusText() {
@@ -36,14 +38,9 @@ export default {
     }
   },
   created() {
-    this.stop = [
-      this.db.on('status', status => { this.status = status; }),
-      this.db.on('presence', users => { this.presence = users; })
-    ];
     this.db.connect();
   },
   unmounted() {
-    for (const stop of this.stop) stop();
     this.db.dispose();
   }
 };

@@ -14,6 +14,7 @@
       "vue": "https://unpkg.com/vue@3/dist/vue.esm-browser.prod.js",
       "vue3-sfc-loader": "https://cdn.jsdelivr.net/npm/vue3-sfc-loader@0.9.5/dist/vue3-sfc-loader.esm.js",
       "lazy-storage": "/lib/lazy-storage/index.js",
+      "lazy-storage/vue": "/lib/lazy-storage/vue/index.js",
       "lazy-watch": "/lib/lazy-watch/lazy-watch.js"
     }
   }
@@ -25,11 +26,12 @@
   // either way. App.vue owns the client; SharedList.vue is the list.
   import * as vue from 'vue';
   import * as lazyStorage from 'lazy-storage';
+  import * as lazyStorageVue from 'lazy-storage/vue';
   import { loadModule } from 'vue3-sfc-loader';
 
   const options = {
-    // What the component's imports resolve to
-    moduleCache: { vue, 'lazy-storage': lazyStorage },
+    // What the components' imports resolve to
+    moduleCache: { vue, 'lazy-storage': lazyStorage, 'lazy-storage/vue': lazyStorageVue },
     async getFile(url) {
       const res = await fetch(url);
       if (!res.ok) throw Object.assign(new Error(`${res.status} ${url}`), { res });

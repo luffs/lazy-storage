@@ -230,6 +230,8 @@ export interface ClientEvents {
   sync: undefined;
   presence: unknown[];
   closed: Closed;
+  /** What undo and redo can do changed: after a local batch, an undo, a redo, or clearHistory() */
+  history: { canUndo: boolean; canRedo: boolean };
 }
 
 export interface Client<S extends object = any> {

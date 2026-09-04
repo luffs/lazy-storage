@@ -132,17 +132,47 @@ the object you pushed. A list path cannot also be a register.
 
 ### With a UI framework
 
-Two shapes work. An app that keeps its own arrays, as a Vue store or a
+Two entries wrap the client for Vue and React; the pattern behind each
+is a few lines for any other framework.
+
+`lazy-storage/vue` keeps a reactive mirror. Vue cannot track `db.state`
+(a remote patch lands underneath any proxy Vue wraps around it, and
+nothing re-renders), so `useClient(db)` returns a plain copy kept
+reactive and patched in place on every batch, local or remote, together
+with refs for the client's status, presence, outbox size, closed reason,
+and undo state:
+
+```js
+import { useClient } from 'lazy-storage/vue';
+
+const { state, status, presence, canUndo } = useClient(db);   // in setup()
+db.state.tasks.push({ title: 'Ship it' });                    // writes go to the client; the mirror follows
+```
+
+In the Options API the same call fills `data()`
+(`data() { return { ...useClient(this.db), title: '' } }`). Either way
+the listeners stop with the component.
+
+`lazy-storage/react` needs no mirror: `useClient(db)` subscribes through
+`useSyncExternalStore`, so a component reads `db.state` directly and
+re-renders on every batch, outbox change, and event, with one
+subscription per client however many components use it:
+
+```jsx
+import { useClient } from 'lazy-storage/react';
+
+function List({ db }) {
+  const { state, status } = useClient(db);
+  return <ul>{state.tasks.map(task => <li key={task.id}>{task.title}</li>)}</ul>;
+}
+```
+
+An app that keeps its own arrays instead, as a Vue store or a
 drag-and-drop list does, overwrites the view's arrays with them after a
 change (`LazyWatch.overwrite(db.state.tasks, plainTasks)`) and copies them
 back on remote, undo, and redo batches; lazy-storage diffs the arrays by
-id and writes only what changed. An app that renders from the store keeps
-a reactive mirror (`LazyWatch.patch(mirror, diff)` on every batch, since
-lazy-watch mutates a plain object or array in place and Vue tracks that)
-and writes straight to `db.state`. Wrapping `db.state` in Vue's `reactive`
-does not work: remote patches land underneath Vue's proxy and nothing
-re-renders. The todo app at github.com/luffs/kimi-wa-best-todo is the
-first shape in full.
+id and writes only what changed. The todo app at
+github.com/luffs/kimi-wa-best-todo is that shape in full.
 
 ## How conflicts resolve
 
@@ -491,12 +521,16 @@ runs on the synced state and shows in the array view like any other change.
 - `db.list(path, { position })` — an ordered list of records: `all()`, `ids()`, `get(id)`, `has(id)`, `add(record, where) → id`, `move(id, where)`, `remove(id)`, `reconcile(ids) → written`, `keyFor(where)`; `where` is `{ before }`, `{ after }`, `{ at }`, or nothing for the end
 - `db.connect()`, `db.disconnect()`, `db.status` (`'offline' | 'connecting' | 'online'`), `db.pending`
 - `db.watch(listener)` — state changes; `meta?.origin === 'remote'` marks the server's
-- `db.on('status' | 'error' | 'sync' | 'presence' | 'closed', fn)` — lifecycle events; a refused op is an error with a `code` (`forbidden`, `expired`, `invalid`, `too-large` drop the op; `rate-limited` keeps it and retries; `clock-skew` is handled without one)
+- `db.on('status' | 'error' | 'sync' | 'presence' | 'closed' | 'history', fn)` — lifecycle events; a refused op is an error with a `code` (`forbidden`, `expired`, `invalid`, `too-large` drop the op; `rate-limited` keeps it and retries; `clock-skew` is handled without one); `history` carries `{ canUndo, canRedo }` after a local batch, an undo, a redo, or `clearHistory()`
 - `db.undo()`, `db.redo()`, `db.canUndo`, `db.canRedo`, `db.checkpoint()`, `db.group(fn)`, `db.clearHistory()`
 - `webSocketTransport(url)`, `memoryOutbox()`, `localStorageOutbox(key)` — document adapters: `{ load(), save(outbox), saveState(cache) }`
 - `indexedDBStorage(name, { onError })` → also `settled()`, `close()`, `destroy()` — a row adapter: `{ load(), commit({ puts, deletes, meta }), replace({ rows, meta }), saveOp(op, meta), removeOp(seq, meta), dropOps(seq, meta) }`, where a delete removes the path and everything under it, `saveOp` also rewrites an op a newer one pruned, `removeOp` takes out one a newer op emptied, and `meta` is `{ replicaId, seq, version, epoch }`
 
 **Bun client** (`lazy-storage/client/sqlite`): `sqliteClientStorage(file, { wal })` → a row adapter on bun:sqlite, plus `db` and `close()`.
+
+**Vue** (`lazy-storage/vue`): `useClient(db)` → `{ state, status, presence, pending, closed, canUndo, canRedo, restored, stop }` — `state` a reactive mirror patched on every batch, the rest shallow refs; stops with the current effect scope (a component's), else by `stop()`.
+
+**React** (`lazy-storage/react`): `useClient(db)` → `{ state, status, presence, pending, closed, canUndo, canRedo, restored }`, a new object per change, through `useSyncExternalStore`; `trackClient(db)` → the `{ subscribe, getSnapshot }` pair underneath, one per client.
 
 **Server** (`lazy-storage/server`)
 
