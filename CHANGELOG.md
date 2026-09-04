@@ -2,21 +2,7 @@
 
 All notable changes to lazy-storage are documented here. The format follows Keep a Changelog; versions follow Semantic Versioning.
 
-## [0.5.2] - 2026-09-03
-
-### Fixed
-
-- **A client on Node 22 no longer stalls after one refused connection.**
-  Node 22's global `WebSocket` (undici 6) fires only `error` for a failed
-  handshake, never `close`, so `webSocketTransport` never reported the
-  close and the connection's retry loop stopped after its first attempt
-  against a server that was down. The transport now reports the close
-  itself when the error arrives while the socket is still connecting, and
-  deduplicates the `close` that browsers and Node 24+ fire after it. The
-  Node server test waited on the same missing event and hung the Node 22
-  CI job until it was cancelled
-
-## [Unreleased]
+## [0.6.0] - 2026-09-04
 
 Lists stop being two things. A list of records is a keyed map with a
 position on each record, ordered by `db.list`; an array of primitives is a
@@ -63,6 +49,20 @@ whole value anywhere, undeclared. Order registers keep working, and
   `db.list`, unless its path is a declared register. Fragments arriving at
   the server are refused as before. The `registers` option and the
   mismatch check are unchanged for what is declared
+
+## [0.5.2] - 2026-09-03
+
+### Fixed
+
+- **A client on Node 22 no longer stalls after one refused connection.**
+  Node 22's global `WebSocket` (undici 6) fires only `error` for a failed
+  handshake, never `close`, so `webSocketTransport` never reported the
+  close and the connection's retry loop stopped after its first attempt
+  against a server that was down. The transport now reports the close
+  itself when the error arrives while the socket is still connecting, and
+  deduplicates the `close` that browsers and Node 24+ fire after it. The
+  Node server test waited on the same missing event and hung the Node 22
+  CI job until it was cancelled
 
 ## [0.5.1] - 2026-09-03
 
