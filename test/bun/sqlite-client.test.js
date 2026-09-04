@@ -69,6 +69,29 @@ try {
     storage.close();
   });
 
+  await test('a newer op takes over from an older pending one: the pruned op is rewritten, the emptied op removed', async () => {
+    const store = createStore({ initial: INITIAL, registers: REGISTERS });
+    const net = createNetwork(store);
+    const link = net.link();
+    const storage = sqliteClientStorage(join(dir, 'coalesce.sqlite'));
+    const a = createClient({ transport: link.factory, reconnect: false, store: 'main', initial: INITIAL, registers: REGISTERS, storage, replicaId: 'a' });
+    a.state.tasks.x = { id: 'x', title: 'h' };
+    await net.settle();
+    a.state.tasks.x.title = 'he';
+    await net.settle();
+    a.state.tasks.x.title = 'hel';
+    await net.settle();
+    assert.equal(a.pending, 2);
+    assert.deepEqual(storage.load().ops.map(op => [op.seq, op.diff]), [[1, { tasks: { x: { id: 'x' } } }], [3, { tasks: { x: { title: 'hel' } } }]]);
+    a.connect();
+    await net.settle();
+    assert.equal(a.pending, 0);
+    assert.deepEqual(store.snapshot().tasks.x, { id: 'x', title: 'hel' });
+    assert.deepEqual(storage.load().ops, []);
+    a.dispose();
+    storage.close();
+  });
+
   console.log(`\n${passed} passed`);
 } finally {
   for (let attempt = 0; attempt < 5; attempt++) {

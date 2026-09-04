@@ -11,9 +11,19 @@
 //   const teamA = createClient({ connection, store: 'team-a', initial });
 //   const teamB = createClient({ connection, store: 'team-b', initial });
 //   teamA.connect(); teamB.connect();   // one socket, two stores
+//
+// A server that turns the socket away (the request did not authenticate)
+// says so in a `closed` message without a store, and closes with code
+// 4401. That ends the connection until connect() is called again: no
+// retry, `closed` holds the reason, and every attached client reports it
+// as its own `closed`. A browser cannot read the status of a refused
+// handshake, which is why the server completes it just to say this.
 import { LazyWatch } from 'lazy-watch';
 
 const { Utils } = LazyWatch;
+
+/** The close code the server uses when it turns a socket away (server/wire.js) */
+const UNAUTHORIZED = 4401;
 
 /**
  * @param {Object} options
@@ -27,9 +37,10 @@ const { Utils } = LazyWatch;
 export function createConnection({ transport, reconnect = { min: 500, max: 10_000 }, keepalive = 30_000 } = {}) {
   if (typeof transport !== 'function') throw new TypeError('createConnection requires a transport factory');
   const handlers = new Map(); // store id -> { handler, link }
-  const statusListeners = new Set();
+  const listeners = { status: new Set(), closed: new Set() };
   let conn = null;
   let status = 'offline';
+  let ended = null;       // { code, message } after the server turned the socket away, until connect()
   let closedByUser = true;
   let retryDelay = reconnect ? reconnect.min : 0;
   let retryTimer = null;
@@ -50,15 +61,37 @@ export function createConnection({ transport, reconnect = { min: 500, max: 10_00
     keepaliveTimer = null;
   }
 
-  function setStatus(next) {
-    if (status === next) return;
-    status = next;
-    for (const fn of statusListeners) {
+  function notify(event, payload) {
+    for (const fn of listeners[event]) {
       try {
-        fn(status);
+        fn(payload);
       } catch (err) {
         console.error('Error in lazy-storage connection listener:', err);
       }
+    }
+  }
+
+  function setStatus(next) {
+    if (status === next) return;
+    status = next;
+    notify('status', status);
+  }
+
+  /**
+   * The socket is gone: offline for everyone, then either a retry or,
+   * when the server turned it away, the reason, which every client hears
+   * once its status already says offline
+   */
+  function dropped() {
+    conn = null;
+    stopKeepalive();
+    setStatus('offline');
+    for (const { handler } of [...handlers.values()]) handler.onClose();
+    if (ended) {
+      for (const { handler } of [...handlers.values()]) handler.onClosed?.(ended);
+      notify('closed', ended);
+    } else if (!closedByUser && reconnect) {
+      scheduleRetry();
     }
   }
 
@@ -75,18 +108,27 @@ export function createConnection({ transport, reconnect = { min: 500, max: 10_00
     };
     c.onmessage = msg => {
       if (conn !== c || !Utils.isPlainObject(msg) || msg.t === 'pong') return;
+      if (msg.store === undefined) {
+        // About the socket itself: the server turning it away. Its close
+        // follows in a moment; the socket is dropped here already so the
+        // status and the reason land together
+        if (msg.t === 'closed' && !ended) {
+          ended = { code: msg.code, message: msg.message };
+          c.close();
+          dropped();
+        }
+        return;
+      }
       const entry = handlers.get(msg.store);
       if (!entry) return;
       const { store, ...inner } = msg;
       entry.handler.onMessage(inner);
     };
-    c.onclose = () => {
+    c.onclose = info => {
       if (conn !== c) return;
-      conn = null;
-      stopKeepalive();
-      setStatus('offline');
-      for (const { handler } of [...handlers.values()]) handler.onClose();
-      if (!closedByUser && reconnect) scheduleRetry();
+      // The close code says it too, should the message not have made it
+      if (info?.code === UNAUTHORIZED && !ended) ended = { code: 'unauthorized', message: info.reason || 'Unauthorized' };
+      dropped();
     };
   }
 
@@ -100,16 +142,25 @@ export function createConnection({ transport, reconnect = { min: 500, max: 10_00
     get status() { return status; },
     /** Number of attached clients */
     get attached() { return handlers.size; },
+    /** Why the server turned the socket away ({ code, message }), or null; cleared by connect() */
+    get closed() { return ended; },
 
+    /** 'status' (offline | connecting | open) and 'closed' (the server turned the socket away) */
     on(event, fn) {
-      if (event !== 'status') throw new TypeError(`Unknown connection event "${event}"`);
-      statusListeners.add(fn);
-      return () => statusListeners.delete(fn);
+      if (!listeners[event]) throw new TypeError(`Unknown connection event "${event}"`);
+      listeners[event].add(fn);
+      return () => listeners[event].delete(fn);
     },
 
-    /** Open the socket (idempotent); attached clients say hello when it opens */
+    /**
+     * Open the socket (idempotent); attached clients say hello when it
+     * opens. After the server turned the socket away this is the way back
+     * in: the transport factory runs afresh, so a URL built by a function
+     * carries whatever credentials the app has now
+     */
     connect() {
       closedByUser = false;
+      ended = null;
       clearTimeout(retryTimer);
       if (!conn) open();
     },

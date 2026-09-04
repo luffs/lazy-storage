@@ -45,6 +45,10 @@ function memoryRows({ async = false } = {}) {
       ops.set(op.seq, structuredClone(op));
       meta = m;
     },
+    removeOp(seq, m) {
+      ops.delete(seq);
+      meta = m;
+    },
     dropOps(seq, m) {
       for (const k of [...ops.keys()]) if (k <= seq) ops.delete(k);
       meta = m;

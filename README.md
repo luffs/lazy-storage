@@ -46,8 +46,8 @@ const stores = createStores(id => createStore({
 serve({
   stores,
   port: 3200,
-  authenticate: req => userForToken(new URL(req.url).searchParams.get('token')), // null → 401
-  authorize: (user, storeId) => user.teams.includes(storeId)                     // false → 403 / closed
+  authenticate: req => userForToken(new URL(req.url).searchParams.get('token')), // null → closed 'unauthorized'
+  authorize: (user, storeId) => user.teams.includes(storeId)                     // false → closed 'forbidden'
 });
 // clients connect to ws://host:3200/ws?token=... and name their store per client
 ```
@@ -204,6 +204,14 @@ IndexedDB database a closed tab left behind. Everything else about a
 client works in Bun and Node as it does in a browser: the transport needs
 a global `WebSocket` (or one passed in), and ids come from `crypto`.
 
+The outbox holds one op per batch, minus what later batches made moot: a
+new op takes over from whatever older pending ops wrote at or under the
+paths it writes, since under last-writer-wins those older writes could
+never decide a value again. Typing into one field keeps one op pending
+rather than one per keystroke, and deleting a record drops its pending
+edits. Nothing is re-stamped, so an older write to another field keeps
+its own time and the merge decides exactly as if every op had been sent.
+
 On (re)connect the client sends the whole outbox in one `hello`, together
 with the store version it last saw (`db.version`). The server merges the
 ops and answers with a **delta**: the accepted diffs since that version,
@@ -313,7 +321,17 @@ Two hooks on the Bun adapter decide who gets a session on which store:
 - `authenticate(req)` runs at upgrade and returns the user for the request
   (a token in the query string is the usual carrier, since browsers cannot
   set headers on a WebSocket; `webSocketTransport` takes a function URL for
-  that). `null` or `undefined` answers 401.
+  that). `null` or `undefined` turns the request away. A plain request
+  gets a 401; a WebSocket handshake is completed only to be told so, since
+  a browser cannot read the status of a refused one: the socket receives a
+  `closed` message with code `unauthorized` and closes with code 4401.
+  The client then stops reconnecting, since retrying an expired token
+  would only fail again, and reports it on every store attached:
+  `db.closed` is `{ code: 'unauthorized', message }`, `db.on('closed')`
+  fires, and `connection.closed` holds the same. Once the app has signed
+  in again, `db.connect()` (or `connection.connect()`) is the way back:
+  the transport factory runs afresh, so a URL built by a function carries
+  the new token.
 - `authorize(user, storeId, store)` runs per store, before its session
   exists; a refusal arrives as a `closed` message with code `forbidden` and
   affects only that store, while the socket stays up for the others. Both
@@ -465,7 +483,7 @@ runs on the synced state and shows in the array view like any other change.
 
 - `createClient({ store, connection | transport, initial, registers, lists, position, replicaId, storage, cache, undo, undoLimit, reconnect, now })`; `db.restored` — started from the cached state; `db.version` — the store version this client has seen everything up to; `db.wire` — the synced state under a lists view
 - `openClient(options)` → `Promise<db>` — the same, for a storage adapter whose `load()` returns a promise
-- `createConnection({ transport, reconnect, keepalive })` → `connect()`, `close()`, `status`, `attached`, `on('status', fn)` — a socket shared by clients
+- `createConnection({ transport, reconnect, keepalive })` → `connect()`, `close()`, `status`, `attached`, `closed` — why the server turned the socket away, or null — `on('status' | 'closed', fn)` — a socket shared by clients
 - `db.state` — the mirror (a lazy-watch proxy). Read and write it directly
 - `db.store`, `db.connection` — the store id and the connection
 - `db.presence` — users with a live session on this store; `db.closed` — `{ code, message }` after the server ended this store for us, else null
@@ -476,7 +494,7 @@ runs on the synced state and shows in the array view like any other change.
 - `db.on('status' | 'error' | 'sync' | 'presence' | 'closed', fn)` — lifecycle events; a refused op is an error with a `code` (`forbidden`, `expired`, `invalid`, `too-large` drop the op; `rate-limited` keeps it and retries; `clock-skew` is handled without one)
 - `db.undo()`, `db.redo()`, `db.canUndo`, `db.canRedo`, `db.checkpoint()`, `db.group(fn)`, `db.clearHistory()`
 - `webSocketTransport(url)`, `memoryOutbox()`, `localStorageOutbox(key)` — document adapters: `{ load(), save(outbox), saveState(cache) }`
-- `indexedDBStorage(name, { onError })` → also `settled()`, `close()`, `destroy()` — a row adapter: `{ load(), commit({ puts, deletes, meta }), replace({ rows, meta }), saveOp(op, meta), dropOps(seq, meta) }`, where a delete removes the path and everything under it and `meta` is `{ replicaId, seq, version, epoch }`
+- `indexedDBStorage(name, { onError })` → also `settled()`, `close()`, `destroy()` — a row adapter: `{ load(), commit({ puts, deletes, meta }), replace({ rows, meta }), saveOp(op, meta), removeOp(seq, meta), dropOps(seq, meta) }`, where a delete removes the path and everything under it, `saveOp` also rewrites an op a newer one pruned, `removeOp` takes out one a newer op emptied, and `meta` is `{ replicaId, seq, version, epoch }`
 
 **Bun client** (`lazy-storage/client/sqlite`): `sqliteClientStorage(file, { wal })` → a row adapter on bun:sqlite, plus `db` and `close()`.
 
@@ -546,7 +564,8 @@ primitives anywhere, of anything at a register path).
    every op with an `ack` or an `error`, and broadcasts every accepted
    diff as a `patch` to every session on the store, the sender included.
 4. `presence` arrives whenever the users with a live session change, and
-   a `closed` message ends the store for this client.
+   a `closed` message ends the store for this client. A `closed` without
+   a `store` ends the socket itself: the request did not authenticate.
 
 ### Client to server
 
@@ -567,7 +586,7 @@ primitives anywhere, of anything at a register path).
 | `ack` | `seq`, `ts`, `correction` | The op was merged; `correction` is a diff with the server's values at the leaves it lost, or null |
 | `error` | `seq?`, `code?`, `message`, `now?`, `ts?`, `retryAfter?` | With `seq`: that op was refused, for the reason in `code` (below). Without: the message itself was bad (not JSON, an unknown type, a hello without a replica id) |
 | `presence` | `users` | The distinct users with a live session |
-| `closed` | `code`, `message` | Final for this store on this socket; the client goes offline for it and does not reconnect on its own |
+| `closed` | `code`, `message` | Final for this store on this socket; the client goes offline for it and does not reconnect on its own. Without a `store`: final for the socket, which the server then closes with code 4401; the connection stops reconnecting and every client on it reports the reason |
 | `pong` | | |
 
 Across these: `ts` is the server's clock on `snapshot`, `delta`, and
@@ -597,7 +616,10 @@ without help from the app, which only hears an `error` event:
 `evicted` (`closeSessions` on the server), `forbidden` (`authorize`
 refused the store), `unknown-store` (the resolver returned null, or the
 store factory threw), and `invalid-store` (an id outside the allowed
-alphabet, or a message without one).
+alphabet, or a message without one) each end one store. `unauthorized`
+(`authenticate` returned nothing) ends the socket: it arrives without a
+`store`, and the close that follows carries code 4401 in case the message
+did not make it.
 
 ## Scope
 

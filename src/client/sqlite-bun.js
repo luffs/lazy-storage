@@ -39,6 +39,7 @@ export function sqliteClientStorage(file = ':memory:', { wal = true } = {}) {
     clear: db.prepare('DELETE FROM leaves'),
     rows: db.prepare('SELECT path, value FROM leaves'),
     putOp: db.prepare('INSERT INTO ops (seq, op) VALUES (?, ?) ON CONFLICT (seq) DO UPDATE SET op = excluded.op'),
+    delOp: db.prepare('DELETE FROM ops WHERE seq = ?'),
     dropOps: db.prepare('DELETE FROM ops WHERE seq <= ?'),
     ops: db.prepare('SELECT op FROM ops ORDER BY seq'),
     meta: db.prepare("SELECT value FROM meta WHERE key = 'meta'"),
@@ -63,6 +64,10 @@ export function sqliteClientStorage(file = ':memory:', { wal = true } = {}) {
     q.putOp.run(op.seq, JSON.stringify(op));
     setMeta(meta);
   });
+  const removeOp = db.transaction((seq, meta) => {
+    q.delOp.run(seq);
+    setMeta(meta);
+  });
   const dropOps = db.transaction((seq, meta) => {
     q.dropOps.run(seq);
     setMeta(meta);
@@ -81,6 +86,7 @@ export function sqliteClientStorage(file = ':memory:', { wal = true } = {}) {
     commit,
     replace,
     saveOp,
+    removeOp,
     dropOps,
     /** The underlying bun:sqlite Database */
     db,

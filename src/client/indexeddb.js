@@ -119,6 +119,12 @@ export function indexedDBStorage(name = 'lazy-storage', {
         stores.meta.put(meta, META_KEY);
       });
     },
+    removeOp(seq, meta) {
+      write(['ops', 'meta'], stores => {
+        stores.ops.delete(seq);
+        stores.meta.put(meta, META_KEY);
+      });
+    },
     dropOps(seq, meta) {
       write(['ops', 'meta'], stores => {
         stores.ops.delete(KeyRange.upperBound(seq));

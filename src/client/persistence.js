@@ -7,14 +7,17 @@
 // another, written debounced because it costs a serialization of
 // everything.
 //
-// A ROW adapter ({ load, commit, replace, saveOp, dropOps }) keeps one row
-// per leaf and one per pending op, so a batch costs the leaves it
-// touched: every diff the state sees is walked into leaves (registers as
-// whole values) and handed over as puts and deletes, where a delete
-// removes the path and everything under it. When a snapshot lands the
-// rows are replaced from the state, which also heals any row a failed
-// write left behind. Every write carries the client's meta ({ replicaId,
-// seq, version, epoch }) so the adapter stores it in the same transaction.
+// A ROW adapter ({ load, commit, replace, saveOp, removeOp, dropOps })
+// keeps one row per leaf and one per pending op, so a batch costs the
+// leaves it touched: every diff the state sees is walked into leaves
+// (registers as whole values) and handed over as puts and deletes, where
+// a delete removes the path and everything under it. When a snapshot
+// lands the rows are replaced from the state, which also heals any row a
+// failed write left behind. An op is written with `saveOp` (again when a
+// newer op pruned it), removed one at a time with `removeOp` when a newer
+// op emptied it, and dropped up to an acknowledged seq with `dropOps`.
+// Every write carries the client's meta ({ replicaId, seq, version,
+// epoch }) so the adapter stores it in the same transaction.
 // A row adapter's load() may return a promise (IndexedDB does), which is
 // what openClient() is for.
 import { LazyWatch } from 'lazy-watch';
@@ -51,7 +54,13 @@ export function createPersistence({ storage, cache, regs, state, meta, ops, onEr
   if (isRowAdapter(storage)) {
     return {
       rows: true,
-      op: op => storage.saveOp(op, meta()),
+      /** A new op, after what it superseded in older ones: those rewritten, and the seqs of those emptied */
+      op(op, superseded) {
+        const m = meta();
+        for (const older of superseded?.changed ?? []) storage.saveOp(older, m);
+        for (const seq of superseded?.removed ?? []) storage.removeOp(seq, m);
+        storage.saveOp(op, m);
+      },
       drop: seq => storage.dropOps(seq, meta()),
       /** A batch the state just applied; `batchMeta.snapshot` marks a whole new state */
       batch(diff, batchMeta) {

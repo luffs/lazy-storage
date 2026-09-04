@@ -21,6 +21,12 @@ const refused = ws => new Promise(resolve => {
   ws.onerror = () => resolve(ws.readyState);
   ws.onclose = () => resolve(ws.readyState);
 });
+/** What a raw socket the server turned away hears: the message, then the close code and reason */
+const turnedAway = ws => new Promise(resolve => {
+  let message = null;
+  ws.onmessage = e => { message = JSON.parse(e.data); };
+  ws.onclose = e => resolve({ message, code: e.code, reason: e.reason });
+});
 const users = {
   alice: { id: 'u1', name: 'Alice', teams: ['t1', 't2'] },
   bob: { id: 'u2', name: 'Bob', teams: ['t1'] }
@@ -61,8 +67,28 @@ test('serve: other requests reach the app, a bad token is refused, two sockets s
   try {
     assert.equal(await (await fetch(`http://localhost:${port}/health`)).text(), 'ok');
     assert.equal(await (await fetch(`http://localhost:${port}/ws?token=nope`)).text(), 'other', 'a plain GET is not an upgrade; the app answers');
-    const bad = new WebSocket(`ws://localhost:${port}/ws?token=nope`);
-    assert.notEqual(await refused(bad), 1, 'the 401 upgrade never opened the socket');
+    assert.deepEqual(await turnedAway(new WebSocket(`ws://localhost:${port}/ws?token=nope`)), {
+      message: { t: 'closed', code: 'unauthorized', message: 'Unauthorized' }, code: 4401, reason: 'Unauthorized'
+    }, 'a socket with a bad token is told why, then closed');
+
+    // A client with a bad token learns it, stops retrying, and gets back in once the URL carries a good one
+    let token = 'nope';
+    let attempts = 0;
+    const factory = webSocketTransport(() => `ws://localhost:${port}/ws?token=${token}`);
+    const nobody = createConnection({ transport: () => { attempts++; return factory(); }, reconnect: { min: 20, max: 50 }, keepalive: false });
+    open.push(nobody);
+    const n1 = attach(nobody, 't1', 'n1');
+    await until(() => n1.closed?.code === 'unauthorized', 'the client hears it is not signed in');
+    assert.equal(nobody.closed.code, 'unauthorized');
+    assert.equal(n1.status, 'offline');
+    await sleep(150);
+    assert.equal(attempts, 1, 'no retry with the same token');
+    token = 'alice';
+    n1.connect();
+    await until(() => n1.status === 'online', 'online with a fresh token');
+    assert.equal(n1.closed, null);
+    assert.equal(nobody.closed, null);
+    n1.dispose();
 
     const alice = connect(port, 'alice');
     const bob = connect(port, 'bob');

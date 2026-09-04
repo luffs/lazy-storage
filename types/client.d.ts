@@ -8,13 +8,19 @@ export type ClientStatus = 'offline' | 'connecting' | 'online';
 
 // --- Transports and connections -----------------------------------------------
 
+/** The WebSocket close code and reason, where a transport knows them */
+export interface CloseInfo {
+  code?: number;
+  reason?: string;
+}
+
 /** What a transport factory returns per (re)connect; messages are objects on both sides */
 export interface Transport {
   send(message: object): void;
   close(): void;
   onopen: (() => void) | null;
   onmessage: ((message: unknown) => void) | null;
-  onclose: (() => void) | null;
+  onclose: ((info?: CloseInfo) => void) | null;
 }
 
 export type TransportFactory = () => Transport;
@@ -42,6 +48,8 @@ export interface LinkHandler {
   onOpen(link: Link): void;
   onMessage(message: ServerMessage): void;
   onClose(): void;
+  /** The server turned the socket away; final for every store on it until connect() */
+  onClosed?(closed: Closed): void;
 }
 
 /** One socket, shared by any number of clients */
@@ -49,8 +57,11 @@ export interface Connection {
   readonly status: ConnectionStatus;
   /** Number of attached clients */
   readonly attached: number;
+  /** Why the server turned the socket away, or null; cleared by connect() */
+  readonly closed: Closed | null;
   on(event: 'status', fn: (status: ConnectionStatus) => void): Unsubscribe;
-  /** Open the socket (idempotent) */
+  on(event: 'closed', fn: (closed: Closed) => void): Unsubscribe;
+  /** Open the socket (idempotent); after the server turned it away, the way back in with fresh credentials */
   connect(): void;
   /** Close the socket for every attached client; no automatic reconnect */
   close(): void;
@@ -105,7 +116,11 @@ export interface RowStorage {
   load(): RowDocument | null | Promise<RowDocument | null>;
   commit(change: { puts: Row[]; deletes: string[]; meta: ClientMeta }): void;
   replace(change: { rows: Row[]; meta: ClientMeta }): void;
+  /** Write a pending op: a new one, or an older one a newer op pruned */
   saveOp(op: Op, meta: ClientMeta): void;
+  /** Remove one pending op a newer op emptied */
+  removeOp(seq: number, meta: ClientMeta): void;
+  /** Remove every pending op up to and including `seq`, once acknowledged */
   dropOps(seq: number, meta: ClientMeta): void;
 }
 

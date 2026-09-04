@@ -3,10 +3,13 @@
 // The client wraps a LazyWatch instance. Local writes are ordinary
 // property writes on `state`; each emitted batch becomes an op with a
 // hybrid-logical-clock timestamp, is appended to a persisted outbox, and
-// is sent when online. Everything from the server is applied tagged
-// { origin: 'remote' }, which is how the listener tells its own edits from
-// the server's, and how the undo manager keeps remote changes out of
-// history.
+// is sent when online. A new op also takes over from whatever older
+// pending ops wrote at or under its paths, writes that could never win
+// again (see supersede below), so typing into one field keeps one op
+// pending rather than one per keystroke. Everything from the server is
+// applied tagged { origin: 'remote' }, which is how the listener tells
+// its own edits from the server's, and how the undo manager keeps remote
+// changes out of history.
 //
 // On (re)connect the client sends its whole outbox in a `hello`, with
 // the store version it last saw; the server merges the ops and answers
@@ -224,6 +227,59 @@ function build({
     persistence.drop(upTo);
   }
 
+  /**
+   * Take out of a diff what it holds at `path`, a leaf or a whole
+   * subtree, and the containers that leaves empty. A record's `id` stays:
+   * it is what makes the write a record write, which alone re-adds a
+   * deleted record (see core/merge.js), and the fields beside it count
+   * on that. True when something went.
+   */
+  function prune(node, path, i = 0) {
+    const key = path[i];
+    if (!Utils.isPlainObject(node) || !Object.hasOwn(node, key)) return false;
+    if (i === path.length - 1) {
+      if (key === 'id') return false;
+      delete node[key];
+      return true;
+    }
+    const child = node[key];
+    if (!prune(child, path, i + 1)) return false;
+    if (Object.keys(child).length === 0) delete node[key];
+    return true;
+  }
+
+  /**
+   * A new op takes over from what the pending ops before it wrote at or
+   * under the paths it writes. Under last-writer-wins per leaf those older
+   * writes can never decide a value again, the newer stamp beats them
+   * wherever it lands, so they leave the outbox and the server never
+   * sees them: typing into one field keeps one op pending instead of one
+   * per keystroke, and deleting a record drops its pending edits. Nothing
+   * is re-stamped, an older write to another path keeps its own time, so
+   * the merge decides exactly as if every op had been sent; a sent op
+   * still awaiting its ack is pruned like any other, since the server
+   * either merged it whole already or will get the newer op instead.
+   * Returns the ops changed and the seqs of those emptied, for persistence.
+   */
+  function supersede(op, paths) {
+    const changed = [];
+    const removed = [];
+    outbox = outbox.filter(older => {
+      if (compareTs(older.ts, op.ts) >= 0) return true;
+      let touched = false;
+      for (const path of paths) if (prune(older.diff, path)) touched = true;
+      if (!touched) return true;
+      if (Object.keys(older.diff).length > 0) {
+        changed.push(older);
+        return true;
+      }
+      removed.push(older.seq);
+      restamped.delete(older.seq);
+      return false;
+    });
+    return { changed, removed };
+  }
+
   // Every local batch becomes an op. A batch that breaks the model is
   // reverted in place (tagged 'rejected', so it is neither sent nor
   // recorded) and reported. Remote and restore batches only reach
@@ -234,17 +290,19 @@ function build({
       return;
     }
     let expanded;
+    let paths;
     try {
       expanded = expandRegisters(diff, regs, state);
-      leaves(expanded, regs);
+      paths = leaves(expanded, regs).map(([path]) => path);
     } catch (err) {
       if (inverse) LazyWatch.patch(state, inverse, { origin: 'rejected', error: err });
       emit('error', err);
       return;
     }
     const op = { replicaId, seq: ++seq, ts: clock.now(), diff: expanded };
+    const superseded = supersede(op, paths);
     outbox.push(op);
-    persistence.op(op);
+    persistence.op(op, superseded);
     persistence.batch(expanded, meta);
     if (status() === 'online') link.send({ t: 'op', op });
     emit('sync');
@@ -394,6 +452,9 @@ function build({
     onOpen(attached) {
       link = attached;
       synced = false;
+      // A socket the server had turned away is back (another client on
+      // the connection reconnected, if not this one)
+      ended = null;
       hello();
       refreshStatus();
     },
@@ -402,6 +463,11 @@ function build({
       synced = false;
       setPresence([]);
       refreshStatus();
+    },
+    /** The server turned the whole socket away (not signed in): final for this store too, until connect(); onClose came first */
+    onClosed(info) {
+      ended = { code: info.code, message: info.message };
+      emit('closed', ended);
     }
   };
 

@@ -18,7 +18,7 @@ import { createServer } from 'node:http';
 import { WebSocketServer } from 'ws';
 import { LazyWatch } from 'lazy-watch';
 import { createHub } from './hub.js';
-import { toJSON } from './wire.js';
+import { toJSON, closeUnauthorized } from './wire.js';
 
 /** A Web Request for an incoming Node request, headers included */
 export function toRequest(req) {
@@ -103,7 +103,8 @@ export function createHandlers({
       if (authenticate) {
         user = await authenticate(toRequest(req));
         if (user === null || user === undefined) {
-          refuse(socket, 401, 'Unauthorized');
+          // The handshake is completed only to be told why it was turned away (see wire.js)
+          wss.handleUpgrade(req, socket, head, closeUnauthorized);
           return true;
         }
       }

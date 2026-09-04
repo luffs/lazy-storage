@@ -112,7 +112,7 @@ test('a correction in a delta reflects the state after every op of the hello, no
   aTime.set(START + 40);
   a.state.order = ['last'];
   await net.settle();
-  assert.equal(a.pending, 2);
+  assert.equal(a.pending, 1, 'the second write to the register took over from the first');
 
   await reconnect(net, a);
   assert.equal(last().t, 'delta');

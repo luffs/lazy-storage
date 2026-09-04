@@ -36,6 +36,19 @@ export function presetJSON(message, json) {
  * lazy property of the message (a snapshot's `state`, decoded only when
  * something reads it) is copied as the getter it is, not invoked.
  */
+/**
+ * Turn away a socket whose request did not authenticate. A browser cannot
+ * read the status of a refused handshake, so the handshake is completed
+ * only to say why: a `closed` message without a store (it is the socket
+ * that ends, not one store on it), then a close with code 4401. The
+ * client stops reconnecting and reports it on every store attached (see
+ * client/connection.js, which knows the code too).
+ */
+export function closeUnauthorized(ws) {
+  ws.send(JSON.stringify({ t: 'closed', code: 'unauthorized', message: 'Unauthorized' }));
+  ws.close(4401, 'Unauthorized');
+}
+
 export function tagStore(message, store) {
   const tagged = {};
   for (const key of Object.keys(message)) Object.defineProperty(tagged, key, Object.getOwnPropertyDescriptor(message, key));

@@ -2,6 +2,38 @@
 
 All notable changes to lazy-storage are documented here. The format follows Keep a Changelog; versions follow Semantic Versioning.
 
+## [Unreleased]
+
+### Added
+
+- **The outbox takes over from itself.** A new op removes, from the
+  pending ops before it, whatever they wrote at or under the paths it
+  writes: under last-writer-wins those older writes could never decide
+  a value again. Typing into one field keeps one op pending rather than
+  one per keystroke, and deleting a record drops its pending edits.
+  Nothing is re-stamped, so the merge decides exactly as if every op
+  had been sent; a record's `id` is never pruned, since it is what
+  makes a write a record write
+- **A socket that did not authenticate is told so.** A browser cannot
+  read the status of a refused handshake, so `authenticate` returning
+  nothing now completes the handshake only to send a `closed` message
+  with code `unauthorized` (without a store: it is the socket that
+  ends) and close with code 4401; a plain request still gets a 401. The
+  connection stops reconnecting, `connection.closed` and
+  `connection.on('closed')` carry the reason, and every client on it
+  reports it as its own `closed`. `connect()` is the way back once the
+  app has fresh credentials: the transport factory runs afresh
+
+### Changed
+
+- A row storage adapter must implement `removeOp(seq, meta)`, which
+  takes out one pending op a newer op emptied; `saveOp` is also called
+  again for an op a newer one pruned. The IndexedDB and SQLite adapters
+  do both
+- A transport's `onclose` receives `{ code, reason }` where the socket
+  knows them; the connection reads code 4401 in case the `closed`
+  message did not make it
+
 ## [0.7.0] - 2026-09-04
 
 ### Added

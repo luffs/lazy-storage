@@ -46,11 +46,38 @@ const attach = (connection, store, replicaId) => {
 const open = [];
 
 try {
-  await test('other requests fall through to the app, and a bad token is refused at upgrade', async () => {
+  await test('other requests fall through to the app, and a bad token is turned away: 401 for a plain request, a closed message and code 4401 for a socket', async () => {
     assert.equal(await (await fetch(`${http}/health`)).text(), 'ok');
     assert.equal((await fetch(`${http}/nothing`)).status, 404);
     assert.equal((await fetch(`${http}/ws?token=nope`)).status, 401);
     assert.equal((await fetch(`${http}/ws?token=alice`)).status, 400, 'a plain GET on the socket path is not an upgrade');
+
+    const raw = new WebSocket(`${ws}?token=nope`);
+    const heard = await new Promise(resolve => {
+      let message = null;
+      raw.onmessage = e => { message = JSON.parse(e.data); };
+      raw.onclose = e => resolve({ message, code: e.code, reason: e.reason });
+    });
+    assert.deepEqual(heard, { message: { t: 'closed', code: 'unauthorized', message: 'Unauthorized' }, code: 4401, reason: 'Unauthorized' });
+
+    // A client with a bad token learns it, stops retrying, and gets back in once the URL carries a good one
+    let token = 'nope';
+    let attempts = 0;
+    const factory = webSocketTransport(() => `${ws}?token=${token}`);
+    const nobody = createConnection({ transport: () => { attempts++; return factory(); }, reconnect: { min: 20, max: 50 }, keepalive: false });
+    open.push(nobody);
+    const n1 = attach(nobody, 't1', 'n1');
+    await until(() => n1.closed?.code === 'unauthorized', 'the client hears it is not signed in');
+    assert.equal(nobody.closed.code, 'unauthorized');
+    assert.equal(n1.status, 'offline');
+    await new Promise(r => setTimeout(r, 150));
+    assert.equal(attempts, 1, 'no retry with the same token');
+    token = 'alice';
+    n1.connect();
+    await until(() => n1.status === 'online', 'online with a fresh token');
+    assert.equal(n1.closed, null);
+    assert.equal(nobody.closed, null);
+    n1.dispose();
   });
 
   await test('two sockets share a store: snapshot, live patches both ways, presence, and a forbidden store closed for one side only', async () => {

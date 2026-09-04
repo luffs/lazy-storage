@@ -138,7 +138,8 @@ export function randomId(): string;
 export type ErrorCode = 'invalid' | 'forbidden' | 'expired' | 'too-large' | 'rate-limited' | 'clock-skew';
 
 /** Why the server ended a store for a client */
-export type ClosedCode = 'evicted' | 'forbidden' | 'unknown-store' | 'invalid-store';
+/** `unauthorized` ends the socket itself (the request did not authenticate); the others end one store on it */
+export type ClosedCode = 'evicted' | 'forbidden' | 'unknown-store' | 'invalid-store' | 'unauthorized';
 
 export type ClientMessage =
   | { t: 'hello'; replicaId: string; ops: Op[]; since?: number; epoch?: string | null }

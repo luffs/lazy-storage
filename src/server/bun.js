@@ -2,8 +2,9 @@
 //
 // One route: a hub at `path`. Every socket carries any number of stores,
 // with messages tagged by store id (see hub.js). `authenticate(req)` runs
-// at upgrade and yields the user (401 when it returns null or undefined);
-// `authorize(user, storeId, store)` runs per store, before its session
+// at upgrade and yields the user; when it returns null or undefined the
+// socket is told so and closed (see closeUnauthorized in wire.js), a plain
+// request gets a 401. `authorize(user, storeId, store)` runs per store, before its session
 // exists, and a refusal reaches the client as a `closed` message with code
 // 'forbidden' for that store alone. Both may return promises.
 //
@@ -19,7 +20,7 @@
 // `shutdown()` that does this and then stops the server.
 import { LazyWatch } from 'lazy-watch';
 import { createHub } from './hub.js';
-import { toJSON } from './wire.js';
+import { toJSON, closeUnauthorized } from './wire.js';
 
 /**
  * @param {Object} options
@@ -27,7 +28,9 @@ import { toJSON } from './wire.js';
  *   from createStores, or a resolver; for a single store, `() => store`
  * @param {string} [options.path='/ws'] - WebSocket path
  * @param {(req: Request) => any} [options.authenticate] - the user for a
- *   request, or null/undefined to refuse (401); may return a promise
+ *   request, or null/undefined to turn it away: a socket is told so in a
+ *   `closed` message with code 'unauthorized' and closed with code 4401,
+ *   a plain request gets a 401; may return a promise
  * @param {(user: any, storeId: string, store: Object) => boolean|Promise<boolean>} [options.authorize]
  * @param {number} [options.maxPayload=4194304] - the largest message (bytes)
  *   a socket may send; Bun closes a socket that exceeds it. A hello carries
@@ -58,7 +61,11 @@ export function createHandlers({
     let user;
     if (authenticate) {
       user = await authenticate(req);
-      if (user === null || user === undefined) return new Response('Unauthorized', { status: 401 });
+      if (user === null || user === undefined) {
+        // A handshake is completed only to be told why it was turned away
+        // (see closeUnauthorized); a plain request gets the 401 itself
+        return server.upgrade(req, { data: { unauthorized: true } }) ? undefined : new Response('Unauthorized', { status: 401 });
+      }
     }
     return server.upgrade(req, { data: { user } }) ? undefined : new Response('WebSocket upgrade failed', { status: 400 });
   }
@@ -66,6 +73,7 @@ export function createHandlers({
   const websocket = {
     maxPayloadLength: maxPayload,
     open(ws) {
+      if (ws.data.unauthorized) return closeUnauthorized(ws);
       // A broadcast is encoded once for every socket it reaches (see wire.js)
       hubs.set(ws, createHub(resolveStore, { send: message => ws.send(toJSON(message)), user: ws.data.user, authorize, onError }));
     },

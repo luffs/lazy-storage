@@ -2,9 +2,11 @@
 //
 // A transport factory returns a fresh connection object each time the
 // client (re)connects: { send(message), close(), onopen, onmessage(message),
-// onclose }. Messages are objects on both sides; encoding is the
-// transport's business. The in-memory transport used by the tests
-// implements the same shape.
+// onclose(info) }. Messages are objects on both sides; encoding is the
+// transport's business. `info` is the WebSocket close code and reason
+// where known ({ code, reason }); the connection reads the code that
+// means the server turned the socket away. The in-memory transport used
+// by the tests implements the same shape.
 
 /**
  * A WebSocket transport with JSON messages.
@@ -38,17 +40,17 @@ export function webSocketTransport(url, { WebSocket: WS = globalThis.WebSocket }
       t.onmessage?.(msg);
     };
     let done = false;
-    const closed = () => {
+    const closed = (code, reason) => {
       if (done) return;
       done = true;
-      t.onclose?.();
+      t.onclose?.({ code, reason });
     };
-    socket.onclose = closed;
+    socket.onclose = event => closed(event?.code, event?.reason);
     // Node 22's WebSocket (undici 6) fires 'error' for a failed handshake
     // with no 'close' after it, and the socket stays CONNECTING; the close
     // is reported here so the retry goes on. Where 'close' does follow the
     // error, as in browsers and Node 24+, it is deduplicated
-    socket.onerror = () => { if (socket.readyState === 0) closed(); };
+    socket.onerror = () => { if (socket.readyState === 0) closed(1006, ''); };
     return t;
   };
 }
