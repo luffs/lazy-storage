@@ -196,3 +196,10 @@ test('createClient refuses an adapter that loads asynchronously; openClient awai
   assert.deepEqual(snap(b), store.snapshot());
   assert.equal(b.version, store.version);
 });
+
+test('a row adapter missing one of its methods is refused when the client is created, not on its first op', () => {
+  const link = createNetwork(createStore({ initial: INITIAL })).link();
+  const { removeOp: _removeOp, ...stale } = memoryRows();   // an adapter written before removeOp joined the contract
+  assert.throws(() => createClient({ transport: link.factory, store: 'main', initial: INITIAL, storage: stale }), /row storage adapter needs removeOp/);
+  assert.doesNotThrow(() => createClient({ transport: link.factory, store: 'main', initial: INITIAL, storage: memoryRows() }).dispose());
+});

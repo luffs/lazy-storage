@@ -123,6 +123,7 @@ function memoryRows() {
     },
     replace({ rows }) { leaves.clear(); for (const [k, v] of rows) leaves.set(k, structuredClone(v)); },
     saveOp(op) { ops.set(op.seq, structuredClone(op)); },
+    removeOp(seq) { ops.delete(seq); },
     dropOps(seq) { for (const k of ops.keys()) if (k <= seq) ops.delete(k); }
   };
 }

@@ -136,6 +136,12 @@ function build({
   const regs = registerSet(registers);
   const declared = regs.patterns.map(p => p.join('/')).sort();
   const rows = isRowAdapter(storage);
+  // An adapter written to an older contract fails here, once, rather than on every op
+  if (rows) {
+    for (const method of ['load', 'replace', 'saveOp', 'removeOp', 'dropOps']) {
+      if (typeof storage[method] !== 'function') throw new TypeError(`A row storage adapter needs ${method} (load, commit, replace, saveOp, removeOp, dropOps)`);
+    }
+  }
   if (lists.length) {
     const listed = registerSet(lists);
     for (const pattern of listed.patterns) if (regs.matches(pattern)) throw new TypeError(`"${pattern.join('/')}" cannot be both a list and a register`);

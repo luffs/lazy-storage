@@ -19,6 +19,9 @@ All notable changes to lazy-storage are documented here. The format follows Keep
 
 ### Fixed
 
+- A row storage adapter that lacks one of its methods (`removeOp`, added
+  in 0.7.0, was easy to miss) is refused with a `TypeError` when the
+  client is created, rather than failing inside a listener on every op
 - A shared connection closes a replica's storage adapter when it lets the
   store go (or is disposed), so an IndexedDB connection does not stay open
   per abandoned store
