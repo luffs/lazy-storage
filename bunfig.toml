@@ -1,0 +1,5 @@
+# `bun test` runs the Bun-only suites (the Bun adapter, bun:sqlite). The rest
+# of test/ runs under Node with `npm test`: the Node adapter needs Node's http
+# and ws, and the framework suites put a DOM on the globals for their process
+[test]
+root = "test/bun"

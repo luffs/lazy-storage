@@ -144,6 +144,8 @@ export function createConnection({ transport, reconnect = { min: 500, max: 10_00
     get attached() { return handlers.size; },
     /** Why the server turned the socket away ({ code, message }), or null; cleared by connect() */
     get closed() { return ended; },
+    /** Fetch a path from the server the socket connects to, when the transport can (webSocketTransport can); undefined otherwise */
+    fetch: typeof transport.fetch === 'function' ? path => transport.fetch(path) : undefined,
 
     /** 'status' (offline | connecting | open) and 'closed' (the server turned the socket away) */
     on(event, fn) {

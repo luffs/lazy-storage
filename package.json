@@ -1,6 +1,6 @@
 {
   "name": "lazy-storage",
-  "version": "0.9.1",
+  "version": "0.10.0",
   "description": "Self-hosted realtime state store with offline sync, built on lazy-watch: keyed collections, last-writer-wins per field, an outbox that survives reconnects.",
   "type": "module",
   "exports": {
@@ -65,7 +65,7 @@
   },
   "scripts": {
     "test": "node --test \"test/*.test.js\"",
-    "test:bun": "bun test/bun/sqlite.test.js && bun test/bun/sqlite-client.test.js && bun test/bun/serve.test.js",
+    "test:bun": "bun test",
     "fuzz": "node test/fuzz/run.js",
     "test:types": "tsc -p test/types/tsconfig.json",
     "bench": "node bench/run.js"

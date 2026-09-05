@@ -23,7 +23,10 @@ export interface Transport {
   onclose: ((info?: CloseInfo) => void) | null;
 }
 
-export type TransportFactory = () => Transport;
+export type TransportFactory = (() => Transport) & {
+  /** Fetch a path from the server the transport connects to; a client that has this fetches a large snapshot over HTTP (see the server's snapshot route) */
+  fetch?(path: string): Promise<Response>;
+};
 
 export interface ReconnectOptions {
   min: number;
@@ -59,6 +62,8 @@ export interface Connection {
   readonly attached: number;
   /** Why the server turned the socket away, or null; cleared by connect() */
   readonly closed: Closed | null;
+  /** Fetch a path from the server the socket connects to, when the transport can (webSocketTransport can); a client then fetches a large snapshot over HTTP */
+  fetch?(path: string): Promise<Response>;
   on(event: 'status', fn: (status: ConnectionStatus) => void): Unsubscribe;
   on(event: 'closed', fn: (closed: Closed) => void): Unsubscribe;
   /** Open the socket (idempotent); after the server turned it away, the way back in with fresh credentials */
@@ -234,9 +239,9 @@ export interface Closed {
   message: string;
 }
 
-/** An error from the server carries its code; a register mismatch is detected on the client */
+/** An error from the server carries its code; a register mismatch and a failed snapshot fetch are detected on the client */
 export interface ClientError extends Error {
-  code?: ErrorCode | 'registers-mismatch';
+  code?: ErrorCode | 'registers-mismatch' | 'snapshot-fetch';
 }
 
 /** Records keyed by id under `state[name]` */

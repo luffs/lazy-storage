@@ -156,14 +156,16 @@ export interface PeerShare {
 }
 
 export type ClientMessage =
-  | { t: 'hello'; replicaId: string; ops: Op[]; since?: number; epoch?: string | null; share?: unknown; presence?: false }
+  | { t: 'hello'; replicaId: string; ops: Op[]; since?: number; epoch?: string | null; share?: unknown; presence?: false; fetch?: true }
   | { t: 'op'; op: Op }
   | { t: 'share'; data: unknown }
   | { t: 'ping' }
   | { t: 'leave' };
 
 export type ServerMessage =
-  | { t: 'snapshot'; state: object; ts: Timestamp; seq: number; registers: string[]; v: number; epoch: string }
+  | { t: 'snapshot'; state: object; fetch?: undefined; ts: Timestamp; seq: number; registers: string[]; v: number; epoch: string }
+  /** A large snapshot for a client that said it can fetch: where to fetch it (the server's snapshot route) in place of the state */
+  | { t: 'snapshot'; fetch: string; state?: undefined; ts: Timestamp; seq: number; registers: string[]; v: number; epoch: string }
   | { t: 'delta'; patches: Diff[]; ts: Timestamp; seq: number; registers: string[]; v: number; epoch: string }
   | { t: 'patch'; diff: Diff; ts: Timestamp; v: number }
   | { t: 'ack'; seq: number; ts: Timestamp; correction: Diff | null }
@@ -175,3 +177,10 @@ export type ServerMessage =
 
 /** On a multiplexed connection every message but ping and pong carries its store id */
 export type Tagged<M> = M & { store: string };
+
+/** What the snapshot route serves: the state with the version and epoch it is at */
+export interface SnapshotDocument {
+  v: number;
+  epoch: string;
+  state: object;
+}

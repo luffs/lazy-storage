@@ -2,7 +2,30 @@
 
 All notable changes to lazy-storage are documented here. The format follows Keep a Changelog; versions follow Semantic Versioning.
 
-## [Unreleased]
+## [0.10.0] - 2026-09-05
+
+### Added
+
+- **Snapshots over HTTP.** Both adapters serve a store's snapshot at
+  `<path>/snapshot/<store id>` (`httpSnapshots`, on by default): `{ v,
+  epoch, state }`, compressed once per change and kept until the next
+  (brotli, which packs this JSON some 15% tighter than gzip in the same
+  time, or gzip for a client without it), with an ETag that answers 304
+  while the store is unchanged, behind the same
+  `authenticate` and `authorize` as the socket. A client that can fetch
+  (`webSocketTransport` can, on the route resolved against the socket URL
+  with its query; its `fetch` option takes your own or false) says so in
+  its hello, and a snapshot of `threshold` bytes or more (default 64 KB)
+  is answered with where to fetch it rather than the state. What the
+  socket delivers meanwhile waits and lands on top of the fetched state.
+  A fetch that fails is reported (`snapshot-fetch`) and the client asks
+  again, for the snapshot inline. A 10k-task snapshot (772 KB of JSON)
+  cost the socket about 4.6 ms of compression per hello; the route
+  answers the fetch in about 20 µs, and a reload of an unchanged store in
+  3 µs (`npm run bench` has both).
+  Also: `store.snapshotJSON()`, `snapshotResponse(store, request)` for a
+  server of your own, `request(req, res)` on the Node handlers,
+  `httpSnapshot` on `store.session` and `httpSnapshots` on `createHub`
 
 ### Changed
 
@@ -16,6 +39,9 @@ All notable changes to lazy-storage are documented here. The format follows Keep
   on the store directly is still sent to on its own. The Node adapter is
   unchanged. Behind this, `createHub` takes a `channel` and `store.session`
   a `broadcast`, for a transport that can reach every session at once
+- `bun test` runs the Bun suites, which now use bun:test (`bunfig.toml`
+  scopes the runner to `test/bun`; the rest of the suite is Node's, under
+  `npm test`). `npm run test:bun` is the same command
 
 ### Fixed
 

@@ -7,7 +7,15 @@ export * from './core.js';
 export * from './client.js';
 
 /** A WebSocket transport with JSON messages; `url` may be a function, for a token per connection */
-export function webSocketTransport(url: string | (() => string), options?: { WebSocket?: any }): TransportFactory;
+/**
+ * A WebSocket transport with JSON messages. `fetch` fetches a large
+ * snapshot from the socket's server when the server points there (see
+ * its snapshot route): by default the global fetch, on the route resolved
+ * against the socket URL (ws to http) with the socket URL's query, so a
+ * token there applies to both; your own to add headers; false to take
+ * every snapshot over the socket
+ */
+export function webSocketTransport(url: string | (() => string), options?: { WebSocket?: any; fetch?: false | typeof fetch }): TransportFactory;
 
 /** One socket shared by any number of clients */
 export function createConnection(options: ConnectionOptions): Connection;

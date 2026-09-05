@@ -11,6 +11,8 @@ export function toRequest(req: IncomingMessage): Request;
 export interface NodeHandlers {
   /** Handle an http server's 'upgrade' event; resolves to false when the URL is not ours */
   upgrade(req: IncomingMessage, socket: Duplex, head: Buffer): Promise<boolean>;
+  /** Handle a plain request when it is ours (the snapshot route); resolves to false when it is not, for the app to answer */
+  request(req: IncomingMessage, res: ServerResponse): Promise<boolean>;
   /** Refuse new sockets, close the open ones with code 1001, dispose the registry (flushing every store) */
   close(options?: CloseOptions): Promise<void>;
   readonly closing: boolean;

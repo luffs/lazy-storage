@@ -81,6 +81,12 @@ export interface SessionOptions {
    * of them must reach all of them. A session without one is sent to on its own
    */
   broadcast?(message: ServerMessage): void;
+  /**
+   * A transport that serves snapshots over HTTP hands in where: a client
+   * whose hello says it can fetch is pointed at `url` in place of a
+   * snapshot of `threshold` bytes or more (default 64 KB)
+   */
+  httpSnapshot?: { url: string; threshold?: number };
 }
 
 export interface ApplyResult {
@@ -226,6 +232,8 @@ export interface Store<S extends object = any> {
   /** Every live session: its replica id, its user, and what it shares */
   peers(): Peer[];
   snapshot(): S;
+  /** The state as JSON, encoded once per change: what a snapshot carries, inline or over HTTP */
+  snapshotJSON(): string;
   /** Subscribe to accepted changes (a lazy-watch listener on the state) */
   on(listener: ChangeListener<S>, options?: ListenerOptions): Unsubscribe;
   /** Watch ops, refusals, and sessions, for logs, audits, and metrics */
@@ -285,6 +293,8 @@ export interface HubOptions {
   authorize?: Authorize;
   /** Fan a store's patch out to every subscribed socket at once, rather than a send per socket */
   channel?: HubChannel;
+  /** Where a client that can fetch gets a snapshot of `threshold` bytes or more, when the transport serves the route */
+  httpSnapshots?: { url(storeId: string): string; threshold: number };
   onError?(error: unknown): void;
 }
 
@@ -303,3 +313,12 @@ export function createHub(resolveStore: StoreResolver, options: HubOptions): Hub
 export function toJSON(message: object): string;
 /** `{ ...message, store }`, keeping the payload's remembered JSON */
 export function tagStore<M extends object>(message: M, store: string): M & { store: string };
+
+/**
+ * The response to a request for a store's snapshot, for mounting the
+ * route in a server of your own (the adapters serve it themselves):
+ * `{ v, epoch, state }` as JSON, brotli or gzip as the request accepts
+ * and kept until the state changes, with an ETag that answers 304 while
+ * the store is unchanged. Authenticate and authorize the request first
+ */
+export function snapshotResponse(store: Store, request: Request): Response;

@@ -1,13 +1,15 @@
 // run.js - A benchmark for the paths that matter: the merge, the gates, a
 // broadcast to many sockets, a client's local op with each kind of
-// storage, and a reconnect answered with a snapshot versus a delta.
+// storage, a reconnect answered with a snapshot versus a delta, and a
+// snapshot on the socket versus over HTTP.
 //   npm run bench            (node bench/run.js [--rounds 5])
 //
 // Every case runs `rounds` times and reports the median, so a noisy
 // machine does not skew the numbers. Compare runs on the same machine;
 // the absolute figures say little across machines.
+import { deflateRawSync } from 'node:zlib';
 import { LazyWatch } from 'lazy-watch';
-import { createStore, toJSON } from '../src/server/index.js';
+import { createStore, toJSON, snapshotResponse } from '../src/server/index.js';
 import { createClient } from '../src/client/index.js';
 import { localStorageOutbox } from '../src/client/storage.js';
 import { createClock } from '../src/core/hlc.js';
@@ -206,10 +208,68 @@ bench('hello: answered with a delta of 10 ops, 10k-task store (encoded)', {
   }
 });
 
-// --- Wire size ---------------------------------------------------------------------------------
-// What permessage-deflate saves on the largest message there is
+// --- Snapshots over HTTP ------------------------------------------------------------------
+// A quiet store's hello costs the session microseconds (above); what the
+// wire adds is a compression of the whole snapshot per socket. The route
+// compresses it once per change instead and answers each fetch from that
 
-import { deflateRawSync } from 'node:zlib';
+const SNAPSHOT_ROUTE = 'http://localhost/ws/snapshot/bench';
+
+bench('hello: snapshot on the socket, compressed per socket (deflate of the cached encoding)', {
+  unit: 'hello',
+  setup: () => {
+    const c = seeded(10_000);
+    c.session = c.store.session({ send: message => { c.json = toJSON(message); } });
+    c.session.receive({ t: 'hello', replicaId: 'warm', ops: [] });
+    return c;
+  },
+  iterations: 20,
+  run: (c, n) => {
+    for (let i = 0; i < n; i++) {
+      c.session.receive({ t: 'hello', replicaId: `r${i}`, ops: [] });
+      deflateRawSync(c.json);   // what the socket does with the answer, per socket
+    }
+  }
+});
+
+bench('hello: snapshot over HTTP, the route answering the fetch that follows (compressed once)', {
+  unit: 'hello',
+  setup: () => {
+    const c = seeded(10_000);
+    c.session = c.store.session({ send: message => { toJSON(message); }, httpSnapshot: { url: '/ws/snapshot/bench', threshold: 0 } });
+    c.request = new Request(SNAPSHOT_ROUTE, { headers: { 'accept-encoding': 'gzip, deflate, br' } });   // what a browser sends
+    snapshotResponse(c.store, c.request);   // compressed on the first fetch after a change, kept until the next
+    return c;
+  },
+  iterations: 2000,
+  run: (c, n) => {
+    for (let i = 0; i < n; i++) {
+      c.session.receive({ t: 'hello', replicaId: `r${i}`, ops: [], fetch: true });   // answered with the route
+      snapshotResponse(c.store, c.request);                                            // the fetch
+    }
+  }
+});
+
+bench('hello: snapshot over HTTP, a reload of a store that has not changed (304)', {
+  unit: 'hello',
+  setup: () => {
+    const c = seeded(10_000);
+    c.session = c.store.session({ send: message => { toJSON(message); }, httpSnapshot: { url: '/ws/snapshot/bench', threshold: 0 } });
+    const etag = snapshotResponse(c.store, new Request(SNAPSHOT_ROUTE)).headers.get('etag');
+    c.request = new Request(SNAPSHOT_ROUTE, { headers: { 'accept-encoding': 'gzip', 'if-none-match': etag } });
+    return c;
+  },
+  iterations: 2000,
+  run: (c, n) => {
+    for (let i = 0; i < n; i++) {
+      c.session.receive({ t: 'hello', replicaId: `r${i}`, ops: [], fetch: true });
+      snapshotResponse(c.store, c.request);
+    }
+  }
+});
+
+// --- Wire size ---------------------------------------------------------------------------------
+// What permessage-deflate saves on the largest message there is, and what the route serves instead
 
 const sized = seeded(10_000);
 let snapshotJSON = '';
@@ -217,6 +277,9 @@ sized.store.session({ send: message => { if (message.t === 'snapshot') snapshotJ
   .receive({ t: 'hello', replicaId: 'size', ops: [] });
 const rawBytes = Buffer.byteLength(snapshotJSON);
 const deflatedBytes = deflateRawSync(Buffer.from(snapshotJSON)).length;
+const routeBytes = async encoding => (await snapshotResponse(sized.store, new Request(SNAPSHOT_ROUTE, { headers: { 'accept-encoding': encoding } })).arrayBuffer()).byteLength;
+const brotliBytes = await routeBytes('br');
+const gzipBytes = await routeBytes('gzip');
 
 // --- Report ------------------------------------------------------------------------------------
 
@@ -228,4 +291,4 @@ for (const r of results) {
   const per = r.perOp >= 1000 ? `${fmt(r.perOp / 1000, 2)} ms` : `${fmt(r.perOp, 1)} µs`;
   console.log(`${r.name.padEnd(width)}  ${per.padStart(10)}  ${fmt(r.perSec).padStart(12)} ${r.unit}/s`);
 }
-console.log(`\nwire: a 10k-task snapshot is ${fmt(rawBytes / 1024)} KB of JSON, ${fmt(deflatedBytes / 1024)} KB with permessage-deflate (${fmt(rawBytes / deflatedBytes, 1)}x smaller)`);
+console.log(`\nwire: a 10k-task snapshot is ${fmt(rawBytes / 1024)} KB of JSON, ${fmt(deflatedBytes / 1024)} KB with permessage-deflate (${fmt(rawBytes / deflatedBytes, 1)}x smaller); the route serves it as ${fmt(brotliBytes / 1024)} KB of brotli (${fmt(gzipBytes / 1024)} KB of gzip for a client without it), compressed once per change`);

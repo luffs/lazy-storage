@@ -32,10 +32,13 @@ const { Utils } = LazyWatch;
  *   single `publish` per store rather than a send per socket; each socket
  *   subscribes when it opens a store and unsubscribes on leave, eviction,
  *   or close
+ * @param {{ url(storeId: string): string, threshold: number }} [options.httpSnapshots]
+ *   where a client that can fetch gets a snapshot of `threshold` bytes or
+ *   more, when the transport serves the route (see snapshot.js)
  * @param {(error: any) => void} [options.onError] - server faults (a store
  *   factory that threw); default console
  */
-export function createHub(resolveStore, { send, user, authorize, channel, onError = err => console.error('lazy-storage:', err) } = {}) {
+export function createHub(resolveStore, { send, user, authorize, channel, httpSnapshots, onError = err => console.error('lazy-storage:', err) } = {}) {
   if (typeof send !== 'function') throw new TypeError('A hub needs a send function');
   const sessions = new Map();
   const pending = new Map(); // store id -> messages queued while authorization is in flight
@@ -57,7 +60,9 @@ export function createHub(resolveStore, { send, user, authorize, channel, onErro
       user,
       onEvict: () => drop(id),
       // The transport fans a store's patch out to every subscribed socket at once, tagged and compressed once
-      broadcast: channel ? message => channel.publish(id, tagStore(message, id)) : undefined
+      broadcast: channel ? message => channel.publish(id, tagStore(message, id)) : undefined,
+      // Where a client that can fetch gets a large snapshot, when the transport serves the route
+      httpSnapshot: httpSnapshots ? { url: httpSnapshots.url(id), threshold: httpSnapshots.threshold } : undefined
     });
     sessions.set(id, session);
     return session;

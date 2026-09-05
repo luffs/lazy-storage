@@ -236,3 +236,47 @@ test('shutdown refuses new sockets, closes the open ones, flushes the stores, an
     await second.shutdown();
   }
 });
+
+test('a large snapshot is fetched over HTTP: the route on the http server serves it with an ETag behind the same gates as the socket, and a client syncs through it', async () => {
+  const stores = createStores(id => (id.startsWith('t') ? createStore({ initial: INITIAL, storage: memoryStorage() }) : null));
+  stores.get('t1').patch({ filler: 'x'.repeat(3000) });
+  const server = serve({
+    port: 0,
+    stores,
+    httpSnapshots: { threshold: 2048 },
+    authenticate: req => users[new URL(req.url).searchParams.get('token')] ?? null,
+    authorize: (user, storeId) => user.teams.includes(storeId),
+    request: (req, res) => { res.end('app'); }
+  });
+  const port = await listening(server);
+  try {
+    const url = `http://localhost:${port}/ws/snapshot/t1?token=alice`;
+    const res = await fetch(url);
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get('content-type'), 'application/json');
+    const document = await res.json();
+    assert.equal(document.v, stores.get('t1').version);
+    assert.equal(document.state.filler.length, 3000);
+    const etag = res.headers.get('etag');
+    assert.equal((await fetch(url, { headers: { 'if-none-match': etag } })).status, 304);
+    assert.equal((await fetch(`http://localhost:${port}/ws/snapshot/t1`)).status, 401, 'no token');
+    assert.equal((await fetch(`http://localhost:${port}/ws/snapshot/t2?token=bob`)).status, 403, 'bob is not on t2');
+    assert.equal((await fetch(`http://localhost:${port}/ws/snapshot/nope?token=alice`)).status, 404);
+    assert.equal(await (await fetch(`http://localhost:${port}/other`)).text(), 'app', 'other requests still reach the app');
+
+    const fetched = [];
+    const transport = webSocketTransport(`ws://localhost:${port}/ws?token=alice`, { fetch: (target, init) => { fetched.push(String(target)); return fetch(target, init); } });
+    const connection = createConnection({ transport, reconnect: { min: 20, max: 50 }, keepalive: false });
+    const client = attach(connection, 't1', 'fetcher');
+    await until(() => client.status === 'online', 'synced through the fetch');
+    assert.deepEqual(fetched, [url], 'the route resolved against the socket URL, token and all');
+    assert.equal(client.state.filler.length, 3000);
+    assert.equal(client.version, stores.get('t1').version);
+    stores.get('t1').patch({ tasks: { f: { id: 'f' } } });
+    await until(() => client.state.tasks.f, 'a patch after the fetch arrives on the socket');
+    client.dispose();
+    connection.close();
+  } finally {
+    await server.shutdown();
+  }
+});

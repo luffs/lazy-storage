@@ -18,6 +18,16 @@ export interface HandlerOptions {
    * options; false turns it off. Default true
    */
   perMessageDeflate?: boolean | ({ threshold?: number } & Record<string, unknown>);
+  /**
+   * Serve snapshots over HTTP at `<path>/snapshot/<store id>`, compressed
+   * once per change (brotli or gzip, as the client accepts): a client
+   * that can fetch (webSocketTransport can) is
+   * pointed there in place of a snapshot of `threshold` bytes or more
+   * (default 64 KB) instead of having the state compressed and buffered
+   * for its socket alone. The route authenticates and authorizes like an
+   * upgrade. false turns it off. Default true
+   */
+  httpSnapshots?: boolean | { threshold?: number };
   /** Server faults; default console */
   onError?(error: unknown): void;
 }
@@ -28,7 +38,7 @@ export interface CloseOptions {
 }
 
 export interface Handlers {
-  /** null when the URL is not ours, undefined after a successful upgrade, or an error Response */
+  /** null when the URL is not ours, undefined after a successful upgrade, or a Response: the snapshot route's, or an error */
   upgrade(req: Request, server: any): Promise<Response | undefined | null>;
   /** Pass through to Bun.serve */
   websocket: any;

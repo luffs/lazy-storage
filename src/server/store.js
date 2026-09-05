@@ -84,7 +84,7 @@ import { leaves, assertModel, rebuild } from '../core/model.js';
 import { mergeOp, compactTombstones } from '../core/merge.js';
 import { ClockMap } from '../core/clocks.js';
 import { memoryStorage } from './storage.js';
-import { toJSON, presetJSON } from './wire.js';
+import { toJSON, presetJSON, SNAPSHOT_THRESHOLD } from './wire.js';
 import { randomId } from '../core/ids.js';
 
 const { Utils } = LazyWatch;
@@ -603,11 +603,16 @@ export function createStore({
    * the state; `state` is decoded lazily for a consumer that reads the
    * object (a test, an in-process transport)
    */
-  function snapshotMessage(replicaId) {
+  function snapshotMessage(replicaId, session) {
     const json = encodedState();
     const ts = clock.peek();
     const seq = replicas.get(replicaId)?.seq ?? 0;
     const message = { t: 'snapshot', ts, seq, registers: registerPatterns, v: version, epoch };
+    // A client that can fetch, on a transport that serves snapshots, is
+    // pointed at the route when the state is large: gzipped once there
+    // rather than compressed and buffered per socket here (see snapshot.js)
+    const route = session?.fetch ? session.httpSnapshot : null;
+    if (route && json.length >= route.threshold) return { ...message, fetch: route.url };
     let decoded;
     Object.defineProperty(message, 'state', { enumerable: true, configurable: true, get: () => (decoded ??= JSON.parse(json)) });
     return presetJSON(message,
@@ -631,10 +636,10 @@ export function createStore({
    * every op it sent was merged (accepted or rejected leaf by leaf, both
    * of which the delta and the corrections express), else a snapshot.
    */
-  function catchUp(replicaId, since, sinceEpoch, refused, corrections) {
+  function catchUp(session, since, sinceEpoch, refused, corrections) {
     const patches = refused || sinceEpoch !== epoch ? null : deltaSince(since);
-    if (patches === null) return snapshotMessage(replicaId);
-    return { t: 'delta', patches: [...patches, ...corrections], ts: clock.peek(), seq: replicas.get(replicaId)?.seq ?? 0, registers: registerPatterns, v: version, epoch };
+    if (patches === null) return snapshotMessage(session.replicaId, session);
+    return { t: 'delta', patches: [...patches, ...corrections], ts: clock.peek(), seq: replicas.get(session.replicaId)?.seq ?? 0, registers: registerPatterns, v: version, epoch };
   }
 
   /** The error message for an op the store did not merge */
@@ -659,15 +664,20 @@ export function createStore({
    * offered one, so any of them must reach all of them; a session without
    * one is sent to on its own. `onEvict` is called after `closeSessions`
    * closed this session, so the transport can drop the socket or the hub
-   * its entry.
+   * its entry. A transport that serves snapshots over HTTP (see
+   * snapshot.js) hands in `httpSnapshot: { url, threshold }`: a client
+   * that says in its hello it can fetch is then pointed at `url` in place
+   * of a snapshot of `threshold` bytes or more.
    */
-  function session({ send, user, onEvict, broadcast: publish } = {}) {
+  function session({ send, user, onEvict, broadcast: publish, httpSnapshot } = {}) {
     if (typeof send !== 'function') throw new TypeError('A session needs a send function');
     const s = {
       send,
       user,
       onEvict,
       publish: typeof publish === 'function' ? publish : null,   // hears broadcasts through the transport's fan-out
+      httpSnapshot: typeof httpSnapshot?.url === 'string' ? { url: httpSnapshot.url, threshold: httpSnapshot.threshold ?? SNAPSHOT_THRESHOLD } : null,
+      fetch: false,          // whether its hello said it can fetch a snapshot over HTTP
       replicaId: null,
       shared: undefined,     // what this session shares with its peers, and its JSON
       sharedJson: undefined,
@@ -680,6 +690,7 @@ export function createStore({
             const joined = !s.replicaId;
             s.replicaId = msg.replicaId;
             if (msg.presence === false) s.presence = false;
+            s.fetch = msg.fetch === true;
             let shared = false;
             if (msg.share !== undefined) {
               try {
@@ -703,7 +714,7 @@ export function createStore({
             // overtaken by a later op of the same hello, and the client
             // applies corrections last
             const corrections = lost.length ? [correction(lost)] : [];
-            send(catchUp(msg.replicaId, msg.since, msg.epoch, refused, corrections));
+            send(catchUp(s, msg.since, msg.epoch, refused, corrections));
             // The newcomer gets the whole picture now; everyone else hears
             // of it with the next flush. A re-hello on the same session
             // changes nothing unless it shares anew
@@ -800,6 +811,8 @@ export function createStore({
     patch,
     session,
     closeSessions,
+    /** The state as JSON, encoded once per change: what a snapshot carries, inline or over HTTP */
+    snapshotJSON: encodedState,
     /** Distinct users with a live session */
     presence,
     /** Every live session: `{ replicaId, user, data }`, `data` being what it shares */

@@ -179,6 +179,9 @@ function build({
   const listeners = Object.fromEntries(EVENTS.map(e => [e, new Set()]));
   let link = null;        // attachment to the connection while connected
   let synced = false;     // this store's snapshot has landed on this socket
+  let fetching = 0;       // snapshot fetches begun; bumped to disown one in flight (see fetchSnapshot)
+  let held = null;        // what the socket delivered while a snapshot was being fetched, replayed on top of it
+  let fetchFailed = false; // a fetch failed on this socket: the next hello asks for the snapshot inline
   let lastStatus = 'offline';
   let presence = [];      // distinct users with a live session on this store, derived from the peers
   let peerMap = new Map(); // replicaId -> peer: every live session on this store, with what it shares
@@ -416,6 +419,8 @@ function build({
     if (!full) Object.assign(message, { since: known.v, epoch: known.epoch });
     if (shared !== undefined) message.share = shared;
     if (!wantsPresence) message.presence = false;
+    // A large snapshot can be fetched over HTTP instead, when the connection can fetch (see fetchSnapshot)
+    if (typeof connection.fetch === 'function' && !fetchFailed) message.fetch = true;
     link?.send(message);
   }
 
@@ -453,9 +458,53 @@ function build({
     emit('sync');
   }
 
+  /**
+   * The server pointed at where to fetch the snapshot rather than sending
+   * it (a large one, and this connection can fetch): fetch it, holding
+   * back what the socket delivers meanwhile, then land it as the snapshot
+   * would have landed and replay what was held, minus the patches the
+   * fetched state already includes. A fetch that fails is reported and
+   * asks again, for the snapshot inline this time
+   */
+  function fetchSnapshot(msg) {
+    const attempt = ++fetching;
+    const queue = held = [];
+    const current = () => attempt === fetching && held === queue;
+    Promise.resolve()
+      .then(() => connection.fetch(msg.fetch))
+      .then(async response => {
+        if (!response.ok) throw new Error(`the server answered ${response.status}`);
+        const body = await response.json();
+        if (!Utils.isPlainObject(body) || !Utils.isPlainObject(body.state) || !Number.isInteger(body.v)) throw new Error('the response is not a snapshot');
+        return body;
+      })
+      .then(
+        body => {
+          if (!current()) return;
+          held = null;
+          caughtUp({ ...msg, v: body.v, epoch: typeof body.epoch === 'string' ? body.epoch : msg.epoch }, () => LazyWatch.overwrite(state, body.state, SNAPSHOT));
+          for (const m of queue) if (m.t !== 'patch' || !(Number.isInteger(m.v) && m.v <= body.v)) handle(m);
+        },
+        err => {
+          if (!current()) return;
+          held = null;
+          fetchFailed = true;
+          const error = new Error(`The snapshot could not be fetched: ${err?.message ?? err}`);
+          error.code = 'snapshot-fetch';
+          emit('error', error);
+          for (const m of queue) handle(m);
+          hello();
+        }
+      )
+      .catch(err => emit('error', err));   // a fault landing the snapshot: reported, not swallowed
+  }
+
   function handle(msg) {
+    // While a snapshot is being fetched what arrives waits for it (see fetchSnapshot); a closed ends the wait
+    if (held && msg.t !== 'closed') return void held.push(msg);
     switch (msg.t) {
       case 'snapshot':
+        if (typeof msg.fetch === 'string' && msg.state === undefined) return fetchSnapshot(msg);
         return caughtUp(msg, () => LazyWatch.overwrite(state, msg.state, SNAPSHOT));
       case 'delta':
         return caughtUp(msg, () => {
@@ -484,6 +533,8 @@ function build({
           link = null;
         }
         synced = false;
+        fetching++;
+        held = null;
         if (ownsConnection) connection.close();
         clearPresence();
         refreshStatus();
@@ -553,6 +604,10 @@ function build({
     onOpen(attached) {
       link = attached;
       synced = false;
+      // A new socket: a fetch begun on the last one is disowned, and a fetch that failed there is tried again
+      fetching++;
+      held = null;
+      fetchFailed = false;
       // A socket the server had turned away is back (another client on
       // the connection reconnected, if not this one)
       ended = null;
@@ -562,6 +617,8 @@ function build({
     onMessage: handle,
     onClose() {
       synced = false;
+      fetching++;
+      held = null;
       clearPresence();
       refreshStatus();
     },
@@ -588,6 +645,8 @@ function build({
     }
     if (ownsConnection) connection.close();
     synced = false;
+    fetching++;
+    held = null;
     clearPresence();
     refreshStatus();
   }

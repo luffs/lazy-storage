@@ -19,6 +19,7 @@ import { WebSocketServer } from 'ws';
 import { LazyWatch } from 'lazy-watch';
 import { createHub } from './hub.js';
 import { toJSON, closeUnauthorized, deflateOptions } from './wire.js';
+import { snapshotOptions, snapshotId, serveSnapshot } from './snapshot.js';
 
 /** A Web Request for an incoming Node request, headers included */
 export function toRequest(req) {
@@ -39,9 +40,10 @@ function refuse(socket, status, text) {
 
 /**
  * @param {Object} options - as the Bun adapter's createHandlers
- * @returns {{ upgrade: (req: import('node:http').IncomingMessage, socket: import('node:stream').Duplex, head: Buffer) => Promise<boolean>, close: (options?: { reason?: string }) => Promise<void>, closing: boolean, wss: WebSocketServer }}
+ * @returns {{ upgrade: (req: import('node:http').IncomingMessage, socket: import('node:stream').Duplex, head: Buffer) => Promise<boolean>, request: (req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => Promise<boolean>, close: (options?: { reason?: string }) => Promise<void>, closing: boolean, wss: WebSocketServer }}
  *   `upgrade` resolves to false when the URL is not ours (answer it
- *   yourself), true when it took the socket
+ *   yourself), true when it took the socket; `request` likewise for a
+ *   plain request, which is ours when it is the snapshot route
  */
 export function createHandlers({
   stores,
@@ -50,10 +52,13 @@ export function createHandlers({
   authorize,
   maxPayload = 4 * 1024 * 1024,
   perMessageDeflate = true,
+  httpSnapshots = true,
   onError = err => console.error('lazy-storage:', err)
 } = {}) {
   if (!stores) throw new TypeError('createHandlers requires stores (a registry or a resolver function)');
   const resolveStore = typeof stores === 'function' ? stores : id => stores.get(id);
+  const snapshots = snapshotOptions(httpSnapshots);
+  const snapshotRoute = snapshots && { threshold: snapshots.threshold, url: id => `${path}/snapshot/${id}` };
   // Compression is decided per message, above `threshold` only, as the Bun
   // adapter does. ws is asked for no context takeover both ways, which
   // every client accepts, and takes any of its own options from the object
@@ -85,6 +90,7 @@ export function createHandlers({
       send: message => send(ws, message),
       user,
       authorize,
+      httpSnapshots: snapshotRoute,
       onError
     });
     hubs.set(ws, hub);
@@ -138,6 +144,29 @@ export function createHandlers({
     return true;
   }
 
+  /**
+   * Handle a plain request when it is ours, the snapshot route (see
+   * snapshot.js); resolves to false when it is not, for the app to answer
+   */
+  async function request(req, res) {
+    const id = snapshots ? snapshotId(new URL(req.url, 'http://localhost').pathname, path) : null;
+    if (id === null) return false;
+    let response;
+    if (closing) {
+      response = new Response('Server shutting down', { status: 503, headers: { 'retry-after': '1' } });
+    } else {
+      try {
+        response = await serveSnapshot(toRequest(req), id, { resolveStore, authenticate, authorize, onError });
+      } catch (err) {
+        onError(err);
+        response = new Response('Something went wrong', { status: 500 });
+      }
+    }
+    res.writeHead(response.status, Object.fromEntries(response.headers));
+    res.end(response.body === null ? undefined : Buffer.from(await response.arrayBuffer()));
+    return true;
+  }
+
   /** Graceful shutdown, as the Bun adapter's: no new sockets, open ones told to go away, stores flushed */
   async function close({ reason = 'Server shutting down' } = {}) {
     closing = true;
@@ -160,7 +189,7 @@ export function createHandlers({
     if (typeof stores.dispose === 'function') stores.dispose();
   }
 
-  return { upgrade, close, get closing() { return closing; }, wss };
+  return { upgrade, request, close, get closing() { return closing; }, wss };
 }
 
 /**
@@ -169,7 +198,7 @@ export function createHandlers({
  * @param {number} [options.port=3200]
  * @param {string} [options.host]
  * @param {(req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => void} [options.request]
- *   handles other requests (default: 404)
+ *   handles other requests (default: 404); the snapshot route is answered first
  * @returns {import('node:http').Server & { shutdown: (options?: { reason?: string }) => Promise<void> }}
  *   listening has been started; `await once(server, 'listening')` before
  *   reading `server.address().port`
@@ -177,10 +206,13 @@ export function createHandlers({
 export function serve({ port = 3200, host, request, ...options } = {}) {
   const handlers = createHandlers(options);
   const server = createServer((req, res) => {
-    if (request) return request(req, res);
-    res.statusCode = 404;
-    res.setHeader('content-type', 'text/plain');
-    res.end('Not found');
+    handlers.request(req, res).then(ours => {
+      if (ours) return;
+      if (request) return request(req, res);
+      res.statusCode = 404;
+      res.setHeader('content-type', 'text/plain');
+      res.end('Not found');
+    });
   });
   server.on('upgrade', (req, socket, head) => {
     handlers.upgrade(req, socket, head).then(ours => { if (!ours) refuse(socket, 404, 'Not found'); });

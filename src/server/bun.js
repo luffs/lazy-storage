@@ -21,6 +21,7 @@
 import { LazyWatch } from 'lazy-watch';
 import { createHub } from './hub.js';
 import { toJSON, closeUnauthorized, deflateOptions } from './wire.js';
+import { snapshotOptions, snapshotId, serveSnapshot } from './snapshot.js';
 
 /**
  * @param {Object} options
@@ -43,12 +44,20 @@ import { toJSON, closeUnauthorized, deflateOptions } from './wire.js';
  *   patch costs ten times its encoding and makes it larger. An object
  *   sets `threshold` and any of Bun's own options (`compress`,
  *   `decompress`); false turns it off
+ * @param {boolean|{ threshold?: number }} [options.httpSnapshots=true] -
+ *   serve snapshots over HTTP at `<path>/snapshot/<store id>`, compressed
+ *   once per change (brotli or gzip, as the client accepts): a client
+ *   that can fetch (webSocketTransport can) is
+ *   pointed there in place of a snapshot of `threshold` bytes or more
+ *   (default 64 KB) instead of having the state compressed and buffered
+ *   for its socket alone. The route authenticates and authorizes like an
+ *   upgrade. false turns it off; every client then gets its snapshot inline
  * @param {(error: any) => void} [options.onError] - server faults: a
  *   store factory that threw, a bug while handling a message; default console
  * @returns {{ upgrade: (req: Request, server: any) => Promise<Response|undefined|null>, websocket: Object, close: (options?: { reason?: string }) => Promise<void>, get closing(): boolean }}
  *   `upgrade` resolves to null when the URL is not ours, undefined after a
- *   successful upgrade, or an error Response; `close` is the graceful
- *   shutdown described above
+ *   successful upgrade, or a Response (the snapshot route's, or an error);
+ *   `close` is the graceful shutdown described above
  */
 export function createHandlers({
   stores,
@@ -57,11 +66,15 @@ export function createHandlers({
   authorize,
   maxPayload = 4 * 1024 * 1024,
   perMessageDeflate = true,
+  httpSnapshots = true,
   onError = err => console.error('lazy-storage:', err)
 } = {}) {
   if (!stores) throw new TypeError('createHandlers requires stores (a registry or a resolver function)');
   const resolveStore = typeof stores === 'function' ? stores : id => stores.get(id);
   const deflate = deflateOptions(perMessageDeflate);
+  const snapshots = snapshotOptions(httpSnapshots);
+  // Where the hub points a client that can fetch for a large snapshot
+  const snapshotRoute = snapshots && { threshold: snapshots.threshold, url: id => `${path}/snapshot/${id}` };
   // Bun compresses a frame only when asked per send; every message is
   // encoded once (see wire.js) and sent compressed when it is large enough
   const send = (ws, message) => {
@@ -76,8 +89,18 @@ export function createHandlers({
 
   async function upgrade(req, server) {
     bunServer = server;
-    if (new URL(req.url).pathname !== path) return null;
+    const { pathname } = new URL(req.url);
+    const snapshotOf = snapshots ? snapshotId(pathname, path) : null;
+    if (pathname !== path && snapshotOf === null) return null;
     if (closing) return new Response('Server shutting down', { status: 503, headers: { 'retry-after': '1' } });
+    if (snapshotOf !== null) {
+      try {
+        return await serveSnapshot(req, snapshotOf, { resolveStore, authenticate, authorize, onError });
+      } catch (err) {
+        onError(err);
+        return new Response('Something went wrong', { status: 500 });
+      }
+    }
     let user;
     if (authenticate) {
       user = await authenticate(req);
@@ -102,7 +125,7 @@ export function createHandlers({
         unsubscribe: id => { try { ws.unsubscribe(topic(id)); } catch { /* a closing socket is already gone */ } },
         publish: (id, message) => { const json = toJSON(message); bunServer.publish(topic(id), json, shouldCompress(json)); }
       };
-      hubs.set(ws, createHub(resolveStore, { send: message => send(ws, message), user: ws.data.user, authorize, channel, onError }));
+      hubs.set(ws, createHub(resolveStore, { send: message => send(ws, message), user: ws.data.user, authorize, channel, httpSnapshots: snapshotRoute, onError }));
     },
     message(ws, raw) {
       let msg;

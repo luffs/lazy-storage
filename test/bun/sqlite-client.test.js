@@ -1,5 +1,6 @@
-// sqlite-client.test.js - Runs under Bun only (bun:sqlite): `bun test/bun/sqlite-client.test.js`
+// sqlite-client.test.js - Runs under Bun only (bun:sqlite): `bun test`
 import assert from 'node:assert/strict';
+import { test, afterAll } from 'bun:test';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -13,88 +14,84 @@ import { createNetwork } from '../helpers.js';
 const INITIAL = { tasks: {}, order: [] };
 const REGISTERS = ['order'];
 const snap = client => LazyWatch.snapshot(client.state);
-let passed = 0;
-const test = async (name, fn) => { await fn(); passed++; console.log('✔', name); };
 
 const dir = mkdtempSync(join(tmpdir(), 'lazy-storage-client-sqlite-'));
 const file = join(dir, 'mirror.sqlite');
-try {
-  await test('a Bun client persists rows and ops in SQLite synchronously and comes back from the file', async () => {
-    const store = createStore({ initial: INITIAL, registers: REGISTERS });
-    const net = createNetwork(store);
-    const link = net.link();
-    let storage = sqliteClientStorage(file);
-    assert.equal(storage.load(), null);
-    const a = createClient({ transport: link.factory, reconnect: false, store: 'main', initial: INITIAL, registers: REGISTERS, storage, replicaId: 'a' });
-    a.connect();
-    await net.settle();
-    a.collection('tasks').add({ id: 't1', title: 'one', sub: { s1: { id: 's1' } } });
-    a.state.order.push('t1');
-    await net.settle();
-    let saved = storage.load();
-    assert.deepEqual(rebuild(INITIAL, saved.rows), snap(a));
-    assert.deepEqual(saved.ops, []);
-    assert.equal(saved.version, store.version);
-    assert.equal(saved.epoch, store.epoch);
+test('a Bun client persists rows and ops in SQLite synchronously and comes back from the file', async () => {
+  const store = createStore({ initial: INITIAL, registers: REGISTERS });
+  const net = createNetwork(store);
+  const link = net.link();
+  let storage = sqliteClientStorage(file);
+  assert.equal(storage.load(), null);
+  const a = createClient({ transport: link.factory, reconnect: false, store: 'main', initial: INITIAL, registers: REGISTERS, storage, replicaId: 'a' });
+  a.connect();
+  await net.settle();
+  a.collection('tasks').add({ id: 't1', title: 'one', sub: { s1: { id: 's1' } } });
+  a.state.order.push('t1');
+  await net.settle();
+  let saved = storage.load();
+  assert.deepEqual(rebuild(INITIAL, saved.rows), snap(a));
+  assert.deepEqual(saved.ops, []);
+  assert.equal(saved.version, store.version);
+  assert.equal(saved.epoch, store.epoch);
 
-    link.goOffline();
-    await net.settle();
-    delete a.state.tasks.t1;
-    a.state.order = [];
-    await net.settle();
-    a.collection('tasks').add({ id: 't2', title: 'offline' });
-    await net.settle();
-    saved = storage.load();
-    assert.deepEqual(saved.ops.map(op => op.seq), [2, 3]);
-    assert.equal(storage.db.query('SELECT COUNT(*) AS n FROM leaves WHERE path >= ? AND path < ?').get('["tasks","t1",', '["tasks","t1",￿').n, 0, 'descendant rows went with the record');
-    const before = snap(a);
-    assert.deepEqual(rebuild(INITIAL, saved.rows), before);
-    a.dispose();
-    storage.close();
+  link.goOffline();
+  await net.settle();
+  delete a.state.tasks.t1;
+  a.state.order = [];
+  await net.settle();
+  a.collection('tasks').add({ id: 't2', title: 'offline' });
+  await net.settle();
+  saved = storage.load();
+  assert.deepEqual(saved.ops.map(op => op.seq), [2, 3]);
+  assert.equal(storage.db.query('SELECT COUNT(*) AS n FROM leaves WHERE path >= ? AND path < ?').get('["tasks","t1",', '["tasks","t1",￿').n, 0, 'descendant rows went with the record');
+  const before = snap(a);
+  assert.deepEqual(rebuild(INITIAL, saved.rows), before);
+  a.dispose();
+  storage.close();
 
-    storage = sqliteClientStorage(file);
-    const b = createClient({ transport: link.factory, reconnect: false, store: 'main', initial: INITIAL, registers: REGISTERS, storage });
-    assert.equal(b.restored, true);
-    assert.equal(b.replicaId, 'a');
-    assert.equal(b.pending, 2);
-    assert.deepEqual(snap(b), before);
-    link.goOnline();
-    b.connect();
-    await net.settle();
-    assert.equal(b.pending, 0);
-    assert.deepEqual(store.snapshot(), snap(b));
-    assert.deepEqual(rebuild(INITIAL, storage.load().rows), store.snapshot());
-    assert.deepEqual(storage.load().ops, []);
-    b.dispose();
-    storage.close();
-  });
+  storage = sqliteClientStorage(file);
+  const b = createClient({ transport: link.factory, reconnect: false, store: 'main', initial: INITIAL, registers: REGISTERS, storage });
+  assert.equal(b.restored, true);
+  assert.equal(b.replicaId, 'a');
+  assert.equal(b.pending, 2);
+  assert.deepEqual(snap(b), before);
+  link.goOnline();
+  b.connect();
+  await net.settle();
+  assert.equal(b.pending, 0);
+  assert.deepEqual(store.snapshot(), snap(b));
+  assert.deepEqual(rebuild(INITIAL, storage.load().rows), store.snapshot());
+  assert.deepEqual(storage.load().ops, []);
+  b.dispose();
+  storage.close();
+});
 
-  await test('a newer op takes over from an older pending one: the pruned op is rewritten, the emptied op removed', async () => {
-    const store = createStore({ initial: INITIAL, registers: REGISTERS });
-    const net = createNetwork(store);
-    const link = net.link();
-    const storage = sqliteClientStorage(join(dir, 'coalesce.sqlite'));
-    const a = createClient({ transport: link.factory, reconnect: false, store: 'main', initial: INITIAL, registers: REGISTERS, storage, replicaId: 'a' });
-    a.state.tasks.x = { id: 'x', title: 'h' };
-    await net.settle();
-    a.state.tasks.x.title = 'he';
-    await net.settle();
-    a.state.tasks.x.title = 'hel';
-    await net.settle();
-    assert.equal(a.pending, 2);
-    assert.deepEqual(storage.load().ops.map(op => [op.seq, op.diff]), [[1, { tasks: { x: { id: 'x' } } }], [3, { tasks: { x: { title: 'hel' } } }]]);
-    a.connect();
-    await net.settle();
-    assert.equal(a.pending, 0);
-    assert.deepEqual(store.snapshot().tasks.x, { id: 'x', title: 'hel' });
-    assert.deepEqual(storage.load().ops, []);
-    a.dispose();
-    storage.close();
-  });
+test('a newer op takes over from an older pending one: the pruned op is rewritten, the emptied op removed', async () => {
+  const store = createStore({ initial: INITIAL, registers: REGISTERS });
+  const net = createNetwork(store);
+  const link = net.link();
+  const storage = sqliteClientStorage(join(dir, 'coalesce.sqlite'));
+  const a = createClient({ transport: link.factory, reconnect: false, store: 'main', initial: INITIAL, registers: REGISTERS, storage, replicaId: 'a' });
+  a.state.tasks.x = { id: 'x', title: 'h' };
+  await net.settle();
+  a.state.tasks.x.title = 'he';
+  await net.settle();
+  a.state.tasks.x.title = 'hel';
+  await net.settle();
+  assert.equal(a.pending, 2);
+  assert.deepEqual(storage.load().ops.map(op => [op.seq, op.diff]), [[1, { tasks: { x: { id: 'x' } } }], [3, { tasks: { x: { title: 'hel' } } }]]);
+  a.connect();
+  await net.settle();
+  assert.equal(a.pending, 0);
+  assert.deepEqual(store.snapshot().tasks.x, { id: 'x', title: 'hel' });
+  assert.deepEqual(storage.load().ops, []);
+  a.dispose();
+  storage.close();
+});
 
-  console.log(`\n${passed} passed`);
-} finally {
+afterAll(async () => {
   for (let attempt = 0; attempt < 5; attempt++) {
     try { rmSync(dir, { recursive: true, force: true }); break; } catch { await new Promise(r => setTimeout(r, 100)); }
   }
-}
+});

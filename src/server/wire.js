@@ -10,6 +10,13 @@
 // the payload again.
 const JSON_CACHE = Symbol('lazy-storage.json');
 
+/**
+ * Below this many bytes of state JSON a snapshot goes inline on the socket;
+ * at or above, a client that can fetch is pointed at the HTTP route (see
+ * snapshot.js), where it is gzipped once rather than per socket
+ */
+export const SNAPSHOT_THRESHOLD = 64 * 1024;
+
 /** The message's JSON, encoded once and remembered on the object */
 export function toJSON(message) {
   let json = message[JSON_CACHE];

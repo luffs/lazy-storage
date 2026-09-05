@@ -533,6 +533,26 @@ A public server needs a few ceilings, all on by default:
   grows with the listeners, so a big write to a big audience is bandwidth
   the uplink has to carry; splitting a large value into records, so a
   patch carries only what changed, is what keeps it small.
+- **Snapshots over HTTP.** A hello answered with a large snapshot costs
+  the wire a compression of the whole state per socket (about 5 ms per
+  megabyte) and a copy of it into that socket's send buffer. Both adapters
+  serve snapshots at `<path>/snapshot/<store id>` instead, compressed once
+  per change (brotli, or gzip for a client without it; brotli packs this
+  JSON some 15% tighter in the same time) and kept until the next: a
+  client that can fetch (one on
+  `webSocketTransport`, by default) says so in its hello, and a snapshot
+  of `httpSnapshots.threshold` bytes or more (default 64 KB) is answered
+  with where to fetch it rather than the state. The route sits behind the
+  same `authenticate` and `authorize` as the socket, and the response
+  carries an ETag, so a reload that finds the store unchanged costs a 304.
+  Patches keep flowing on the socket meanwhile; the client lays the ones
+  newer than the snapshot it fetched on top of it. A fetch that fails (a
+  proxy that does not pass the route, a cookie session across origins) is
+  reported as an error with code `snapshot-fetch`, and the client asks
+  again, for the snapshot inline. `httpSnapshots: false` on the adapter,
+  or `fetch: false` on the transport, keeps every snapshot on the socket;
+  `snapshotResponse(store, request)` serves the route from a server of
+  your own.
 - **Op size.** `maxLeaves` on the store (default 10 000) is the most leaves
   one op may touch; a larger one is refused with code `too-large`, and
   the client drops it and resyncs.
@@ -589,6 +609,10 @@ Bun.serve({
 });
 ```
 
+`upgrade` also answers the snapshot route (`<path>/snapshot/<store id>`,
+see [Limits](#limits-memory-and-observability)) with a Response, so
+mounting it this way serves both.
+
 **Shutting down.** `await lazy.close()` (or `await server.shutdown()` on
 what `serve` returns) refuses new sockets with 503, closes the open ones
 with WebSocket code 1001 so clients reconnect at once instead of waiting
@@ -629,8 +653,10 @@ await once(server, 'listening');
 ```
 
 To mount inside an http server you already have, handle its `upgrade`
-event with `lazy.upgrade(req, socket, head)`, which resolves to false when
-the URL is not lazy-storage's, and call `lazy.close()` on shutdown.
+event with `lazy.upgrade(req, socket, head)` and its `request` event with
+`lazy.request(req, res)` (the snapshot route), each of which resolves to
+false when the request is not lazy-storage's, and call `lazy.close()` on
+shutdown.
 
 ## Undo
 
@@ -648,7 +674,7 @@ runs on the synced state and shows in the array view like any other change.
 
 - `createClient({ store, connection | transport, initial, registers, lists, position, replicaId, storage, cache, undo, undoLimit, reconnect, presence, now })`; `db.restored` — started from the cached state; `db.version` — the store version this client has seen everything up to; `db.wire` — the synced state under a lists view
 - `openClient(options)` → `Promise<db>` — the same, for a storage adapter whose `load()` returns a promise
-- `createConnection({ transport, reconnect, keepalive })` → `connect()`, `close()`, `status`, `attached`, `closed` — why the server turned the socket away, or null — `on('status' | 'closed', fn)` — a socket shared by clients
+- `createConnection({ transport, reconnect, keepalive })` → `connect()`, `close()`, `status`, `attached`, `closed` — why the server turned the socket away, or null — `fetch(path)` when the transport can — `on('status' | 'closed', fn)` — a socket shared by clients
 - `sharedConnection({ name, transport, storage, reconnect, keepalive, channel, locks, tabId, linger, sweepEvery, onError })` → the same, plus `leader`, `tabId`, `upstream` — the socket's status — `pending(store)` — the replica's unsent ops — `on('sync', fn)`, `dispose()` — one socket and one replica per browser, the tabs electing a leader (see [One socket per browser](#one-socket-per-browser))
 - `db.state` — the mirror (a lazy-watch proxy). Read and write it directly
 - `db.store`, `db.connection` — the store id and the connection
@@ -657,9 +683,9 @@ runs on the synced state and shows in the array view like any other change.
 - `db.list(path, { position })` — an ordered list of records: `all()`, `ids()`, `get(id)`, `has(id)`, `add(record, where) → id`, `move(id, where)`, `remove(id)`, `reconcile(ids) → written`, `keyFor(where)`; `where` is `{ before }`, `{ after }`, `{ at }`, or nothing for the end
 - `db.connect()`, `db.disconnect()`, `db.status` (`'offline' | 'connecting' | 'online'`), `db.pending`
 - `db.watch(listener)` — state changes; `meta?.origin === 'remote'` marks the server's
-- `db.on('status' | 'error' | 'sync' | 'presence' | 'peers' | 'closed' | 'history', fn)` — lifecycle events; a refused op is an error with a `code` (`forbidden`, `expired`, `invalid`, `too-large` drop the op; `rate-limited` keeps it and retries; `clock-skew` is handled without one); `history` carries `{ canUndo, canRedo }` after a local batch, an undo, a redo, or `clearHistory()`
+- `db.on('status' | 'error' | 'sync' | 'presence' | 'peers' | 'closed' | 'history', fn)` — lifecycle events; a refused op is an error with a `code` (`forbidden`, `expired`, `invalid`, `too-large` drop the op; `rate-limited` keeps it and retries; `clock-skew` is handled without one), and so is a snapshot that could not be fetched (`snapshot-fetch`, after which the client asks for it inline); `history` carries `{ canUndo, canRedo }` after a local batch, an undo, a redo, or `clearHistory()`
 - `db.undo()`, `db.redo()`, `db.canUndo`, `db.canRedo`, `db.checkpoint()`, `db.group(fn)`, `db.clearHistory()`
-- `webSocketTransport(url)`, `memoryOutbox()`, `localStorageOutbox(key)` — document adapters: `{ load(), save(outbox), saveState(cache) }`, the built-in ones also `clear()` — forget the store's outbox and cache
+- `webSocketTransport(url, { WebSocket, fetch })` — `fetch` fetches a large snapshot from the socket's server (the global fetch by default, on the route resolved against the socket URL with its query; your own to add headers; false to keep every snapshot on the socket); `memoryOutbox()`, `localStorageOutbox(key)` — document adapters: `{ load(), save(outbox), saveState(cache) }`, the built-in ones also `clear()` — forget the store's outbox and cache
 - `indexedDBStorage(name, { onError })` → also `settled()`, `close()`, `destroy()` — a row adapter: `{ load(), commit({ puts, deletes, meta }), replace({ rows, meta }), saveOp(op, meta), removeOp(seq, meta), dropOps(seq, meta) }`, where a delete removes the path and everything under it, `saveOp` also rewrites an op a newer one pruned, `removeOp` takes out one a newer op emptied, and `meta` is `{ replicaId, seq, version, epoch }`
 
 **Bun client** (`lazy-storage/client/sqlite`): `sqliteClientStorage(file, { wal })` → a row adapter on bun:sqlite, plus `db` and `close()`.
@@ -674,27 +700,28 @@ runs on the synced state and shows in the array view like any other change.
 
 - `createStore({ initial, registers, readOnly, validate, maxSkew, retention, compactEvery, deltaLog, maxLeaves, rateLimit, storage, presence, onError, now })` — `presence` is `false` (default), `true`, or `{ key, user, validate, every, maxShare }`; `store.epoch` — this life of the storage
 - `store.observe(event, fn)` → unsubscribe — `'op'`, `'refused'`, `'session'`; `store.stats()` → `{ version, epoch, sessions, replicas, rows, tombstones, log }`
-- `store.session({ send, user, onEvict })` → `{ receive(message), close(), user, replicaId }` — one per connection, transport-agnostic
+- `store.session({ send, user, onEvict, broadcast, httpSnapshot })` → `{ receive(message), close(), user, replicaId }` — one per connection, transport-agnostic; `broadcast` is a transport's fan-out to every session at once, `httpSnapshot` `{ url, threshold }` where a client that can fetch gets a large snapshot
+- `store.snapshotJSON()` — the state as JSON, encoded once per change; `snapshotResponse(store, request)` — the snapshot route's Response (`{ v, epoch, state }`, brotli or gzip as accepted, an ETag and 304s), for a server of your own
 - `store.closeSessions(predicate, message)` — evict sessions; `store.presence()` — distinct users with a live session; `store.peers()` — every live session as `{ replicaId, user, data }`
 - `store.patch(diff)` — a server-side change, timestamped and broadcast; `store.apply(op)` — a trusted op, gates skipped
 - `store.on(listener)`, `store.snapshot()`, `store.state`, `store.version`, `store.replicas`
 - `store.compact()` → `{ tombstones, replicas }` removed; `store.flush()`, `store.dispose()`
 - `memoryStorage()`, `jsonFileStorage(path, { debounce })`
 - `createStores(factory, { idle, sweepEvery, now })` → `get(id)`, `has(id)`, `ids()`, `stats()` — the live stores' stats rolled up: `{ stores, idle, sessions, replicas, rows, tombstones, log }` — `release(id)`, `sweep()`, `dispose()`; `isStoreId(id)`
-- `createHub(resolveStore, { send, user, authorize, onError })` → `{ receive(message), close(), stores, user }` — the server side of a multiplexed connection, session-shaped
+- `createHub(resolveStore, { send, user, authorize, channel, httpSnapshots, onError })` → `{ receive(message), close(), stores, user }` — the server side of a multiplexed connection, session-shaped; `channel` is a transport's topic fan-out, `httpSnapshots` `{ url(id), threshold }` its snapshot route
 - `toJSON(message)` — a message's JSON, encoded once however many sockets it goes to; use it in a transport of your own so a broadcast is not re-encoded per socket (`tagStore(message, id)` is what a hub does)
 
 **SQLite** (`lazy-storage/server/sqlite`, Bun): `sqliteStorage(file, { wal })` →
 `store(id)`, `ids()`, `remove(id)`, `db`, `close()`.
 
-**Bun adapter** (`lazy-storage/server/bun`): `serve({ stores, port, path, fetch, authenticate, authorize, maxPayload, perMessageDeflate, onError })` —
+**Bun adapter** (`lazy-storage/server/bun`): `serve({ stores, port, path, fetch, authenticate, authorize, maxPayload, perMessageDeflate, httpSnapshots, onError })` —
 `stores` is a registry or `id => store|null` (for one store, `() => store`); the
-hub listens at `path`; the returned server gains `shutdown({ reason })`.
-`createHandlers({ stores, path, authenticate, authorize, maxPayload, perMessageDeflate, onError })` →
+hub listens at `path` and the snapshot route under it; the returned server gains `shutdown({ reason })`.
+`createHandlers({ stores, path, authenticate, authorize, maxPayload, perMessageDeflate, httpSnapshots, onError })` →
 `{ upgrade(req, server), websocket, close({ reason }), closing }` for mounting inside your own `Bun.serve`.
 
-**Node adapter** (`lazy-storage/server/node`, needs `ws`): `serve({ stores, port, host, request, path, authenticate, authorize, maxPayload, perMessageDeflate, onError })` →
-an `http.Server` with `shutdown({ reason })`; `createHandlers(options)` → `{ upgrade(req, socket, head), close({ reason }), closing, wss }`;
+**Node adapter** (`lazy-storage/server/node`, needs `ws`): `serve({ stores, port, host, request, path, authenticate, authorize, maxPayload, perMessageDeflate, httpSnapshots, onError })` →
+an `http.Server` with `shutdown({ reason })`; `createHandlers(options)` → `{ upgrade(req, socket, head), request(req, res), close({ reason }), closing, wss }`;
 `toRequest(req)` — the Web `Request` `authenticate` sees. **node:sqlite** (`lazy-storage/server/sqlite-node`): `sqliteStorage(file, { wal })`, as the Bun one.
 
 **Types**: declarations ship with the package for every entry (`types/`);
@@ -743,7 +770,7 @@ primitives anywhere, of anything at a register path).
 
 | Message | Fields | Meaning |
 |---|---|---|
-| `hello` | `replicaId`, `ops`, `since?`, `epoch?`, `share?` | Connect or reconnect. `ops` is the outbox (its first 1000 ops); `since` is the store version the client has seen everything up to and `epoch` the storage life it belongs to, asking for a delta; `share` is what this client shares with its peers, restored on reconnect; `presence: false` asks not to be sent presence |
+| `hello` | `replicaId`, `ops`, `since?`, `epoch?`, `share?`, `presence?`, `fetch?` | Connect or reconnect. `ops` is the outbox (its first 1000 ops); `since` is the store version the client has seen everything up to and `epoch` the storage life it belongs to, asking for a delta; `share` is what this client shares with its peers, restored on reconnect; `presence: false` asks not to be sent presence; `fetch: true` says the client can fetch a large snapshot over HTTP |
 | `op` | `op` | One batch, live |
 | `leave` | | Close this store's session; the socket stays up |
 | `share` | `data` | What this session shares with every peer, a JSON value within `presence.maxShare` that `presence.validate` lets through; `null` clears it. Presence goes out again if it changed; refused with `forbidden` while the store's presence is off |
@@ -753,7 +780,7 @@ primitives anywhere, of anything at a register path).
 
 | Message | Fields | Meaning |
 |---|---|---|
-| `snapshot` | `state`, `ts`, `seq`, `registers`, `v`, `epoch` | The whole state, to overwrite with |
+| `snapshot` | `state` or `fetch`, `ts`, `seq`, `registers`, `v`, `epoch` | The whole state, to overwrite with. For a client that can fetch, when the state is `httpSnapshots.threshold` bytes or more: `fetch` names the route to fetch `{ v, epoch, state }` from instead, and `v` is only where the store stood at the hello; the fetched document says where it is |
 | `delta` | `patches`, `ts`, `seq`, `registers`, `v`, `epoch` | The accepted diffs since the client's `since`, in order, followed by corrections for what the hello's own ops lost; applied as patches |
 | `patch` | `diff`, `ts`, `v` | An accepted diff from any replica, and the version it made |
 | `ack` | `seq`, `ts`, `correction` | The op was merged; `correction` is a diff with the server's values at the leaves it lost, or null |
@@ -816,15 +843,16 @@ client that follows a store from a Bun or Node process
 
 `npm run bench` times the paths that matter: the merge with and without
 the gates, a broadcast to a hundred and a thousand sockets, a client's
-local op on each kind of storage, and a reconnect answered with a
-snapshot versus a delta. It reports the median of several rounds; compare
+local op on each kind of storage, a reconnect answered with a snapshot
+versus a delta, and a snapshot compressed per socket versus served by the
+HTTP route. It reports the median of several rounds; compare
 runs on the same machine.
 
 ## Testing
 
 ```bash
 npm test          # unit and integration tests plus a fixed-seed convergence run (Node)
-npm run test:bun  # the bun:sqlite adapter (Bun)
+npm run test:bun  # the Bun adapter and the bun:sqlite adapters (Bun; `bun test` runs the same)
 npm run fuzz      # a longer randomized convergence campaign; a failure prints the seed
 ```
 
