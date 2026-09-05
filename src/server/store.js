@@ -40,7 +40,8 @@
 //       every peer (see presence below); null clears it. A hello may carry
 //       it too, as `share`, so a reconnect restores it, and `presence:
 //       false` in a hello asks not to be sent presence at all. Refused
-//       with 'forbidden' while the store's presence is off
+//       with 'forbidden' while the store's presence is off, and with
+//       'rate-limited' beyond the replica's bucket (the same one ops use)
 //   { t: 'ping' }
 // where op = { replicaId, seq, ts, diff }.
 //
@@ -700,9 +701,16 @@ export function createStore({
           }
           case 'share': {
             try {
+              // A share draws on the same bucket as an op, so a client
+              // cannot flood the room through presence; the refused one is
+              // not lost, since the client's next hello carries its latest
+              const wait = s.replicaId ? throttle(s.replicaId) : 0;
+              if (wait > 0) throw new RefusedError('rate-limited', `Too many shares; try again in ${wait} ms`, { retryAfter: wait });
               if (setShared(s, msg.data) && s.replicaId) noteChange(s, 'share');
             } catch (err) {
-              send({ t: 'error', code: err.code, message: err.message });
+              const message = { t: 'error', code: err.code, message: err.message };
+              if (err.code === 'rate-limited') message.retryAfter = err.retryAfter;
+              send(message);
             }
             return;
           }

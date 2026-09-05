@@ -31,6 +31,7 @@ const stores = createStores(id => {
 const server = serve({
   port: 0,
   stores,
+  perMessageDeflate: true,   // offered; the whole suite runs with it
   authenticate: req => users[new URL(req.url).searchParams.get('token')] ?? null,
   authorize: (user, storeId) => user.teams.includes(storeId),
   fetch: req => (new URL(req.url).pathname === '/health' ? new Response('ok') : null)

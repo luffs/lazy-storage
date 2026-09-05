@@ -345,3 +345,23 @@ test('a client with presence: false is sent no presence, has no peers, but is a 
   await net.settle();
   assert.deepEqual(Object.keys(byReplica(a.peers)), ['a', 'b']);
 });
+
+test('a share draws on the replica\'s rate limit like an op: beyond it, refused with rate-limited, and the next hello carries the latest', async () => {
+  const store = createStore({ initial: INITIAL, presence: true, rateLimit: { burst: 2, perSecond: 50 } });
+  const net = createNetwork(store);
+  const a = net.client({ replicaId: 'a', initial: INITIAL }, { user: { id: 'u1' } });
+  const b = net.client({ replicaId: 'b', initial: INITIAL }, { user: { id: 'u2' } });
+  await net.settle();
+  const errors = [];
+  a.on('error', err => errors.push(err.code));
+  a.share({ cursor: 1 });
+  a.share({ cursor: 2 });
+  a.share({ cursor: 3 });
+  await net.settle();
+  assert.deepEqual(errors, ['rate-limited']);
+  assert.deepEqual(byReplica(b.peers).a.data, { cursor: 2 }, 'the third was refused');
+  await new Promise(resolve => setTimeout(resolve, 60));   // the client's retry hello, after retryAfter
+  await net.settle();
+  assert.deepEqual(byReplica(b.peers).a.data, { cursor: 3 }, 'the hello carried the latest');
+  assert.equal(a.pending, 0);
+});

@@ -49,11 +49,13 @@ export function createHandlers({
   authenticate,
   authorize,
   maxPayload = 4 * 1024 * 1024,
+  perMessageDeflate = false,
   onError = err => console.error('lazy-storage:', err)
 } = {}) {
   if (!stores) throw new TypeError('createHandlers requires stores (a registry or a resolver function)');
   const resolveStore = typeof stores === 'function' ? stores : id => stores.get(id);
-  const wss = new WebSocketServer({ noServer: true, maxPayload });
+  // `perMessageDeflate` is ws's own option: true offers the extension with its defaults, an object tunes it
+  const wss = new WebSocketServer({ noServer: true, maxPayload, perMessageDeflate });
   const hubs = new Map();
   let closing = false;
 

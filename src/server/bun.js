@@ -35,6 +35,11 @@ import { toJSON, closeUnauthorized } from './wire.js';
  * @param {number} [options.maxPayload=4194304] - the largest message (bytes)
  *   a socket may send; Bun closes a socket that exceeds it. A hello carries
  *   at most 1000 ops, so a long offline spell stays well under 4 MB
+ * @param {boolean|Object} [options.perMessageDeflate=false] - offer the
+ *   permessage-deflate extension, so a browser that takes it receives
+ *   snapshots and deltas compressed (JSON of a big store shrinks several
+ *   times over); Bun's own options object is accepted too. Costs CPU per
+ *   message on both ends, so it pays for large states over slow links
  * @param {(error: any) => void} [options.onError] - server faults: a
  *   store factory that threw, a bug while handling a message; default console
  * @returns {{ upgrade: (req: Request, server: any) => Promise<Response|undefined|null>, websocket: Object, close: (options?: { reason?: string }) => Promise<void>, get closing(): boolean }}
@@ -48,6 +53,7 @@ export function createHandlers({
   authenticate,
   authorize,
   maxPayload = 4 * 1024 * 1024,
+  perMessageDeflate = false,
   onError = err => console.error('lazy-storage:', err)
 } = {}) {
   if (!stores) throw new TypeError('createHandlers requires stores (a registry or a resolver function)');
@@ -72,6 +78,7 @@ export function createHandlers({
 
   const websocket = {
     maxPayloadLength: maxPayload,
+    perMessageDeflate,
     open(ws) {
       if (ws.data.unauthorized) return closeUnauthorized(ws);
       // A broadcast is encoded once for every socket it reaches (see wire.js)

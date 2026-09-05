@@ -406,7 +406,10 @@ sessions yourself), which powers two more features:
   chose to share: `db.share({ editing: taskId })` sets it, `null` clears
   it, and the hello carries it, so a reconnect restores it. Shared data
   is never written to the store; it lives as long as the session and
-  goes out as it changes (throttle a cursor yourself). It must be JSON
+  goes out as it changes (throttle a cursor yourself: a share draws on
+  the replica's `rateLimit` bucket like an op, and beyond it is refused
+  with `rate-limited`, the client's next hello carrying its latest value
+  instead). It must be JSON
   within `presence.maxShare` bytes (default 4096), and
   `presence.validate(data, { user, replicaId, store })` judges it the
   way `validate` judges an op: return `false` or throw to refuse it
@@ -440,7 +443,12 @@ A public server needs a few ceilings, all on by default:
 - **Message size.** `maxPayload` on the Bun adapter (default 4 MB) is the
   largest message a socket may send; Bun ends a socket that exceeds it. A
   hello carries at most 1000 ops, the rest following as ordinary ops once
-  the answer lands, so a long offline spell stays well under it.
+  the answer lands, so a long offline spell stays well under it. Going
+  the other way, `perMessageDeflate: true` on either adapter offers the
+  permessage-deflate extension, and a client that takes it (browsers do)
+  receives snapshots and deltas compressed; the JSON of a large store
+  shrinks several times over (`npm run bench` reports by how much). Off
+  by default, since it costs CPU per message on both ends.
 - **Op size.** `maxLeaves` on the store (default 10 000) is the most leaves
   one op may touch; a larger one is refused with code `too-large`, and
   the client drops it and resyncs.
@@ -470,7 +478,9 @@ reports every merged op (`{ replicaId, seq, user, accepted, rejected,
 version }`), every client op turned away (`{ replicaId, seq, user, code,
 message }`), and sessions opening and closing, for logs, audits, and
 metrics; `store.stats()` counts version, sessions, replicas, rows,
-tombstones, and the delta log. Server faults that are nobody's request
+tombstones, and the delta log, and `stores.stats()` on a registry rolls
+those up across the live stores, with how many are live and how many
+idle, for a health endpoint. Server faults that are nobody's request
 (a store factory that throws, an observer that throws, a bug while
 handling a message) go to an `onError` option on `createHandlers`,
 `createHub`, and `createStore`, which defaults to the console.
@@ -573,6 +583,8 @@ runs on the synced state and shows in the array view like any other change.
 
 **React** (`lazy-storage/react`): `useClient(db)` → `{ state, status, presence, pending, closed, canUndo, canRedo, restored }`, a new object per change, through `useSyncExternalStore`; `trackClient(db)` → the `{ subscribe, getSnapshot }` pair underneath, one per client.
 
+**Testing** (`lazy-storage/testing`): `createNetwork(store | { session })` → `client(options, { user })`, `link({ user })` → `{ factory, goOffline(), goOnline() }`, `settle()`, `pending` — clients and a store linked in memory, see [Testing](#testing); `fakeTime(start)` → a clock with `advance(ms)` and `set(ms)`.
+
 **Server** (`lazy-storage/server`)
 
 - `createStore({ initial, registers, readOnly, validate, maxSkew, retention, compactEvery, deltaLog, maxLeaves, rateLimit, storage, presence, onError, now })` — `presence` is `false` (default), `true`, or `{ key, user, validate, every, maxShare }`; `store.epoch` — this life of the storage
@@ -583,20 +595,20 @@ runs on the synced state and shows in the array view like any other change.
 - `store.on(listener)`, `store.snapshot()`, `store.state`, `store.version`, `store.replicas`
 - `store.compact()` → `{ tombstones, replicas }` removed; `store.flush()`, `store.dispose()`
 - `memoryStorage()`, `jsonFileStorage(path, { debounce })`
-- `createStores(factory, { idle, sweepEvery, now })` → `get(id)`, `has(id)`, `ids()`, `release(id)`, `sweep()`, `dispose()`; `isStoreId(id)`
+- `createStores(factory, { idle, sweepEvery, now })` → `get(id)`, `has(id)`, `ids()`, `stats()` — the live stores' stats rolled up: `{ stores, idle, sessions, replicas, rows, tombstones, log }` — `release(id)`, `sweep()`, `dispose()`; `isStoreId(id)`
 - `createHub(resolveStore, { send, user, authorize, onError })` → `{ receive(message), close(), stores, user }` — the server side of a multiplexed connection, session-shaped
 - `toJSON(message)` — a message's JSON, encoded once however many sockets it goes to; use it in a transport of your own so a broadcast is not re-encoded per socket (`tagStore(message, id)` is what a hub does)
 
 **SQLite** (`lazy-storage/server/sqlite`, Bun): `sqliteStorage(file, { wal })` →
 `store(id)`, `ids()`, `remove(id)`, `db`, `close()`.
 
-**Bun adapter** (`lazy-storage/server/bun`): `serve({ stores, port, path, fetch, authenticate, authorize, maxPayload, onError })` —
+**Bun adapter** (`lazy-storage/server/bun`): `serve({ stores, port, path, fetch, authenticate, authorize, maxPayload, perMessageDeflate, onError })` —
 `stores` is a registry or `id => store|null` (for one store, `() => store`); the
 hub listens at `path`; the returned server gains `shutdown({ reason })`.
-`createHandlers({ stores, path, authenticate, authorize, maxPayload, onError })` →
+`createHandlers({ stores, path, authenticate, authorize, maxPayload, perMessageDeflate, onError })` →
 `{ upgrade(req, server), websocket, close({ reason }), closing }` for mounting inside your own `Bun.serve`.
 
-**Node adapter** (`lazy-storage/server/node`, needs `ws`): `serve({ stores, port, host, request, path, authenticate, authorize, maxPayload, onError })` →
+**Node adapter** (`lazy-storage/server/node`, needs `ws`): `serve({ stores, port, host, request, path, authenticate, authorize, maxPayload, perMessageDeflate, onError })` →
 an `http.Server` with `shutdown({ reason })`; `createHandlers(options)` → `{ upgrade(req, socket, head), close({ reason }), closing, wss }`;
 `toRequest(req)` — the Web `Request` `authenticate` sees. **node:sqlite** (`lazy-storage/server/sqlite-node`): `sqliteStorage(file, { wal })`, as the Bun one.
 
@@ -729,4 +741,31 @@ runs on the same machine.
 npm test          # unit and integration tests plus a fixed-seed convergence run (Node)
 npm run test:bun  # the bun:sqlite adapter (Bun)
 npm run fuzz      # a longer randomized convergence campaign; a failure prints the seed
+```
+
+The in-memory network the suite runs on is published as
+`lazy-storage/testing`, for an app's own tests: `createNetwork(store)`
+(or a hub factory) links clients to a store without sockets, `net.client(
+options, { user })` gives a connected client with `client.link.goOffline()`
+and `goOnline()`, and `await net.settle()` delivers everything queued
+until the network is quiet, so a test reads "edit, settle, assert" and
+runs in milliseconds. `fakeTime()` is a wall clock to hand a store and
+its clients as `now`, for tests that decide who wrote later:
+
+```js
+import { createStore } from 'lazy-storage/server';
+import { createNetwork } from 'lazy-storage/testing';
+
+const store = createStore({ initial: { tasks: {} } });
+const net = createNetwork(store);
+const a = net.client({ replicaId: 'a', initial: { tasks: {} } });
+const b = net.client({ replicaId: 'b', initial: { tasks: {} } });
+await net.settle();
+b.link.goOffline();
+a.state.tasks.x = { id: 'x', title: 'while b was away' };
+await net.settle();
+b.link.goOnline();
+b.connect();
+await net.settle();
+assert.equal(b.state.tasks.x.title, 'while b was away');
 ```

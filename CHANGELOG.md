@@ -2,6 +2,29 @@
 
 All notable changes to lazy-storage are documented here. The format follows Keep a Changelog; versions follow Semantic Versioning.
 
+## [Unreleased]
+
+### Added
+
+- **`lazy-storage/testing`.** The in-memory network the suite runs on,
+  for an app's own tests: `createNetwork(store)` (or a hub factory) links
+  clients to a store without sockets, with `client()`, `link()`, links
+  taken offline and back, and `settle()` to deliver everything queued;
+  `fakeTime()` is a wall clock to hand a store and its clients as `now`
+- **`perMessageDeflate` on both adapters** offers the permessage-deflate
+  extension, so a client that takes it receives snapshots and deltas
+  compressed. Off by default; the benchmark reports what it saves
+- **`stores.stats()`** on a registry rolls up the live stores' stats for a
+  health endpoint: how many are live and how many idle, and the sums of
+  sessions, replicas, rows, tombstones, and delta-log entries
+
+### Changed
+
+- A share draws on the replica's `rateLimit` bucket like an op. Beyond
+  it, the share is refused with `rate-limited` and the client's next
+  hello carries its latest value, so a client cannot flood a room through
+  presence
+
 ## [0.8.0] - 2026-09-04
 
 ### Added

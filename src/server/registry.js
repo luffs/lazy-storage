@@ -50,6 +50,25 @@ export function createStores(factory, { idle = Infinity, sweepEvery = 60_000, no
     has: id => live.has(id),
     /** Ids of the stores currently live in this process */
     ids: () => [...live.keys()],
+    /**
+     * The live stores' `stats()` rolled up, for a health endpoint or a
+     * metrics scrape: how many stores are live and how many of those have
+     * no session, and the sums of sessions, replicas, rows, tombstones,
+     * and delta-log entries across them
+     */
+    stats() {
+      const totals = { stores: live.size, idle: 0, sessions: 0, replicas: 0, rows: 0, tombstones: 0, log: 0 };
+      for (const store of live.values()) {
+        const s = store.stats();
+        if (s.sessions === 0) totals.idle++;
+        totals.sessions += s.sessions;
+        totals.replicas += s.replicas;
+        totals.rows += s.rows;
+        totals.tombstones += s.tombstones;
+        totals.log += s.log;
+      }
+      return totals;
+    },
     /** Dispose a live store (its sessions close; persisted data stays) */
     release(id) {
       const store = live.get(id);

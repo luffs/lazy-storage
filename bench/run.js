@@ -205,6 +205,18 @@ bench('hello: answered with a delta of 10 ops, 10k-task store (encoded)', {
   }
 });
 
+// --- Wire size ---------------------------------------------------------------------------------
+// What permessage-deflate saves on the largest message there is
+
+import { deflateRawSync } from 'node:zlib';
+
+const sized = seeded(10_000);
+let snapshotJSON = '';
+sized.store.session({ send: message => { if (message.t === 'snapshot') snapshotJSON = toJSON(message); } })
+  .receive({ t: 'hello', replicaId: 'size', ops: [] });
+const rawBytes = Buffer.byteLength(snapshotJSON);
+const deflatedBytes = deflateRawSync(Buffer.from(snapshotJSON)).length;
+
 // --- Report ------------------------------------------------------------------------------------
 
 const width = Math.max(...results.map(r => r.name.length));
@@ -215,3 +227,4 @@ for (const r of results) {
   const per = r.perOp >= 1000 ? `${fmt(r.perOp / 1000, 2)} ms` : `${fmt(r.perOp, 1)} µs`;
   console.log(`${r.name.padEnd(width)}  ${per.padStart(10)}  ${fmt(r.perSec).padStart(12)} ${r.unit}/s`);
 }
+console.log(`\nwire: a 10k-task snapshot is ${fmt(rawBytes / 1024)} KB of JSON, ${fmt(deflatedBytes / 1024)} KB with permessage-deflate (${fmt(rawBytes / deflatedBytes, 1)}x smaller)`);

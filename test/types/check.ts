@@ -17,6 +17,7 @@ import { sqliteStorage } from 'lazy-storage/server/sqlite';
 import { mergeOp } from 'lazy-storage/core';
 import { useClient as useClientVue } from 'lazy-storage/vue';
 import { useClient as useClientReact, trackClient } from 'lazy-storage/react';
+import { createNetwork, fakeTime } from 'lazy-storage/testing';
 
 interface Task { id: string; title: string; done: boolean }
 interface State { tasks: Record<string, Task>; order: string[] }
@@ -86,6 +87,28 @@ unsubscribe();
 // @ts-expect-error a snapshot is read-only
 snap.pending = 0;
 void mirrored; void online; void undoable; void same; void queued; void reason;
+
+// --- Testing entry -----------------------------------------------------------
+
+async function inMemory() {
+  const now = fakeTime();
+  const testStore = createStore<State>({ initial: { tasks: {}, order: [] }, now });
+  const net = createNetwork(testStore);
+  const tester = net.client<State>({ replicaId: 'a', initial: { tasks: {}, order: [] }, now }, { user: { id: 'u1' } });
+  await net.settle();
+  tester.link.goOffline();
+  const later: number = now.advance(1000);
+  tester.link.goOnline();
+  tester.connect();
+  const queuedMessages: number = net.pending;
+  const link = net.link({ user: { id: 'u2' } });
+  const transport = link.factory();
+  transport.close();
+  void [later, queuedMessages];
+  // @ts-expect-error the network takes a store or an endpoint with session()
+  createNetwork({ nope: true });
+}
+void inMemory;
 
 async function browser() {
   const storage = indexedDBStorage('app:team-1', { onError: e => console.warn(e) });

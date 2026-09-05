@@ -58,6 +58,7 @@ test('serve: other requests reach the app, a bad token is refused, two sockets s
   const server = serve({
     port: 0,
     stores,
+    perMessageDeflate: true,   // offered; the whole test runs with it
     authenticate: req => users[new URL(req.url).searchParams.get('token')] ?? null,
     authorize: (user, storeId) => user.teams.includes(storeId),
     request: (req, res) => { res.end(req.url === '/health' ? 'ok' : 'other'); }
@@ -129,6 +130,7 @@ test('serve: other requests reach the app, a bad token is refused, two sockets s
     const received = [];
     raw.onmessage = e => { const m = JSON.parse(e.data); if (m.t === 'error') received.push(m.message); };
     await until(() => raw.readyState === 1, 'raw open');
+    assert.ok(raw.extensions.includes('permessage-deflate'), `the extension was negotiated (${raw.extensions || 'none'})`);
     raw.send('not json');
     raw.send('[1]');
     await until(() => received.length >= 2, 'errors back');

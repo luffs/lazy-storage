@@ -28,6 +28,10 @@
       "types": "./types/react.d.ts",
       "default": "./src/react/index.js"
     },
+    "./testing": {
+      "types": "./types/testing.d.ts",
+      "default": "./src/testing/index.js"
+    },
     "./server": {
       "types": "./types/server.d.ts",
       "default": "./src/server/index.js"

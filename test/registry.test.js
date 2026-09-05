@@ -87,3 +87,25 @@ test('with idle set, a store with no sessions for that long is released by the s
   assert.deepEqual(stores.get('team-a').snapshot(), { tasks: { x: { id: 'x' } } }, 'back from its storage');
   stores.dispose();
 });
+
+test('stats() rolls up the live stores: how many are live and idle, and the sums across them', async () => {
+  const stores = createStores(id => createStore({ initial: INITIAL, storage: memoryStorage() }));
+  assert.deepEqual(stores.stats(), { stores: 0, idle: 0, sessions: 0, replicas: 0, rows: 0, tombstones: 0, log: 0 });
+  const a = stores.get('a');
+  const b = stores.get('b');
+  a.patch({ tasks: { x: { id: 'x', title: 'one' } } });
+  a.patch({ tasks: { x: null } });
+  b.patch({ tasks: { y: { id: 'y' } } });
+  const net = createNetwork(a);
+  const client = net.client({ replicaId: 'c', initial: INITIAL });
+  await net.settle();
+  const s = stores.stats();
+  assert.equal(s.stores, 2);
+  assert.equal(s.idle, 1, 'b has no session');
+  assert.equal(s.sessions, 1);
+  assert.ok(s.tombstones >= 1, 'the deleted task');
+  for (const key of ['replicas', 'rows', 'tombstones', 'log']) assert.equal(s[key], a.stats()[key] + b.stats()[key], key);
+  client.dispose();
+  stores.dispose();
+  assert.deepEqual(stores.stats(), { stores: 0, idle: 0, sessions: 0, replicas: 0, rows: 0, tombstones: 0, log: 0 });
+});
