@@ -528,7 +528,8 @@ A public server needs a few ceilings, all on by default:
   as one `server.publish`, encoded and compressed once for every
   subscriber by the runtime, so a large write to thousands of listeners
   costs a few milliseconds of the event loop rather than a send per
-  socket. The Node adapter sends per socket. Either way, egress still
+  socket; a session opened on the store directly, without the adapter, is
+  still sent to on its own. The Node adapter sends per socket. Either way, egress still
   grows with the listeners, so a big write to a big audience is bandwidth
   the uplink has to carry; splitting a large value into records, so a
   patch carries only what changed, is what keeps it small.

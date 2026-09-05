@@ -161,3 +161,47 @@ test('a hub refuses messages without a valid store id and answers pings', () => 
   assert.deepEqual(sent.map(m => [m.t, m.code]), [['pong', undefined], ['closed', 'invalid-store'], ['closed', 'invalid-store']]);
   assert.deepEqual(hub.stores, []);
 });
+
+test('given a channel, a broadcast is one publish to the sockets subscribed per store, a direct session is still sent to, and a socket that left or closed is unsubscribed', () => {
+  const store = createStore({ initial: INITIAL, storage: memoryStorage() });
+  // A stand-in for Bun's topics: the sockets subscribed per store, and one delivery per publish
+  const topics = new Map();
+  const published = [];
+  const channelFor = socket => ({
+    subscribe: id => { if (!topics.has(id)) topics.set(id, new Set()); topics.get(id).add(socket); },
+    unsubscribe: id => { topics.get(id)?.delete(socket); },
+    publish: (id, message) => { published.push(message); for (const s of topics.get(id) ?? []) s.push(message); }
+  });
+  const a = [];
+  const b = [];
+  const direct = [];
+  const hubA = createHub(() => store, { send: m => a.push(m), channel: channelFor(a) });
+  const hubB = createHub(() => store, { send: m => b.push(m), channel: channelFor(b) });
+  store.session({ send: m => direct.push(m) });
+  const patches = sent => sent.filter(m => m.t === 'patch').length;
+
+  hubA.receive({ t: 'hello', store: 's', replicaId: 'ra', ops: [] });
+  hubB.receive({ t: 'hello', store: 's', replicaId: 'rb', ops: [] });
+  assert.deepEqual([...topics.get('s')], [a, b], 'each socket subscribed when it opened the store');
+  assert.equal(a.filter(m => m.t === 'snapshot').length, 1, 'the snapshot went to its socket alone');
+
+  store.patch({ tasks: { x: { id: 'x' } } });
+  assert.equal(published.length, 1, 'one publish, however many sockets');
+  assert.equal(published[0].store, 's', 'tagged with the store');
+  assert.equal(patches(a) + patches(b), 2, 'and both sockets got it');
+  assert.equal(patches(direct), 1, 'a session without a channel is sent to on its own');
+
+  hubB.receive({ t: 'leave', store: 's' });
+  assert.deepEqual([...topics.get('s')], [a], 'leave unsubscribes');
+  store.patch({ tasks: { y: { id: 'y' } } });
+  assert.equal(published.length, 2);
+  assert.equal(patches(b), 1, 'the socket that left hears no more');
+  assert.equal(patches(direct), 2);
+
+  hubA.close();
+  assert.deepEqual([...topics.get('s')], [], 'closing the connection unsubscribes');
+  store.patch({ tasks: { z: { id: 'z' } } });
+  assert.equal(published.length, 2, 'nothing to publish to once no session came through the channel');
+  assert.equal(patches(direct), 3, 'the direct session still hears everything');
+  store.dispose();
+});

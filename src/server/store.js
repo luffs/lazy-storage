@@ -237,12 +237,6 @@ export function createStore({
   const epoch = saved ? saved.epoch : randomId();
   const clock = createClock('server', now);
   const sessions = new Set();
-  // When the transport can fan a message out to every session on this store
-  // at once (Bun's topic publish, which compresses it once), a session hands
-  // that in; the first one is kept and used for the patch broadcast in place
-  // of a send per socket. Equivalent across sessions, so which is kept does
-  // not matter, and it stays valid as sockets come and go
-  let publisher = null;
   let serverSeq = replicas.get('server')?.seq ?? 0;
   let lastCompaction = -Infinity;
   // The last `deltaLog` accepted diffs, as { v, diff }; an adapter that
@@ -301,10 +295,17 @@ export function createStore({
 
   function broadcast(message) {
     toJSON(message);  // encoded once, however many sessions there are
-    // One publish reaches every subscribed session (all of them, on a
-    // transport that gave a publisher); otherwise a send per socket
-    if (publisher) return void publisher(message);
-    for (const s of sessions) s.send(message);
+    // A session whose transport can fan out (Bun's topic publish, which
+    // compresses once) hears it through one publish, which reaches every
+    // such session at once; the rest are sent to one by one
+    let published = false;
+    for (const s of sessions) {
+      if (!s.publish) s.send(message);
+      else if (!published) {
+        s.publish(message);
+        published = true;
+      }
+    }
   }
 
   /** Every commit carries the version and epoch alongside its rows */
@@ -651,21 +652,22 @@ export function createStore({
    * Attach a session. `send` receives message objects; feed the session
    * parsed client messages with `receive`, and `close` it when the
    * connection ends. `user` is whatever the transport authenticated
-   * (counted in presence when present, and handed to `validate`); a
-   * transport that can reach every session on the store at once may hand
-   * in `broadcast`, used for the patch fan-out in place of a send per
-   * socket (see the hub and the Bun adapter);
-   * `onEvict` is called after `closeSessions` closed this session, so the
-   * transport can drop the socket or the hub its entry.
+   * (counted in presence when present, and handed to `validate`). A
+   * transport that can reach every session on the store at once (see the
+   * hub and the Bun adapter) hands in `broadcast`: this session then hears
+   * the patch fan-out through one call of it, made for every session that
+   * offered one, so any of them must reach all of them; a session without
+   * one is sent to on its own. `onEvict` is called after `closeSessions`
+   * closed this session, so the transport can drop the socket or the hub
+   * its entry.
    */
   function session({ send, user, onEvict, broadcast: publish } = {}) {
     if (typeof send !== 'function') throw new TypeError('A session needs a send function');
-    // A transport that can fan out natively offers a publisher; keep the first
-    if (publish && !publisher) publisher = publish;
     const s = {
       send,
       user,
       onEvict,
+      publish: typeof publish === 'function' ? publish : null,   // hears broadcasts through the transport's fan-out
       replicaId: null,
       shared: undefined,     // what this session shares with its peers, and its JSON
       sharedJson: undefined,

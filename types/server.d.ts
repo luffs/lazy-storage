@@ -74,7 +74,12 @@ export interface SessionOptions {
   user?: unknown;
   /** Called after `closeSessions` closed this session */
   onEvict?(): void;
-  /** A transport that reaches every session on the store at once hands this in; used for the patch fan-out in place of a send per socket */
+  /**
+   * A transport that reaches every session on the store at once (Bun's
+   * topic publish) hands this in: the session then hears the patch fan-out
+   * through one call of it, made for every session that offered one, so any
+   * of them must reach all of them. A session without one is sent to on its own
+   */
   broadcast?(message: ServerMessage): void;
 }
 

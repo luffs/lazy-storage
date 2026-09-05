@@ -12,7 +12,8 @@ All notable changes to lazy-storage are documented here. The format follows Keep
   subscriber, rather than a send per socket. A large write to many
   listeners costs a fraction of what it did: a 13 KB patch to 2000 clients
   fell from about 88 ms of event-loop time to about 5 ms here. Presence
-  and eviction stay per socket (targeted or opt-out). The Node adapter is
+  and eviction stay per socket (targeted or opt-out), and a session opened
+  on the store directly is still sent to on its own. The Node adapter is
   unchanged. Behind this, `createHub` takes a `channel` and `store.session`
   a `broadcast`, for a transport that can reach every session at once
 

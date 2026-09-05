@@ -7,27 +7,34 @@ import { randomBytes } from 'node:crypto';
 
 const OPCODES = { 1: 'text', 2: 'binary', 8: 'close', 9: 'ping', 10: 'pong' };
 
-/** One masked text frame, as a client must send them */
+/** One masked text frame, as a client must send them (up to 64 KB) */
 function frame(text) {
   const payload = Buffer.from(text);
-  if (payload.length >= 126) throw new Error('probe messages must stay under 126 bytes');
+  if (payload.length > 0xffff) throw new Error('probe messages must stay under 64 KB');
+  const extended = payload.length >= 126;
   const mask = randomBytes(4);
-  const out = Buffer.alloc(6 + payload.length);
+  const head = extended ? 4 : 2;
+  const out = Buffer.alloc(head + 4 + payload.length);
   out[0] = 0x81;
-  out[1] = 0x80 | payload.length;
-  mask.copy(out, 2);
-  for (let i = 0; i < payload.length; i++) out[6 + i] = payload[i] ^ mask[i % 4];
+  out[1] = 0x80 | (extended ? 126 : payload.length);
+  if (extended) out.writeUInt16BE(payload.length, 2);
+  mask.copy(out, head);
+  for (let i = 0; i < payload.length; i++) out[head + 4 + i] = payload[i] ^ mask[i % 4];
   return out;
 }
 
 /**
- * @returns {Promise<{ extensions: string, frames: { opcode: string, compressed: boolean, bytes: number, text: string }[] }>}
+ * @param {() => void} [options.after] - runs once the messages are in and
+ *   handled, to cause server-side frames; those arrive as `caused`
+ * @returns {Promise<{ extensions: string, frames: Frame[], caused: Frame[] }>}
  *   `extensions` is the server's Sec-WebSocket-Extensions header (empty when
- *   it accepted none); `text` is the payload of a plain text frame
+ *   it accepted none); a frame's `text` is the payload of a plain text frame
+ * @typedef {{ opcode: string, compressed: boolean, bytes: number, text: string }} Frame
  */
 export function probeFrames(port, path, messages, { gap = 100, settle = 300, after } = {}) {
   return new Promise((resolve, reject) => {
     const frames = [];
+    let mark = 0;   // how many frames had arrived when `after` ran
     let buffer = Buffer.alloc(0);
     let handshake = null;
     const socket = net.connect(port, 'localhost');
@@ -61,12 +68,17 @@ export function probeFrames(port, path, messages, { gap = 100, settle = 300, aft
         handshake = buffer.subarray(0, end).toString();
         buffer = buffer.subarray(end + 4);
         messages.forEach((m, i) => setTimeout(() => socket.write(frame(m)), i * gap));
-        // Once the messages are in and processed (subscribed), let the caller cause server-side frames
-        if (after) setTimeout(() => { try { after(); } catch (err) { reject(err); } }, messages.length * gap + 50);
+        // Once the messages are in and handled (subscribed), let the caller cause server-side frames
+        if (after) {
+          setTimeout(() => {
+            mark = frames.length;
+            try { after(); } catch (err) { reject(err); }
+          }, messages.length * gap + 50);
+        }
         setTimeout(() => {
           const header = handshake.split('\r\n').find(h => /^sec-websocket-extensions:/i.test(h));
           socket.destroy();
-          resolve({ extensions: header ? header.split(':').slice(1).join(':').trim() : '', frames });
+          resolve({ extensions: header ? header.split(':').slice(1).join(':').trim() : '', frames, caused: frames.slice(mark) });
         }, messages.length * gap + settle);
       }
       parse();
