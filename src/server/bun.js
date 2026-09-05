@@ -20,7 +20,7 @@
 // `shutdown()` that does this and then stops the server.
 import { LazyWatch } from 'lazy-watch';
 import { createHub } from './hub.js';
-import { toJSON, closeUnauthorized } from './wire.js';
+import { toJSON, closeUnauthorized, deflateOptions } from './wire.js';
 
 /**
  * @param {Object} options
@@ -35,11 +35,14 @@ import { toJSON, closeUnauthorized } from './wire.js';
  * @param {number} [options.maxPayload=4194304] - the largest message (bytes)
  *   a socket may send; Bun closes a socket that exceeds it. A hello carries
  *   at most 1000 ops, so a long offline spell stays well under 4 MB
- * @param {boolean|Object} [options.perMessageDeflate=false] - offer the
+ * @param {boolean|Object} [options.perMessageDeflate=true] - offer the
  *   permessage-deflate extension, so a browser that takes it receives
- *   snapshots and deltas compressed (JSON of a big store shrinks several
- *   times over); Bun's own options object is accepted too. Costs CPU per
- *   message on both ends, so it pays for large states over slow links
+ *   large messages compressed (the JSON of a big store shrinks about
+ *   tenfold, at some 3 ms of CPU per megabyte per client). Messages under
+ *   `threshold` bytes (default 1024) go plain: compressing a hundred-byte
+ *   patch costs ten times its encoding and makes it larger. An object
+ *   sets `threshold` and any of Bun's own options (`compress`,
+ *   `decompress`); false turns it off
  * @param {(error: any) => void} [options.onError] - server faults: a
  *   store factory that threw, a bug while handling a message; default console
  * @returns {{ upgrade: (req: Request, server: any) => Promise<Response|undefined|null>, websocket: Object, close: (options?: { reason?: string }) => Promise<void>, get closing(): boolean }}
@@ -53,11 +56,18 @@ export function createHandlers({
   authenticate,
   authorize,
   maxPayload = 4 * 1024 * 1024,
-  perMessageDeflate = false,
+  perMessageDeflate = true,
   onError = err => console.error('lazy-storage:', err)
 } = {}) {
   if (!stores) throw new TypeError('createHandlers requires stores (a registry or a resolver function)');
   const resolveStore = typeof stores === 'function' ? stores : id => stores.get(id);
+  const deflate = deflateOptions(perMessageDeflate);
+  // Bun compresses a frame only when asked per send; every message is
+  // encoded once (see wire.js) and sent compressed when it is large enough
+  const send = (ws, message) => {
+    const json = toJSON(message);
+    ws.send(json, deflate !== null && json.length >= deflate.threshold);
+  };
   const hubs = new Map();
   let closing = false;
 
@@ -78,11 +88,10 @@ export function createHandlers({
 
   const websocket = {
     maxPayloadLength: maxPayload,
-    perMessageDeflate,
+    perMessageDeflate: deflate === null ? false : deflate.runtime,
     open(ws) {
       if (ws.data.unauthorized) return closeUnauthorized(ws);
-      // A broadcast is encoded once for every socket it reaches (see wire.js)
-      hubs.set(ws, createHub(resolveStore, { send: message => ws.send(toJSON(message)), user: ws.data.user, authorize, onError }));
+      hubs.set(ws, createHub(resolveStore, { send: message => send(ws, message), user: ws.data.user, authorize, onError }));
     },
     message(ws, raw) {
       let msg;

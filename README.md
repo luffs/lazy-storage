@@ -443,12 +443,22 @@ A public server needs a few ceilings, all on by default:
 - **Message size.** `maxPayload` on the Bun adapter (default 4 MB) is the
   largest message a socket may send; Bun ends a socket that exceeds it. A
   hello carries at most 1000 ops, the rest following as ordinary ops once
-  the answer lands, so a long offline spell stays well under it. Going
-  the other way, `perMessageDeflate: true` on either adapter offers the
-  permessage-deflate extension, and a client that takes it (browsers do)
-  receives snapshots and deltas compressed; the JSON of a large store
-  shrinks several times over (`npm run bench` reports by how much). Off
-  by default, since it costs CPU per message on both ends.
+  the answer lands, so a long offline spell stays well under it.
+- **Compression.** Both adapters offer the permessage-deflate extension
+  by default, and a client that takes it (browsers do) receives large
+  messages compressed: the JSON of a big store shrinks about tenfold
+  (`npm run bench` reports by how much), which is what a client waits on
+  at connect and reconnect. Messages under `threshold` bytes (default
+  1024, set through the object form of `perMessageDeflate`) go plain,
+  since compressing a hundred-byte patch costs ten times its encoding
+  and makes it larger. What it costs: about 3 ms of CPU per megabyte of
+  snapshot per client, paid per socket, unlike the encoding, which is
+  done once, so a reconnect storm of a thousand clients spends a few
+  seconds compressing (and sends a tenth of the bytes); and on the Node
+  adapter, a socket that has received a compressed message keeps a
+  deflate stream of some 75 KB for its lifetime, one that has sent one
+  an inflate stream of some 100 KB. `perMessageDeflate: false` turns it
+  off.
 - **Op size.** `maxLeaves` on the store (default 10 000) is the most leaves
   one op may touch; a larger one is refused with code `too-large`, and
   the client drops it and resyncs.

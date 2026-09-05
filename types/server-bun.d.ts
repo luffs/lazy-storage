@@ -11,8 +11,13 @@ export interface HandlerOptions {
   authorize?: Authorize;
   /** The largest message (bytes) a socket may send; default 4 MB */
   maxPayload?: number;
-  /** Offer the permessage-deflate extension (compressed snapshots and deltas for clients that take it); the runtime's own options object is accepted. Default false */
-  perMessageDeflate?: boolean | object;
+  /**
+   * Offer the permessage-deflate extension: a client that takes it receives
+   * messages of `threshold` bytes or more (default 1024) compressed, smaller
+   * ones plain. The object form sets `threshold` and the runtime's own
+   * options; false turns it off. Default true
+   */
+  perMessageDeflate?: boolean | ({ threshold?: number } & Record<string, unknown>);
   /** Server faults; default console */
   onError?(error: unknown): void;
 }

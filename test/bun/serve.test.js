@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { createStore, createStores, memoryStorage } from '../../src/server/index.js';
 import { serve } from '../../src/server/bun.js';
 import { createClient, createConnection, webSocketTransport } from '../../src/index.js';
+import { probeFrames } from '../frames.js';
 
 const INITIAL = { tasks: {} };
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -31,7 +32,6 @@ const stores = createStores(id => {
 const server = serve({
   port: 0,
   stores,
-  perMessageDeflate: true,   // offered; the whole suite runs with it
   authenticate: req => users[new URL(req.url).searchParams.get('token')] ?? null,
   authorize: (user, storeId) => user.teams.includes(storeId),
   fetch: req => (new URL(req.url).pathname === '/health' ? new Response('ok') : null)
@@ -110,6 +110,16 @@ try {
 
     b2.dispose();
     [a1, a2, b1].forEach(c => c.dispose());
+
+    // On the wire: a message over the threshold goes compressed, a small one plain
+    stores.get('t2').patch({ filler: 'x'.repeat(3000) });
+    const probed = await probeFrames(server.port, '/ws?token=alice', [JSON.stringify({ t: 'hello', store: 't2', replicaId: 'probe', ops: [] }), JSON.stringify({ t: 'ping', store: 't2' })]);
+    assert.match(probed.extensions, /permessage-deflate/);
+    const largest = [...probed.frames].sort((x, y) => y.bytes - x.bytes)[0];
+    assert.equal(largest.compressed, true, `the snapshot frame is compressed (${largest.bytes} B)`);
+    assert.ok(largest.bytes < 1500, `and far smaller than the 3 KB it carries (${largest.bytes} B)`);
+    const pong = probed.frames.find(f => f.text === '{"t":"pong"}');
+    assert.ok(pong && !pong.compressed, 'a pong goes plain');
   });
 
   await test('eviction closes one session through the hub; the socket and its other stores stay up', async () => {

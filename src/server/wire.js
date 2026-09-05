@@ -37,6 +37,19 @@ export function presetJSON(message, json) {
  * something reads it) is copied as the getter it is, not invoked.
  */
 /**
+ * The adapters' `perMessageDeflate` option, sorted: null when off, else
+ * the `threshold` below which a message goes plain (default 1024 bytes,
+ * where compressing costs more than it saves) and `runtime`, the rest of
+ * the object for the runtime's own knobs (true when there is none)
+ */
+export function deflateOptions(perMessageDeflate) {
+  if (!perMessageDeflate) return null;
+  const { threshold = 1024, ...runtime } = perMessageDeflate === true ? {} : perMessageDeflate;
+  if (!(threshold >= 0)) throw new TypeError('perMessageDeflate.threshold must be a number of bytes');
+  return { threshold, runtime: Object.keys(runtime).length ? runtime : true };
+}
+
+/**
  * Turn away a socket whose request did not authenticate. A browser cannot
  * read the status of a refused handshake, so the handshake is completed
  * only to say why: a `closed` message without a store (it is the socket

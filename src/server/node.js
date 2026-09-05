@@ -18,7 +18,7 @@ import { createServer } from 'node:http';
 import { WebSocketServer } from 'ws';
 import { LazyWatch } from 'lazy-watch';
 import { createHub } from './hub.js';
-import { toJSON, closeUnauthorized } from './wire.js';
+import { toJSON, closeUnauthorized, deflateOptions } from './wire.js';
 
 /** A Web Request for an incoming Node request, headers included */
 export function toRequest(req) {
@@ -49,20 +49,40 @@ export function createHandlers({
   authenticate,
   authorize,
   maxPayload = 4 * 1024 * 1024,
-  perMessageDeflate = false,
+  perMessageDeflate = true,
   onError = err => console.error('lazy-storage:', err)
 } = {}) {
   if (!stores) throw new TypeError('createHandlers requires stores (a registry or a resolver function)');
   const resolveStore = typeof stores === 'function' ? stores : id => stores.get(id);
-  // `perMessageDeflate` is ws's own option: true offers the extension with its defaults, an object tunes it
-  const wss = new WebSocketServer({ noServer: true, maxPayload, perMessageDeflate });
+  // Compression is decided per message, above `threshold` only, as the Bun
+  // adapter does. ws is asked for no context takeover both ways, which
+  // every client accepts, and takes any of its own options from the object
+  // form. The window stays at the standard 15 bits: a smaller one would
+  // compress this JSON a little better and hold less memory per socket,
+  // but has to be negotiated, and ws turns away a client whose offer does
+  // not carry the parameter. A socket that has received a compressed
+  // message keeps a deflate stream (some 75 KB) for its lifetime, and one
+  // that has sent one an inflate stream (some 100 KB)
+  const deflate = deflateOptions(perMessageDeflate);
+  const wss = new WebSocketServer({
+    noServer: true,
+    maxPayload,
+    perMessageDeflate: deflate === null
+      ? false
+      : { serverNoContextTakeover: true, clientNoContextTakeover: true, ...(deflate.runtime === true ? {} : deflate.runtime), threshold: deflate.threshold }
+  });
+  const send = (ws, message) => {
+    if (ws.readyState !== ws.OPEN) return;
+    const json = toJSON(message);
+    ws.send(json, { compress: deflate !== null && Buffer.byteLength(json) >= deflate.threshold });
+  };
   const hubs = new Map();
   let closing = false;
 
   function open(ws, user) {
     // A broadcast is encoded once for every socket it reaches (see wire.js)
     const hub = createHub(resolveStore, {
-      send: message => { if (ws.readyState === ws.OPEN) ws.send(toJSON(message)); },
+      send: message => send(ws, message),
       user,
       authorize,
       onError

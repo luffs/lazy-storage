@@ -5,6 +5,7 @@ import { once } from 'node:events';
 import { createStore, createStores, memoryStorage } from '../src/server/index.js';
 import { serve, createHandlers } from '../src/server/node.js';
 import { createClient, createConnection, webSocketTransport } from '../src/index.js';
+import { probeFrames } from './frames.js';
 
 const INITIAL = { tasks: {} };
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -58,7 +59,6 @@ test('serve: other requests reach the app, a bad token is refused, two sockets s
   const server = serve({
     port: 0,
     stores,
-    perMessageDeflate: true,   // offered; the whole test runs with it
     authenticate: req => users[new URL(req.url).searchParams.get('token')] ?? null,
     authorize: (user, storeId) => user.teams.includes(storeId),
     request: (req, res) => { res.end(req.url === '/health' ? 'ok' : 'other'); }
@@ -137,6 +137,16 @@ test('serve: other requests reach the app, a bad token is refused, two sockets s
     assert.deepEqual(received, ['Expected JSON', 'Expected a message object']);
     raw.close();
     [a1, a2, b1, b2].forEach(c => c.dispose());
+
+    // On the wire, by default: a message over the threshold goes compressed, a small one plain
+    stores.get('t2').patch({ filler: 'x'.repeat(3000) });
+    const probed = await probeFrames(port, '/ws?token=alice', [JSON.stringify({ t: 'hello', store: 't2', replicaId: 'probe', ops: [] }), JSON.stringify({ t: 'ping', store: 't2' })]);
+    assert.match(probed.extensions, /permessage-deflate/);
+    const largest = [...probed.frames].sort((x, y) => y.bytes - x.bytes)[0];
+    assert.equal(largest.compressed, true, `the snapshot frame is compressed (${largest.bytes} B)`);
+    assert.ok(largest.bytes < 1500, `and far smaller than the 3 KB it carries (${largest.bytes} B)`);
+    const pong = probed.frames.find(f => f.text === '{"t":"pong"}');
+    assert.ok(pong && !pong.compressed, 'a pong goes plain');
   } finally {
     for (const c of open) c.close();
     await new Promise(resolve => server.close(resolve));
@@ -152,6 +162,7 @@ test('createHandlers mounts on an existing http server; maxPayload closes a sock
     stores: id => { if (id === 'boom') throw new Error('factory boom'); return store; },
     path: '/sync',
     maxPayload: 512,
+    perMessageDeflate: false,
     onError: err => faults.push(err.message)
   });
   const server = createServer((req, res) => res.end('app'));
@@ -177,6 +188,10 @@ test('createHandlers mounts on an existing http server; maxPayload closes a sock
 
     const elsewhere = new WebSocket(`ws://localhost:${port}/other`);
     assert.notEqual(await refused(elsewhere), 1, 'a socket on another path is not ours');
+
+    const plain = await probeFrames(port, '/sync', [JSON.stringify({ t: 'ping', store: 'main' })]);
+    assert.equal(plain.extensions, '', 'perMessageDeflate: false accepts no extension');
+    assert.ok(plain.frames.some(f => f.text === '{"t":"pong"}'), 'and still answers');
     boom.dispose();
     fine.dispose();
     connection.close();

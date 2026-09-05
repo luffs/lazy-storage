@@ -11,9 +11,14 @@ All notable changes to lazy-storage are documented here. The format follows Keep
   clients to a store without sockets, with `client()`, `link()`, links
   taken offline and back, and `settle()` to deliver everything queued;
   `fakeTime()` is a wall clock to hand a store and its clients as `now`
-- **`perMessageDeflate` on both adapters** offers the permessage-deflate
-  extension, so a client that takes it receives snapshots and deltas
-  compressed. Off by default; the benchmark reports what it saves
+- **Compression, on by default.** Both adapters offer the
+  permessage-deflate extension, so a client that takes it receives large
+  messages compressed, about tenfold for a big store's snapshot; messages
+  under `perMessageDeflate.threshold` bytes (default 1024) go plain,
+  where compressing would cost more than it saves. The Node adapter asks
+  for no context takeover. `perMessageDeflate: false` turns it off, an
+  object sets `threshold` and the runtime's own options, and the
+  benchmark reports what it saves
 - **`stores.stats()`** on a registry rolls up the live stores' stats for a
   health endpoint: how many are live and how many idle, and the sums of
   sessions, replicas, rows, tombstones, and delta-log entries
