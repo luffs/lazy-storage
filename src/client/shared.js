@@ -56,7 +56,8 @@ const { Utils } = LazyWatch;
  * @param {((name: string) => Object)|null} [options.channel] - makes the
  *   channel between tabs (default: BroadcastChannel; null for none)
  * @param {Object|null} [options.locks] - a Web Locks manager (default:
- *   navigator.locks; null for none, and this tab leads on its own)
+ *   navigator.locks; null for none, and this tab leads on its own, as it
+ *   does when the manager refuses the request)
  * @param {string} [options.tabId]
  * @param {number} [options.linger=5000] - how long (ms) the replica keeps a
  *   store no tab has open anymore, so a tab reloading finds it as it was;
@@ -239,10 +240,13 @@ export function sharedConnection({
     locks.request(tabLockPrefix + tabId, { signal: aborter?.signal }, () => new Promise(resolve => {
       releaseTabLock = resolve;
     })).catch(() => {});
+    // A lock manager that refuses (a browser's policy, a bug) must not leave every tab waiting for a
+    // leader that never comes: this tab leads on its own, as without Web Locks. After dispose,
+    // the aborted request rejects too, and lead() is a no-op
     locks.request(`lazy-storage:${name}`, { signal: aborter?.signal }, () => new Promise(resolve => {
       releaseLock = resolve;
       lead();
-    })).catch(() => {});
+    })).catch(() => lead());
   } else {
     lead();
   }

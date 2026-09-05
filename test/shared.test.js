@@ -354,3 +354,26 @@ test('connect() from any tab prods the browser\'s socket, so a tab looked at aga
   await b.until(() => follower.db.status === 'online' && leader.db.status === 'online', 'the follower\'s nudge brought the socket back');
   assert.equal(store.sessions, 1);
 });
+
+test('a lock manager that refuses the request leaves the tab leading on its own, rather than waiting for a leader that never comes', async t => {
+  const store = createStore({ initial: INITIAL });
+  const net = createNetwork(store);
+  const refusing = { request: () => Promise.reject(new Error('locks are not available here')), query: async () => ({ held: [], pending: [] }) };
+  const link = net.link({ user: { id: 'u1' } });
+  const connection = sharedConnection({ name: 'refused', transport: link.factory, locks: refusing, reconnect: { min: 10, max: 50 }, keepalive: false });
+  const db = createClient({ connection, store: 'main', initial: INITIAL });
+  t.after(() => { db.dispose(); connection.dispose(); });
+  db.connect();
+  for (let i = 0; i < 200 && db.status !== 'online'; i++) {
+    await net.settle();
+    await sleep(5);
+  }
+  assert.equal(db.status, 'online');
+  assert.equal(connection.leader, true);
+  db.state.tasks.x = { id: 'x' };
+  for (let i = 0; i < 200 && !store.snapshot().tasks.x; i++) {
+    await net.settle();
+    await sleep(5);
+  }
+  assert.ok(store.snapshot().tasks.x, 'and syncs');
+});

@@ -9,6 +9,9 @@ All notable changes to lazy-storage are documented here. The format follows Keep
 - A shared connection closes a replica's storage adapter when it lets the
   store go (or is disposed), so an IndexedDB connection does not stay open
   per abandoned store
+- A lock manager that refuses the leader request no longer leaves every
+  tab waiting for a leader: the tab leads on its own, as it does without
+  Web Locks
 
 ## [0.9.1] - 2026-09-05
 
