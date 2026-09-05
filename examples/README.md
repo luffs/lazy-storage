@@ -16,6 +16,9 @@ no build step.
   server at http://localhost:3200/vue,
   http://localhost:3200/vue-options, and http://localhost:3200/react, on
   the same store as the basic page, so all of them can be open at once.
+  Every page uses `sharedConnection`, so however many of them a browser
+  has open, it holds one socket and is one replica; the tabs elect a
+  leader, and the others follow it.
   Each loads its framework from a CDN through an import map, so there is
   no build step. The Vue ones use `useClient` from `lazy-storage/vue` (a
   reactive mirror patched on every batch, and writes to the client); the

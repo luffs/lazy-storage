@@ -2,7 +2,7 @@
 // compiles it (never runs it). Wrong usages carry an expect-error
 // directive, so the declarations are tested in both directions.
 import {
-  createClient, openClient, createConnection, webSocketTransport, memoryOutbox, localStorageOutbox, indexedDBStorage,
+  createClient, openClient, createConnection, sharedConnection, webSocketTransport, memoryOutbox, localStorageOutbox, indexedDBStorage,
   LazyWatch, compareTs, createClock, pathKey, registerSet, leaves, rebuild, randomId,
   type Client, type ClientError, type Timestamp, type Diff, type ServerMessage, type RowStorage, type Op, type Peer
 } from 'lazy-storage';
@@ -244,3 +244,23 @@ const quiet = createClient<State>({ store: 'mirror', connection, presence: false
 quiet.dispose();
 // @ts-expect-error presence is a boolean or options
 createStore<State>({ initial: { tasks: {}, order: [] }, presence: 'yes' });
+
+// --- One socket per browser ---------------------------------------------------
+
+const shared = sharedConnection({
+  name: 'app',
+  transport: webSocketTransport(() => 'ws://localhost:3200/ws?token=x'),
+  storage: storeId => localStorageOutbox(`app:${storeId}`),
+  reconnect: { min: 500, max: 10_000 }
+});
+const leads: boolean = shared.leader;
+const tabbed = createClient<State>({ connection: shared, store: 'team-1', initial: { tasks: {}, order: [] } });
+tabbed.connect();
+shared.dispose();
+void leads;
+// @ts-expect-error a shared connection needs a name
+sharedConnection({ transport: webSocketTransport('ws://x') });
+
+// --- Forgetting a store -------------------------------------------------------
+localStorageOutbox('app:gone').clear();
+memoryOutbox().clear();

@@ -2,10 +2,31 @@
 
 All notable changes to lazy-storage are documented here. The format follows Keep a Changelog; versions follow Semantic Versioning.
 
-## [Unreleased]
+## [0.9.0] - 2026-09-05
 
 ### Added
 
+- **One socket per browser.** `sharedConnection({ name, transport,
+  storage })` makes a browser one replica however many tabs it has: the
+  tabs elect a leader with the Web Locks API, the leader runs the
+  browser's replica (a hidden client per store on the real socket,
+  persisted through `storage`), and every tab's clients follow it over a
+  BroadcastChannel, their edits going into the browser's persisted outbox
+  at once, socket or no socket, then upstream under the browser's replica
+  id, and every batch coming back to every tab. Presence sees one session
+  per browser; each tab keeps its own undo history; a tab's `status` and
+  `pending` are the browser's (the socket's status, the replica's unsent
+  ops). When the leader tab closes the next tab takes over from the
+  persisted outbox, IndexedDB included; a store no tab has open anymore
+  is let go after `linger`, tabs that closed without a word found by the
+  lock each holds. Without Web Locks or
+  BroadcastChannel it is an ordinary connection. `createClient` now hands
+  `attach` what it declared (`initial`, `registers`) for this, and reads
+  a connection's `upstream` and `pending` when it has them
+- **`clear()` on the document adapters.** `localStorageOutbox` and
+  `memoryOutbox` can now forget their outbox and cache, for a store that
+  is gone for good, as `indexedDBStorage.destroy()` could; nothing is
+  deleted on its own, and the README says when an app should
 - **`lazy-storage/testing`.** The in-memory network the suite runs on,
   for an app's own tests: `createNetwork(store)` (or a hub factory) links
   clients to a store without sockets, with `client()`, `link()`, links

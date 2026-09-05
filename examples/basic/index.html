@@ -27,26 +27,24 @@
   { "imports": { "lazy-storage": "/lib/lazy-storage/index.js", "lazy-watch": "/lib/lazy-watch/lazy-watch.js" } }
 </script>
 <script type="module">
-  import { createClient, createConnection, webSocketTransport, localStorageOutbox } from 'lazy-storage';
+  import { createClient, sharedConnection, webSocketTransport, localStorageOutbox } from 'lazy-storage';
 
   // Who we are: `?name=` in the URL, else what this browser remembers, else ask
   const name = new URLSearchParams(location.search).get('name') || localStorage.getItem('example:name') || prompt('Your name?') || 'anonymous';
   localStorage.setItem('example:name', name);
 
-  // One socket, one store on it. `tasks` is an ordered list of records:
-  // an array here, a keyed map with positions on the wire, so two people
-  // adding at once both keep theirs. The outbox and a cache of the state
-  // live in localStorage, so a reload while offline keeps working
-  const connection = createConnection({
-    transport: webSocketTransport(() => `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws?name=${encodeURIComponent(name)}`)
+  // One socket per browser, however many tabs (this page, /vue, /react):
+  // the tabs elect a leader that runs the browser's replica, with its
+  // outbox and a cache of the state in localStorage, so a reload while
+  // offline keeps working. `tasks` is an ordered list of records: an array
+  // here, a keyed map with positions on the wire, so two people adding at
+  // once both keep theirs
+  const connection = sharedConnection({
+    name: 'example',
+    transport: webSocketTransport(() => `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws?name=${encodeURIComponent(name)}`),
+    storage: store => localStorageOutbox(`example:${store}`)
   });
-  const db = createClient({
-    connection,
-    store: 'shared',
-    initial: { tasks: [] },
-    lists: ['tasks'],
-    storage: localStorageOutbox('example:shared')
-  });
+  const db = createClient({ connection, store: 'shared', initial: { tasks: [] }, lists: ['tasks'] });
 
   const $ = id => document.getElementById(id);
   const render = () => {

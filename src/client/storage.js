@@ -11,6 +11,13 @@
 //   load()             -> null | { replicaId, seq, ops, state?, version?, epoch? }
 //   save(outbox)       -> void   outbox = { replicaId, seq, ops }
 //   saveState(cache)   -> void   cache = { state, version, epoch }
+//   clear()            -> void   forget both, for a store that is gone for good
+//
+// Nothing is deleted on its own: a store closed for us, a team left, a
+// replica retired all leave their data where it is until the app says
+// clear() (or destroy(), for IndexedDB). The same closed codes can come
+// from a misconfigured server or a lapsed token, and pending edits are
+// worth more than the kilobytes.
 
 export function memoryOutbox() {
   let outbox = null;
@@ -18,7 +25,11 @@ export function memoryOutbox() {
   return {
     load: () => (outbox ? { ...outbox, ...(cache ?? {}) } : null),
     save: next => { outbox = next; },
-    saveState: next => { cache = next; }
+    saveState: next => { cache = next; },
+    clear() {
+      outbox = null;
+      cache = null;
+    }
   };
 }
 
@@ -52,6 +63,15 @@ export function localStorageOutbox(key = 'lazy-storage') {
       return cache && typeof cache === 'object' ? { ...outbox, ...cache } : outbox;
     },
     save: outbox => write(key, outbox),
-    saveState: cache => write(stateKey, cache)
+    saveState: cache => write(stateKey, cache),
+    /** Remove both keys: for a store that is gone for good */
+    clear() {
+      try {
+        globalThis.localStorage?.removeItem(key);
+        globalThis.localStorage?.removeItem(stateKey);
+      } catch {
+        /* unavailable: nothing was stored */
+      }
+    }
   };
 }

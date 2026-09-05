@@ -88,6 +88,9 @@ test('the localStorage adapter keeps the outbox and the state under separate key
     assert.deepEqual([...backing.keys()].sort(), ['app:outbox', 'app:outbox:state']);
     assert.deepEqual(adapter.load(), { replicaId: 'a', seq: 1, ops: [], state: { tasks: {} }, version: 3, epoch: 'e' });
     assert.equal(JSON.parse(backing.get('app:outbox')).state, undefined, 'the outbox document does not carry the state');
+    adapter.clear();
+    assert.equal(adapter.load(), null, 'clear() forgets the store');
+    assert.deepEqual([...backing.keys()], [], 'both keys removed');
   } finally {
     if (previous === undefined) delete globalThis.localStorage;
     else globalThis.localStorage = previous;
@@ -100,4 +103,13 @@ test('memoryOutbox merges the two parts on load', () => {
   adapter.save({ replicaId: 'a', seq: 0, ops: [] });
   adapter.saveState({ state: { n: 1 }, version: 2, epoch: 'e' });
   assert.deepEqual(adapter.load(), { replicaId: 'a', seq: 0, ops: [], state: { n: 1 }, version: 2, epoch: 'e' });
+});
+
+test('memoryOutbox.clear() forgets the outbox and the cache', () => {
+  const adapter = memoryOutbox();
+  adapter.save({ replicaId: 'a', seq: 2, ops: [] });
+  adapter.saveState({ state: { tasks: {} }, version: 1, epoch: 'e' });
+  assert.ok(adapter.load());
+  adapter.clear();
+  assert.equal(adapter.load(), null);
 });

@@ -234,6 +234,19 @@ IndexedDB database a closed tab left behind. Everything else about a
 client works in Bun and Node as it does in a browser: the transport needs
 a global `WebSocket` (or one passed in), and ids come from `crypto`.
 
+**Nothing an adapter holds is deleted on its own.** A store the server
+closed for us (`unknown-store` after it was deleted, `forbidden` after
+we left the team) leaves its outbox and cache where they are, and so does
+a replica retired by `sharedConnection`; the same codes can come from a
+misconfigured server or a lapsed token, and pending edits are worth more
+than the kilobytes. Forgetting a store is the app's call: when the user
+leaves a team, or on `closed` with a code the app knows is final, call
+the adapter's `clear()` (`localStorageOutbox`, `memoryOutbox`) or
+`destroy()` (`indexedDBStorage`) for that store, after disposing the
+client. Under a `sharedConnection`, the adapter is what `storage(storeId)`
+made, so `storage(storeId).clear()` does the same for the browser's
+replica.
+
 The outbox holds one op per batch, minus what later batches made moot: a
 new op takes over from whatever older pending ops wrote at or under the
 paths it writes, since under last-writer-wins those older writes could
@@ -343,6 +356,55 @@ drops the socket for all of them. A client created with a `transport`
 instead of a `connection` owns a connection of its own, same protocol. While
 open, a connection pings every 30 seconds (`keepalive`, or `false`) so idle
 sockets survive proxies and server idle timeouts.
+
+### One socket per browser
+
+Every tab is a client, and left alone every tab is also its own replica:
+its own socket, its own outbox, its own entry in presence. `sharedConnection`
+makes a browser one replica however many tabs it has:
+
+```js
+import { createClient, sharedConnection, webSocketTransport, localStorageOutbox } from 'lazy-storage';
+
+const connection = sharedConnection({
+  name: 'app',                                            // one per app: names the channel and the lock
+  transport: webSocketTransport(() => `${url}?token=${token()}`),
+  storage: store => localStorageOutbox(`app:${store}`)   // the browser's replica, per store
+});
+const db = createClient({ connection, store: 'team-1', initial, lists });   // in every tab, as ever
+```
+
+The tabs elect a leader with the Web Locks API, and the leader runs the
+browser's replica: a hidden client per store on the real socket, persisted
+through `storage`, which may be any adapter, `indexedDBStorage` included
+(the tabs' messages wait while it opens). The app's own clients, in every
+tab including the leader's, follow it over a BroadcastChannel (in the
+leader's tab directly): a follower's edits are applied to the replica at
+once, socket or no socket, so they sit in the browser's persisted outbox
+and go upstream under the browser's replica id, every batch the replica
+sees comes back to every tab as a patch, and presence and peers are
+passed along, so the server sees one session per browser. An edit made
+offline in one tab is thus in the others a moment later and survives
+that tab closing, which a tab with a replica of its own could not offer.
+Each tab keeps its own undo history. A tab's `db.status` and `db.pending`
+are the browser's: the socket's status, and the replica's unsent ops
+(`connection.upstream` and `connection.pending(store)` say the same).
+When the leader tab closes, the next tab acquires the lock, loads the
+replica's outbox and state from `storage`, reconnects, and the other tabs
+follow it, resending whatever the old leader had not acknowledged. A
+store no tab has open anymore is let go after `linger` (default five
+seconds, so a reload comes back to it): its client is disposed and its
+session on the server ends, while its persisted outbox and cache stay for
+the next tab to open it. A tab that closes without a word is found by the
+lock it held, which the leader checks every `sweepEvery` (default ten
+seconds). Leave the clients' own `storage` at its default: the replica is
+what persists.
+`connection.leader` says whether this tab leads, `dispose()` hands
+leadership on early, and what a tab shares (`db.share`) is the browser's
+share, the last tab to set it winning; a tab's own entry among `db.peers`
+carries the browser's replica id, not the tab's. Where Web Locks or
+BroadcastChannel are missing, a tab is its own leader and this is an
+ordinary connection.
 
 ## Authentication, presence, and eviction
 
@@ -575,6 +637,7 @@ runs on the synced state and shows in the array view like any other change.
 - `createClient({ store, connection | transport, initial, registers, lists, position, replicaId, storage, cache, undo, undoLimit, reconnect, presence, now })`; `db.restored` — started from the cached state; `db.version` — the store version this client has seen everything up to; `db.wire` — the synced state under a lists view
 - `openClient(options)` → `Promise<db>` — the same, for a storage adapter whose `load()` returns a promise
 - `createConnection({ transport, reconnect, keepalive })` → `connect()`, `close()`, `status`, `attached`, `closed` — why the server turned the socket away, or null — `on('status' | 'closed', fn)` — a socket shared by clients
+- `sharedConnection({ name, transport, storage, reconnect, keepalive, channel, locks, tabId, linger, sweepEvery, onError })` → the same, plus `leader`, `tabId`, `upstream` — the socket's status — `pending(store)` — the replica's unsent ops — `on('sync', fn)`, `dispose()` — one socket and one replica per browser, the tabs electing a leader (see [One socket per browser](#one-socket-per-browser))
 - `db.state` — the mirror (a lazy-watch proxy). Read and write it directly
 - `db.store`, `db.connection` — the store id and the connection
 - `db.presence` — users with a live session on this store; `db.peers` — every live session as `{ replicaId, user, data }`, this client's own included; `db.share(data)` — what this client shares with them (JSON, `null` clears), read back as `db.shared`; `db.closed` — `{ code, message }` after the server ended this store for us, else null
@@ -584,7 +647,7 @@ runs on the synced state and shows in the array view like any other change.
 - `db.watch(listener)` — state changes; `meta?.origin === 'remote'` marks the server's
 - `db.on('status' | 'error' | 'sync' | 'presence' | 'peers' | 'closed' | 'history', fn)` — lifecycle events; a refused op is an error with a `code` (`forbidden`, `expired`, `invalid`, `too-large` drop the op; `rate-limited` keeps it and retries; `clock-skew` is handled without one); `history` carries `{ canUndo, canRedo }` after a local batch, an undo, a redo, or `clearHistory()`
 - `db.undo()`, `db.redo()`, `db.canUndo`, `db.canRedo`, `db.checkpoint()`, `db.group(fn)`, `db.clearHistory()`
-- `webSocketTransport(url)`, `memoryOutbox()`, `localStorageOutbox(key)` — document adapters: `{ load(), save(outbox), saveState(cache) }`
+- `webSocketTransport(url)`, `memoryOutbox()`, `localStorageOutbox(key)` — document adapters: `{ load(), save(outbox), saveState(cache) }`, the built-in ones also `clear()` — forget the store's outbox and cache
 - `indexedDBStorage(name, { onError })` → also `settled()`, `close()`, `destroy()` — a row adapter: `{ load(), commit({ puts, deletes, meta }), replace({ rows, meta }), saveOp(op, meta), removeOp(seq, meta), dropOps(seq, meta) }`, where a delete removes the path and everything under it, `saveOp` also rewrites an op a newer one pruned, `removeOp` takes out one a newer op emptied, and `meta` is `{ replicaId, seq, version, epoch }`
 
 **Bun client** (`lazy-storage/client/sqlite`): `sqliteClientStorage(file, { wal })` → a row adapter on bun:sqlite, plus `db` and `close()`.

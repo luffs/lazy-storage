@@ -34,7 +34,7 @@
   import React, { useState } from 'react';
   import { createRoot } from 'react-dom/client';
   import htm from 'htm';
-  import { createClient, createConnection, webSocketTransport, localStorageOutbox } from 'lazy-storage';
+  import { createClient, sharedConnection, webSocketTransport, localStorageOutbox } from 'lazy-storage';
   import { useClient } from 'lazy-storage/react';
 
   const html = htm.bind(React.createElement);   // JSX without a build step
@@ -42,10 +42,13 @@
   localStorage.setItem('example:name', name);
 
   // The same `shared` store as the other example pages, seen as an array
-  const connection = createConnection({
-    transport: webSocketTransport(() => `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws?name=${encodeURIComponent(name)}`)
+  // One socket per browser, shared with the other example pages' tabs (see basic/index.html)
+  const connection = sharedConnection({
+    name: 'example',
+    transport: webSocketTransport(() => `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws?name=${encodeURIComponent(name)}`),
+    storage: store => localStorageOutbox(`example:${store}`)
   });
-  const db = createClient({ connection, store: 'shared', initial: { tasks: [] }, lists: ['tasks'], storage: localStorageOutbox('example:react') });
+  const db = createClient({ connection, store: 'shared', initial: { tasks: [] }, lists: ['tasks'] });
 
   function App() {
     // React needs no mirror: the component reads the client's state and

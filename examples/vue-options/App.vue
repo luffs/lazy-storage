@@ -7,7 +7,7 @@
 
 <script>
 import { markRaw } from 'vue';
-import { createClient, createConnection, webSocketTransport, localStorageOutbox } from 'lazy-storage';
+import { createClient, sharedConnection, webSocketTransport, localStorageOutbox } from 'lazy-storage';
 import { useClient } from 'lazy-storage/vue';
 import SharedList from './SharedList.vue';
 
@@ -25,10 +25,13 @@ export default {
   name: 'App',
   components: { SharedList },
   data() {
-    const connection = createConnection({
-      transport: webSocketTransport(() => `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws?name=${encodeURIComponent(name)}`)
+    // One socket per browser, shared with the other example pages' tabs (see basic/index.html)
+    const connection = sharedConnection({
+      name: 'example',
+      transport: webSocketTransport(() => `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws?name=${encodeURIComponent(name)}`),
+      storage: store => localStorageOutbox(`example:${store}`)
     });
-    const db = createClient({ connection, store: 'shared', initial: { tasks: [] }, lists: ['tasks'], storage: localStorageOutbox('example:vue-sfc') });
+    const db = createClient({ connection, store: 'shared', initial: { tasks: [] }, lists: ['tasks'] });
     const { status, presence } = useClient(db);   // refs, unwrapped as data; they stop with the component
     return { db: markRaw(db), status, presence };
   },

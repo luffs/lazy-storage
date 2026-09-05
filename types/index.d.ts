@@ -1,6 +1,6 @@
 // Type declarations for the `lazy-storage` entry: everything a browser or
 // Bun/Node client needs. The server lives under `lazy-storage/server`.
-import type { Connection, ConnectionOptions, DocumentStorage, RowDocument, RowStorage, TransportFactory } from './client.js';
+import type { Connection, ConnectionOptions, DocumentStorage, RowDocument, RowStorage, SharedConnection, SharedConnectionOptions, TransportFactory } from './client.js';
 
 export { LazyWatch } from 'lazy-watch';
 export * from './core.js';
@@ -12,11 +12,14 @@ export function webSocketTransport(url: string | (() => string), options?: { Web
 /** One socket shared by any number of clients */
 export function createConnection(options: ConnectionOptions): Connection;
 
-/** Outbox and state cache in memory: nothing survives a reload */
-export function memoryOutbox(): DocumentStorage;
+/** One socket per browser: the tabs elect a leader that runs the browser's replica, and every tab's clients follow it */
+export function sharedConnection(options: SharedConnectionOptions): SharedConnection;
 
-/** Outbox under `key` in localStorage, the state cache under `key:state` */
-export function localStorageOutbox(key?: string): DocumentStorage;
+/** Outbox and state cache in memory: nothing survives a reload; `clear()` forgets both */
+export function memoryOutbox(): DocumentStorage & { clear(): void };
+
+/** Outbox under `key` in localStorage, the state cache under `key:state`; `clear()` removes both keys */
+export function localStorageOutbox(key?: string): DocumentStorage & { clear(): void };
 
 export interface IndexedDBStorageOptions {
   /** Defaults to the global */

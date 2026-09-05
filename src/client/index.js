@@ -212,7 +212,21 @@ function build({
     }
   }
 
-  const status = () => (!link || connection.status === 'offline' ? 'offline' : synced ? 'online' : 'connecting');
+  // Whether this client can send: it has a link and the connection is up.
+  // What the app is told is a step further: a shared connection (shared.js)
+  // stands in for the browser's socket, so the link may be up while the
+  // socket is down, and then this client is offline for the app though it
+  // still hands its edits to the browser's replica
+  const linked = () => Boolean(link) && connection.status !== 'offline';
+  const status = () => {
+    if (!linked()) return 'offline';
+    if (!synced) return 'connecting';
+    const upstream = connection.upstream;
+    if (upstream === undefined || upstream === 'open') return 'online';
+    return upstream === 'offline' ? 'offline' : 'connecting';
+  };
+  /** The replica's unsent ops behind a shared connection count as this client's pending */
+  const browserPending = () => (typeof connection.pending === 'function' ? connection.pending(storeId) : 0);
 
   function refreshStatus() {
     const next = status();
@@ -221,6 +235,7 @@ function build({
     emit('status', next);
   }
   const stopStatus = connection.on('status', refreshStatus);
+  const stopSync = typeof connection.pending === 'function' ? connection.on('sync', () => emit('sync')) : () => {};
 
   function setPresence(users) {
     if (JSON.stringify(users) === JSON.stringify(presence)) return;
@@ -369,7 +384,7 @@ function build({
     outbox.push(op);
     persistence.op(op, superseded);
     persistence.batch(expanded, meta);
-    if (status() === 'online') link.send({ t: 'op', op });
+    if (linked() && synced) link.send({ t: 'op', op });
     emit('sync');
     // The undo manager listens ahead of this, so the batch is in history by now
     if (undoManager) emit('history', history());
@@ -553,7 +568,8 @@ function build({
 
   function connect() {
     ended = null;
-    if (!link) link = connection.attach(storeId, handler);
+    // What this client declared, for a connection that builds a replica of the store elsewhere (shared.js)
+    if (!link) link = connection.attach(storeId, handler, { initial, registers });
     connection.connect();
     refreshStatus();
   }
@@ -614,7 +630,7 @@ function build({
     connection,
     get status() { return status(); },
     /** Unacknowledged local ops */
-    get pending() { return outbox.length; },
+    get pending() { return outbox.length + browserPending(); },
     /** The store version this client has seen everything up to */
     get version() { return known.v; },
     /** Distinct users with a live session on this store (empty while offline) */
@@ -669,6 +685,7 @@ function build({
       clearTimeout(retryTimer);
       persistence.flush();
       stopStatus();
+      stopSync();
       facade?.dispose();
       undoManager?.dispose();
       LazyWatch.dispose(state);

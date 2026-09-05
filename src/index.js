@@ -6,6 +6,7 @@ export { LazyWatch } from 'lazy-watch';
 export * from './core/index.js';
 export { createClient, openClient } from './client/index.js';
 export { createConnection } from './client/connection.js';
+export { sharedConnection } from './client/shared.js';
 export { memoryOutbox, localStorageOutbox } from './client/storage.js';
 export { indexedDBStorage } from './client/indexeddb.js';
 export { webSocketTransport } from './client/transport.js';

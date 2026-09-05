@@ -65,7 +65,66 @@ export interface Connection {
   connect(): void;
   /** Close the socket for every attached client; no automatic reconnect */
   close(): void;
-  attach(storeId: string, handler: LinkHandler): Link;
+  /** `info` is what the attaching client declared, for a connection that builds a replica of the store elsewhere */
+  attach(storeId: string, handler: LinkHandler, info?: { initial?: object; registers?: RegisterSpec[] }): Link;
+}
+
+/** What `sharedConnection` needs of a channel between tabs: BroadcastChannel's shape */
+export interface TabChannel {
+  postMessage(message: unknown): void;
+  onmessage: ((event: { data: unknown }) => void) | null;
+  close(): void;
+}
+
+/** What `sharedConnection` needs of a lock manager: the Web Locks API's `request`, and `query` to find tabs that closed */
+export interface TabLocks {
+  request(name: string, options: { signal?: AbortSignal }, callback: () => Promise<unknown>): Promise<unknown>;
+  query?(): Promise<{ held: { name: string }[]; pending: { name: string }[] }>;
+}
+
+export interface SharedConnectionOptions {
+  /** One per app: names the channel and the lock */
+  name: string;
+  /** The browser's socket; opened by the leader tab only */
+  transport: TransportFactory;
+  /** The browser replica's persistence per store: any adapter, IndexedDB included (default: memory) */
+  storage?(storeId: string): ClientStorage;
+  /** A replica's storage that failed to open; default console */
+  onError?(error: unknown): void;
+  /** Retry backoff for the socket; false disables automatic reconnects */
+  reconnect?: ReconnectOptions | false;
+  /** Ping interval for the socket (default 30 000); false disables */
+  keepalive?: number | false;
+  /** Makes the channel between tabs (default: BroadcastChannel); null for none */
+  channel?: ((name: string) => TabChannel) | null;
+  /** The lock manager tabs elect a leader with (default: navigator.locks); null for none, and this tab leads on its own */
+  locks?: TabLocks | null;
+  tabId?: string;
+  /** How long (ms) the replica keeps a store no tab has open anymore, for a reload to come back; default 5000 */
+  linger?: number;
+  /** How often (ms) the leader looks for tabs that closed without a word, by the lock each tab holds; default 10 000 */
+  sweepEvery?: number;
+}
+
+/**
+ * One socket per browser: the tabs elect a leader, which runs the browser's
+ * replica on the real connection; every tab's clients follow it over a
+ * channel, in the leader's tab directly
+ */
+export interface SharedConnection extends Connection {
+  /** Whether this tab runs the browser's replica */
+  readonly leader: boolean;
+  readonly tabId: string;
+  /** The browser's socket, which this tab's clients report as their status */
+  readonly upstream: ConnectionStatus;
+  /** The replica's unsent ops for a store, counted into this tab's clients' `pending` */
+  pending(storeId: string): number;
+  on(event: 'status', fn: (status: ConnectionStatus) => void): Unsubscribe;
+  on(event: 'closed', fn: (closed: Closed) => void): Unsubscribe;
+  /** The replica's outbox changed */
+  on(event: 'sync', fn: () => void): Unsubscribe;
+  /** This tab is done: its clients disconnect and, if it led, the replica closes and another tab takes over */
+  dispose(): void;
 }
 
 // --- Storage adapters -------------------------------------------------------------
@@ -98,6 +157,8 @@ export interface DocumentStorage {
   load(): (OutboxDocument & Partial<StateCache>) | null;
   save(outbox: OutboxDocument): void;
   saveState(cache: StateCache): void;
+  /** Forget the outbox and the cache, for a store that is gone for good; the built-in adapters have it */
+  clear?(): void;
 }
 
 export interface RowDocument extends OutboxDocument {
