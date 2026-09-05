@@ -265,9 +265,12 @@ export function sharedConnection({
       listeners[event].add(fn);
       return () => listeners[event].delete(fn);
     },
+    /** Open this tab's way to the replica, and prod the browser's socket if it is down (a tab just looked at, say) */
     connect() {
       closedByUser = false;
       follower.connect();
+      if (relay) relay.wake();
+      else post({ kind: 'up', message: { ctl: 'connect' } });
     },
     /** Close this tab's clients' way to the replica; the replica itself stays up for the other tabs */
     close() {
@@ -402,13 +405,18 @@ function createRelay({ tabId, transport, storage, reconnect, keepalive, infos, l
     get status() { return attempted ? socket.status : 'connecting'; },
     /** The replica's unsent ops for a store */
     pending(store) { return entries.get(store)?.client?.pending ?? 0; },
-    /** A message from a follower tab: a store declaration, or a wire message for one of its stores */
+    /** A tab asked for the socket: reconnect now rather than at the next backoff step, unless it was turned away */
+    wake() {
+      if (attempted && socket.status === 'offline' && !socket.closed) socket.connect();
+    },
+    /** A message from a follower tab: a store declaration, a nudge, or a wire message for one of its stores */
     receive(tab, message) {
       if (!Utils.isPlainObject(message)) return;
       if (message.ctl === 'store') {
         if (typeof message.store === 'string' && !infos.has(message.store)) infos.set(message.store, { initial: message.initial ?? {}, registers: message.registers ?? [] });
         return;
       }
+      if (message.ctl === 'connect') return void relay.wake();
       const { store } = message;
       if (typeof store !== 'string' || !store) return;
       const entry = entryFor(store);

@@ -333,3 +333,24 @@ test('a store no tab has open anymore is let go after a moment, its session with
   assert.equal(a.db.status, 'online', 'the leader is untouched');
   assert.equal(b.persisted.has('team-2'), true, 'the replica\'s storage for the store stays');
 });
+
+test('connect() from any tab prods the browser\'s socket, so a tab looked at again reconnects at once rather than at the next backoff step', async t => {
+  const store = createStore({ initial: INITIAL, presence: true });
+  const net = createNetwork(store);
+  const b = browser(net, { reconnect: { min: 5000, max: 5000 } });   // left to itself, the socket would wait five seconds
+  t.after(() => b.close());
+  const a = b.tab('a');
+  const c = b.tab('c');
+  await b.until(() => a.db.status === 'online' && c.db.status === 'online', 'both online');
+  const leader = a.connection.leader ? a : c;
+  const follower = leader === a ? c : a;
+  leader.link.goOffline();
+  await b.until(() => follower.db.status === 'offline', 'offline');
+  leader.link.goOnline();
+  await sleep(60);
+  await net.settle();
+  assert.equal(follower.db.status, 'offline', 'nothing happened on its own yet');
+  follower.connection.connect();
+  await b.until(() => follower.db.status === 'online' && leader.db.status === 'online', 'the follower\'s nudge brought the socket back');
+  assert.equal(store.sessions, 1);
+});

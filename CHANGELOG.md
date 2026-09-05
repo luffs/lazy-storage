@@ -2,6 +2,14 @@
 
 All notable changes to lazy-storage are documented here. The format follows Keep a Changelog; versions follow Semantic Versioning.
 
+## [0.9.1] - 2026-09-05
+
+### Changed
+
+- `connect()` on a shared connection also prods the browser's socket when
+  it is down, from any tab, so a tab the user comes back to reconnects at
+  once rather than at the next backoff step
+
 ## [0.9.0] - 2026-09-05
 
 ### Added

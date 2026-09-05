@@ -400,7 +400,8 @@ lock it held, which the leader checks every `sweepEvery` (default ten
 seconds). Leave the clients' own `storage` at its default: the replica is
 what persists.
 `connection.leader` says whether this tab leads, `dispose()` hands
-leadership on early, and what a tab shares (`db.share`) is the browser's
+leadership on early, `connect()` also prods the browser's socket when it
+is down (for a tab the user just came back to), and what a tab shares (`db.share`) is the browser's
 share, the last tab to set it winning; a tab's own entry among `db.peers`
 carries the browser's replica id, not the tab's. Where Web Locks or
 BroadcastChannel are missing, a tab is its own leader and this is an
