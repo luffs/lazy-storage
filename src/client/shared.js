@@ -337,9 +337,10 @@ function createRelay({ tabId, transport, storage, reconnect, keepalive, infos, l
     let entry = entries.get(store);
     if (entry) return entry;
     const info = infos.get(store) ?? { initial: {}, registers: [] };
-    entry = { store, client: null, registers: registerSet(info.registers).patterns.map(p => p.join('/')), sessions: new Map(), queue: [], stops: [], timer: null };
+    entry = { store, client: null, adapter: null, registers: registerSet(info.registers).patterns.map(p => p.join('/')), sessions: new Map(), queue: [], stops: [], timer: null };
     entries.set(store, entry);
     const adapter = storage(store);
+    entry.adapter = adapter;
     const options = { connection: socket, store, initial: structuredClone(info.initial), registers: info.registers, storage: adapter, undo: false };
     const ready = (saved, client) => {
       if (entries.get(store) !== entry) return void client.dispose();   // let go while it was opening
@@ -390,6 +391,8 @@ function createRelay({ tabId, transport, storage, reconnect, keepalive, infos, l
     entries.delete(store);
     for (const stop of entry.stops) stop();
     entry.client?.dispose();
+    // An adapter holding a connection open (IndexedDB) lets it go with the store
+    if (typeof entry.adapter?.close === 'function') entry.adapter.close();
   }
 
   /** Apply a follower's op to the replica (once per seq) */
@@ -469,6 +472,7 @@ function createRelay({ tabId, transport, storage, reconnect, keepalive, infos, l
         clearTimeout(entry.timer);
         for (const stop of entry.stops) stop();
         entry.client?.dispose();
+        if (typeof entry.adapter?.close === 'function') entry.adapter.close();
       }
       entries.clear();
       socket.close();
