@@ -4,6 +4,18 @@ All notable changes to lazy-storage are documented here. The format follows Keep
 
 ## [Unreleased]
 
+### Changed
+
+- **The Bun adapter fans a broadcast out through the runtime.** Each socket
+  subscribes to a topic per store, and a store's patch goes out as one
+  `server.publish` that Bun encodes and compresses once for every
+  subscriber, rather than a send per socket. A large write to many
+  listeners costs a fraction of what it did: a 13 KB patch to 2000 clients
+  fell from about 88 ms of event-loop time to about 5 ms here. Presence
+  and eviction stay per socket (targeted or opt-out). The Node adapter is
+  unchanged. Behind this, `createHub` takes a `channel` and `store.session`
+  a `broadcast`, for a transport that can reach every session at once
+
 ### Fixed
 
 - A shared connection closes a replica's storage adapter when it lets the

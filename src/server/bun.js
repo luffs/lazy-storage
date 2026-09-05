@@ -70,8 +70,12 @@ export function createHandlers({
   };
   const hubs = new Map();
   let closing = false;
+  let bunServer = null;   // captured at the first upgrade, for topic broadcasts
+  const topic = id => `lz:${id}`;
+  const shouldCompress = json => deflate !== null && json.length >= deflate.threshold;
 
   async function upgrade(req, server) {
+    bunServer = server;
     if (new URL(req.url).pathname !== path) return null;
     if (closing) return new Response('Server shutting down', { status: 503, headers: { 'retry-after': '1' } });
     let user;
@@ -91,7 +95,14 @@ export function createHandlers({
     perMessageDeflate: deflate === null ? false : deflate.runtime,
     open(ws) {
       if (ws.data.unauthorized) return closeUnauthorized(ws);
-      hubs.set(ws, createHub(resolveStore, { send: message => send(ws, message), user: ws.data.user, authorize, onError }));
+      // Each socket subscribes per store; a broadcast goes out once as a topic
+      // publish, which Bun compresses once and fans out, rather than a send per socket
+      const channel = {
+        subscribe: id => ws.subscribe(topic(id)),
+        unsubscribe: id => { try { ws.unsubscribe(topic(id)); } catch { /* a closing socket is already gone */ } },
+        publish: (id, message) => { const json = toJSON(message); bunServer.publish(topic(id), json, shouldCompress(json)); }
+      };
+      hubs.set(ws, createHub(resolveStore, { send: message => send(ws, message), user: ws.data.user, authorize, channel, onError }));
     },
     message(ws, raw) {
       let msg;

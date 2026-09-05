@@ -74,6 +74,8 @@ export interface SessionOptions {
   user?: unknown;
   /** Called after `closeSessions` closed this session */
   onEvict?(): void;
+  /** A transport that reaches every session on the store at once hands this in; used for the patch fan-out in place of a send per socket */
+  broadcast?(message: ServerMessage): void;
 }
 
 export interface ApplyResult {
@@ -265,10 +267,19 @@ export function isStoreId(id: unknown): id is string;
 export type StoreResolver = (id: string) => Store | null;
 export type Authorize = (user: unknown, storeId: string, store: Store) => boolean | Promise<boolean>;
 
+/** A transport that can fan a store's message out to every socket on it at once (Bun's topic publish) */
+export interface HubChannel {
+  subscribe(storeId: string): void;
+  unsubscribe(storeId: string): void;
+  publish(storeId: string, message: Tagged<ServerMessage>): void;
+}
+
 export interface HubOptions {
   send(message: Tagged<ServerMessage> | { t: 'pong' } | { t: 'error'; message: string }): void;
   user?: unknown;
   authorize?: Authorize;
+  /** Fan a store's patch out to every subscribed socket at once, rather than a send per socket */
+  channel?: HubChannel;
   onError?(error: unknown): void;
 }
 

@@ -122,6 +122,28 @@ try {
     assert.ok(pong && !pong.compressed, 'a pong goes plain');
   });
 
+  await test('a broadcast goes out as one topic publish: a large patch arrives compressed, a small one plain, and a socket that left the store stops getting them', async () => {
+    // A raw socket subscribes to t1 by saying hello, then watches the frames a server-side patch produces
+    const big = await probeFrames(server.port, '/ws?token=alice', [
+      JSON.stringify({ t: 'hello', store: 't1', replicaId: 'watch', ops: [] })
+    ], { settle: 400, after: () => stores.get('t1').patch({ blob: 'y'.repeat(4000) }) });
+    const bigPatch = big.frames.find(f => f.compressed || (f.text && f.text.includes('blob')));
+    assert.ok(bigPatch?.compressed, 'the 4 KB patch was published compressed');
+
+    const small = await probeFrames(server.port, '/ws?token=alice', [
+      JSON.stringify({ t: 'hello', store: 't1', replicaId: 'watch2', ops: [] })
+    ], { settle: 400, after: () => stores.get('t1').patch({ tasks: { z: { id: 'z' } } }) });
+    const smallPatch = small.frames.find(f => f.text && f.text.includes('"z"'));
+    assert.ok(smallPatch && !smallPatch.compressed, 'the small patch went plain');
+
+    // After leave, the socket is unsubscribed and a later patch does not reach it
+    const left = await probeFrames(server.port, '/ws?token=alice', [
+      JSON.stringify({ t: 'hello', store: 't1', replicaId: 'watch3', ops: [] }),
+      JSON.stringify({ t: 'leave', store: 't1' })
+    ], { settle: 400, after: () => stores.get('t1').patch({ tasks: { after: { id: 'after' } } }) });
+    assert.ok(!left.frames.some(f => f.text && f.text.includes('"after"')), 'no patch after leaving the store');
+  });
+
   await test('eviction closes one session through the hub; the socket and its other stores stay up', async () => {
     const alice = connect('alice');
     const bob = connect('bob');

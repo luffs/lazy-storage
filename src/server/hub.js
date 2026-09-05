@@ -26,10 +26,16 @@ const { Utils } = LazyWatch;
  * @param {any} [options.user] - the authenticated user, attached to every
  *   store session opened on this connection
  * @param {(user: any, storeId: string, store: Object) => boolean|Promise<boolean>} [options.authorize]
+ * @param {{ subscribe(id: string): void, unsubscribe(id: string): void, publish(id: string, message: Object): void }} [options.channel]
+ *   a transport that can fan a message out to every socket on a store at
+ *   once (Bun's topic publish). Given one, a store's patch goes out as a
+ *   single `publish` per store rather than a send per socket; each socket
+ *   subscribes when it opens a store and unsubscribes on leave, eviction,
+ *   or close
  * @param {(error: any) => void} [options.onError] - server faults (a store
  *   factory that threw); default console
  */
-export function createHub(resolveStore, { send, user, authorize, onError = err => console.error('lazy-storage:', err) } = {}) {
+export function createHub(resolveStore, { send, user, authorize, channel, onError = err => console.error('lazy-storage:', err) } = {}) {
   if (typeof send !== 'function') throw new TypeError('A hub needs a send function');
   const sessions = new Map();
   const pending = new Map(); // store id -> messages queued while authorization is in flight
@@ -37,11 +43,21 @@ export function createHub(resolveStore, { send, user, authorize, onError = err =
 
   const refuse = (id, code, message) => send({ t: 'closed', store: id, code, message });
 
+  function drop(id) {
+    sessions.delete(id);
+    // Stop this socket hearing the store's broadcasts (the socket stays for its other stores)
+    channel?.unsubscribe(id);
+  }
+
   function open(id, store) {
+    // Subscribe before the session exists, so no broadcast can slip past on its way in
+    channel?.subscribe(id);
     const session = store.session({
       send: message => send(tagStore(message, id)),
       user,
-      onEvict: () => sessions.delete(id)
+      onEvict: () => drop(id),
+      // The transport fans a store's patch out to every subscribed socket at once, tagged and compressed once
+      broadcast: channel ? message => channel.publish(id, tagStore(message, id)) : undefined
     });
     sessions.set(id, session);
     return session;
@@ -63,7 +79,7 @@ export function createHub(resolveStore, { send, user, authorize, onError = err =
       }
       if (msg.t === 'leave') {
         sessions.get(id)?.close();
-        sessions.delete(id);
+        drop(id);
         pending.delete(id);
         return;
       }
@@ -115,7 +131,10 @@ export function createHub(resolveStore, { send, user, authorize, onError = err =
     get user() { return user; },
     close() {
       closed = true;
-      for (const session of sessions.values()) session.close();
+      for (const [id, session] of sessions) {
+        session.close();
+        channel?.unsubscribe(id);
+      }
       sessions.clear();
       pending.clear();
     }

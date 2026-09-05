@@ -522,6 +522,16 @@ A public server needs a few ceilings, all on by default:
   deflate stream of some 75 KB for its lifetime, one that has sent one
   an inflate stream of some 100 KB. `perMessageDeflate: false` turns it
   off.
+- **Fan-out.** A store's patch reaches every session on it, so a write to
+  a store with many listeners is the cost that grows first. On the Bun
+  adapter each socket subscribes to a topic per store and a patch goes out
+  as one `server.publish`, encoded and compressed once for every
+  subscriber by the runtime, so a large write to thousands of listeners
+  costs a few milliseconds of the event loop rather than a send per
+  socket. The Node adapter sends per socket. Either way, egress still
+  grows with the listeners, so a big write to a big audience is bandwidth
+  the uplink has to carry; splitting a large value into records, so a
+  patch carries only what changed, is what keeps it small.
 - **Op size.** `maxLeaves` on the store (default 10 000) is the most leaves
   one op may touch; a larger one is refused with code `too-large`, and
   the client drops it and resyncs.

@@ -25,7 +25,7 @@ function frame(text) {
  *   `extensions` is the server's Sec-WebSocket-Extensions header (empty when
  *   it accepted none); `text` is the payload of a plain text frame
  */
-export function probeFrames(port, path, messages, { gap = 100, settle = 300 } = {}) {
+export function probeFrames(port, path, messages, { gap = 100, settle = 300, after } = {}) {
   return new Promise((resolve, reject) => {
     const frames = [];
     let buffer = Buffer.alloc(0);
@@ -61,6 +61,8 @@ export function probeFrames(port, path, messages, { gap = 100, settle = 300 } = 
         handshake = buffer.subarray(0, end).toString();
         buffer = buffer.subarray(end + 4);
         messages.forEach((m, i) => setTimeout(() => socket.write(frame(m)), i * gap));
+        // Once the messages are in and processed (subscribed), let the caller cause server-side frames
+        if (after) setTimeout(() => { try { after(); } catch (err) { reject(err); } }, messages.length * gap + 50);
         setTimeout(() => {
           const header = handshake.split('\r\n').find(h => /^sec-websocket-extensions:/i.test(h));
           socket.destroy();
