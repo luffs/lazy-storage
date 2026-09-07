@@ -65,7 +65,7 @@ test('eviction closes the store for that user, reaches the client as final, and 
   assert.deepEqual(closed, [{ code: 'evicted', message: 'You were removed from the team' }]);
   assert.equal(b.status, 'offline');
   assert.equal(bOther.status, 'online', 'the same socket\'s other store is untouched');
-  assert.equal(c2.status, 'open');
+  assert.equal(c2.status, 'online');
   assert.equal(stores.get('team-x').sessions, 1);
   assert.deepEqual(a.presence, [{ id: 'u1' }], 'presence updated for the remaining user');
 

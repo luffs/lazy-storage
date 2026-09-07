@@ -80,6 +80,9 @@ const HELLO_LIMIT = 1000;
  * @param {Object} [options.storage] - outbox and state-cache persistence
  *   (default: memory). An adapter whose load() returns a promise needs
  *   openClient()
+ * @param {boolean} [options.mirror=false] - a client that only reads (a
+ *   server-owned store, a dashboard): `cache`, `undo` and `presence` default
+ *   to false, each still settable on its own
  * @param {boolean} [options.cache=true] - persist the state with the
  *   outbox and start from it on the next load; false keeps only the outbox
  * @param {boolean} [options.undo=true] - attach an undo manager
@@ -121,11 +124,14 @@ function build({
   position = 'pos',
   replicaId,
   storage,
-  cache = true,
-  undo = true,
+  // A follower that only reads: no undo manager, no state cache, no
+  // presence. Each of the three can still be set on its own
+  mirror = false,
+  cache = !mirror,
+  undo = !mirror,
   undoLimit = 100,
   reconnect = { min: 500, max: 10_000 },
-  presence: wantsPresence = true,   // `presence` below is the list
+  presence: wantsPresence = !mirror,   // `presence` below is the list
   now
 }, saved) {
   if (typeof storeId !== 'string' || !storeId) throw new TypeError('createClient requires a store id');
@@ -231,7 +237,7 @@ function build({
     if (!linked()) return 'offline';
     if (!synced) return 'connecting';
     const upstream = connection.upstream;
-    if (upstream === undefined || upstream === 'open') return 'online';
+    if (upstream === undefined || upstream === 'online') return 'online';
     return upstream === 'offline' ? 'offline' : 'connecting';
   };
   /** The replica's unsent ops behind a shared connection count as this client's pending */

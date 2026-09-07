@@ -33,6 +33,10 @@ const UNAUTHORIZED = 4401;
  * @param {number|false} [options.keepalive=30000] - ping interval in ms while
  *   open, so idle sockets survive proxies and server idle timeouts; false
  *   disables it
+ *
+ * `status` is 'offline' | 'connecting' | 'online' — the socket's, `online`
+ * meaning open. A client on it uses the same words, its `online` meaning
+ * the socket is open and its store is synced as well.
  */
 export function createConnection({ transport, reconnect = { min: 500, max: 10_000 }, keepalive = 30_000 } = {}) {
   if (typeof transport !== 'function') throw new TypeError('createConnection requires a transport factory');
@@ -50,7 +54,7 @@ export function createConnection({ transport, reconnect = { min: 500, max: 10_00
     stopKeepalive();
     if (!keepalive) return;
     keepaliveTimer = setInterval(() => {
-      if (conn && status === 'open') conn.send({ t: 'ping' });
+      if (conn && status === 'online') conn.send({ t: 'ping' });
     }, keepalive);
     // Never keep a Node process alive just for pings
     if (typeof keepaliveTimer?.unref === 'function') keepaliveTimer.unref();
@@ -102,7 +106,7 @@ export function createConnection({ transport, reconnect = { min: 500, max: 10_00
     c.onopen = () => {
       if (conn !== c) return;
       retryDelay = reconnect ? reconnect.min : 0;
-      setStatus('open');
+      setStatus('online');
       startKeepalive();
       for (const { handler, link } of [...handlers.values()]) handler.onOpen(link);
     };
@@ -191,16 +195,16 @@ export function createConnection({ transport, reconnect = { min: 500, max: 10_00
       if (handlers.has(storeId)) throw new Error(`A client is already attached to store "${storeId}" on this connection`);
       const link = {
         send(message) {
-          if (conn && status === 'open') conn.send({ ...message, store: storeId });
+          if (conn && status === 'online') conn.send({ ...message, store: storeId });
         },
         detach() {
           if (handlers.get(storeId)?.handler !== handler) return;
           handlers.delete(storeId);
-          if (conn && status === 'open') conn.send({ t: 'leave', store: storeId });
+          if (conn && status === 'online') conn.send({ t: 'leave', store: storeId });
         }
       };
       handlers.set(storeId, { handler, link });
-      if (status === 'open') handler.onOpen(link);
+      if (status === 'online') handler.onOpen(link);
       return link;
     }
   };

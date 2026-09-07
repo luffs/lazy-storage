@@ -505,6 +505,55 @@ sessions yourself), which powers two more features:
   at which point authorization runs afresh. On a shared connection the
   socket stays up for the other stores.
 
+## Serving state the server owns
+
+Not every store is a shared document. A panel that mirrors the processes
+on a machine, a dashboard fed by a poller, a job streaming its log: the
+server is the only writer and browsers follow. lazy-storage serves this
+shape well, with a few choices that differ from the collaborative default.
+
+**Isolation is store layout.** A session on a store receives every patch
+on it: `authorize` decides who may open a store, and there is no per-user
+filter inside one (that is what lets a patch go out as a single publish).
+So cut the state along the lines people may see, and let `authorize`
+enforce them: a store per team, per owner, per job. A view whose readers
+are a subset of another's is a separate store, not a filtered one.
+
+**Clients only read.** `validate: () => false` refuses every client op
+(the client drops it and resyncs, so a stray local edit falls back in
+line), and on the client `mirror: true` turns off what a follower never
+uses: the undo manager, the state cache, presence.
+
+**The server's patch is the authority.** `store.patch` lifts any tombstone
+on its way, so a record the server recreates under a key it had deleted
+(a process that came back, a container after a redeploy) lands, `id` or
+not; a replica's op is still judged by the rules under [How conflicts
+resolve](#how-conflicts-resolve). Retention, rate limits and the outbox
+are idle machinery here: harmless, and the defaults are fine.
+
+**Publishing a LazyWatch the server already writes.** When the state
+lives in a lazy-watch proxy that other code mutates, forward its batches:
+
+```js
+const live = new LazyWatch({ procs: {}, order: [] });
+const store = createStore({ initial: { procs: {}, order: [] }, registers: ['order'], validate: () => false });
+LazyWatch.on(live, diff => store.patchFrom(diff, live));
+live.procs.web = { state: 'online', pid: 41 };   // reaches every session as a patch
+```
+
+`patchFrom` replaces the array fragments lazy-watch emits (`{ 2: 'c',
+$length: 3 }`, a `$splice`) with the whole arrays read from `live`, since
+arrays travel as whole values, then patches as the server. Arrays of
+records still need declaring as registers, on both sides.
+
+**Nulls are deletions.** State that uses `null` for "unknown" comes out as
+an absent key on the mirror; read it with `?.`.
+
+**A store that lives as long as something runs** (a job's log) is created
+when the job starts, written with `patch`, and ended with
+`closeSessions(() => true, 'finished')` then `dispose()`: every follower
+hears `evicted` and knows to look elsewhere for the final record.
+
 ## Limits, memory, and observability
 
 A public server needs a few ceilings, all on by default:
@@ -678,9 +727,9 @@ runs on the synced state and shows in the array view like any other change.
 
 **Client** (`lazy-storage`)
 
-- `createClient({ store, connection | transport, initial, registers, lists, position, replicaId, storage, cache, undo, undoLimit, reconnect, presence, now })`; `db.restored` — started from the cached state; `db.version` — the store version this client has seen everything up to; `db.wire` — the synced state under a lists view
+- `createClient({ store, connection | transport, initial, registers, lists, position, replicaId, storage, mirror, cache, undo, undoLimit, reconnect, presence, now })` — `mirror: true` is a follower's defaults: `cache`, `undo` and `presence` off, each still settable; `db.restored` — started from the cached state; `db.version` — the store version this client has seen everything up to; `db.wire` — the synced state under a lists view
 - `openClient(options)` → `Promise<db>` — the same, for a storage adapter whose `load()` returns a promise
-- `createConnection({ transport, reconnect, keepalive })` → `connect()`, `close()`, `status`, `attached`, `closed` — why the server turned the socket away, or null — `fetch(path)` when the transport can — `on('status' | 'closed', fn)` — a socket shared by clients
+- `createConnection({ transport, reconnect, keepalive })` → `connect()`, `close()`, `status` (`'offline' | 'connecting' | 'online'` — the socket's; a client says `online` only once its store is synced as well), `attached`, `closed` — why the server turned the socket away, or null — `fetch(path)` when the transport can — `on('status' | 'closed', fn)` — a socket shared by clients
 - `sharedConnection({ name, transport, storage, reconnect, keepalive, channel, locks, tabId, linger, sweepEvery, onError })` → the same, plus `leader`, `tabId`, `upstream` — the socket's status — `pending(store)` — the replica's unsent ops — `on('sync', fn)`, `dispose()` — one socket and one replica per browser, the tabs electing a leader (see [One socket per browser](#one-socket-per-browser))
 - `db.state` — the mirror (a lazy-watch proxy). Read and write it directly
 - `db.store`, `db.connection` — the store id and the connection
@@ -709,7 +758,7 @@ runs on the synced state and shows in the array view like any other change.
 - `store.session({ send, user, onEvict, broadcast, httpSnapshot })` → `{ receive(message), close(), user, replicaId }` — one per connection, transport-agnostic; `broadcast` is a transport's fan-out to every session at once, `httpSnapshot` `{ url, threshold }` where a client that can fetch gets a large snapshot
 - `store.snapshotJSON()` — the state as JSON, encoded once per change; `snapshotResponse(store, request)` — the snapshot route's Response (`{ v, epoch, state }`, brotli or gzip as accepted, an ETag and 304s), for a server of your own
 - `store.closeSessions(predicate, message)` — evict sessions; `store.presence()` — distinct users with a live session; `store.peers()` — every live session as `{ replicaId, user, data }`
-- `store.patch(diff)` — a server-side change, timestamped and broadcast, never held back by a tombstone; `store.apply(op)` — a trusted op, gates skipped
+- `store.patch(diff)` — a server-side change, timestamped and broadcast, never held back by a tombstone; `store.patchFrom(diff, state)` — a lazy-watch batch from state kept elsewhere, its array fragments replaced with the whole arrays read from `state` (see [Serving state the server owns](#serving-state-the-server-owns)); `store.apply(op)` — a trusted op, gates skipped
 - `store.on(listener)`, `store.snapshot()`, `store.state`, `store.version`, `store.replicas`
 - `store.compact()` → `{ tombstones, replicas }` removed; `store.flush()`, `store.dispose()`
 - `memoryStorage()`, `jsonFileStorage(path, { debounce })`

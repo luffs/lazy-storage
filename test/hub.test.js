@@ -86,7 +86,7 @@ test('disconnecting one client leaves the socket up for the others, and it can r
   await net.settle();
   assert.equal(y.status, 'offline');
   assert.equal(x.status, 'online', 'the other store is unaffected');
-  assert.equal(shared.status, 'open');
+  assert.equal(shared.status, 'online');
   assert.equal(shared.attached, 1);
   assert.equal(stores.get('team-y').sessions, 0, 'leave closed the hub session for team-y');
 
@@ -115,7 +115,7 @@ test('an unknown store is closed for that client only; the other stays online', 
   assert.deepEqual(closed, [{ code: 'unknown-store', message: 'Unknown store "other"' }]);
   assert.deepEqual(nope.closed, closed[0]);
   assert.equal(shared.attached, 1, 'the refused client detached; the socket stays for the other');
-  assert.equal(shared.status, 'open');
+  assert.equal(shared.status, 'online');
 });
 
 test('a store factory that throws refuses that store only, without taking the connection down', async () => {
@@ -136,7 +136,7 @@ test('a store factory that throws refuses that store only, without taking the co
     assert.equal(ok.status, 'online', 'the healthy store on the same socket is unaffected');
     assert.equal(broken.status, 'offline');
     assert.deepEqual(closed, [{ code: 'unknown-store', message: 'Store "broken" could not be opened: migration failed: arrays are not allowed' }]);
-    assert.equal(shared.status, 'open');
+    assert.equal(shared.status, 'online');
     assert.ok(errors.some(e => e.includes('migration failed')), 'the server fault is logged (the default onError)');
   } finally {
     console.error = originalError;

@@ -80,7 +80,7 @@
 import { LazyWatch } from 'lazy-watch';
 import { createClock, isTimestamp } from '../core/hlc.js';
 import { registerSet, pathKey, parsePathKey, setAt, valueAt } from '../core/paths.js';
-import { leaves, assertModel, rebuild } from '../core/model.js';
+import { leaves, assertModel, rebuild, expandRegisters } from '../core/model.js';
 import { mergeOp, compactTombstones } from '../core/merge.js';
 import { ClockMap } from '../core/clocks.js';
 import { memoryStorage } from './storage.js';
@@ -803,6 +803,21 @@ export function createStore({
     return apply({ replicaId: 'server', seq: ++serverSeq, ts: clock.now(), diff }, undefined, { authority: true });
   }
 
+  /**
+   * Publish a batch from state the server keeps elsewhere. lazy-watch emits
+   * array changes as fragments ({ 2: 'c', $length: 3 }, a $splice) and
+   * arrays travel as whole values, so every array the diff touches is
+   * replaced with a copy of its current value read from `state` (the
+   * LazyWatch the diff came from, or a plain object shaped like it), then
+   * patched as the server's own change. The way to serve a LazyWatch that
+   * other code already writes:
+   *
+   *   LazyWatch.on(live, diff => store.patchFrom(diff, live));
+   */
+  function patchFrom(diff, state) {
+    return patch(expandRegisters(diff, regs, state));
+  }
+
   self = {
     /** The live state; read freely, write through `patch` so clocks stay right */
     state,
@@ -815,6 +830,7 @@ export function createStore({
     /** A trusted op, gates skipped — judged by the merge like any replica's */
     apply: (op, session) => apply(op, session),
     patch,
+    patchFrom,
     session,
     closeSessions,
     /** The state as JSON, encoded once per change: what a snapshot carries, inline or over HTTP */

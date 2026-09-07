@@ -3,7 +3,9 @@
 import type { ChangeListener, ListenerOptions, Unsubscribe } from 'lazy-watch';
 import type { ClosedCode, ErrorCode, Op, Peer, RegisterSpec, Row, ServerMessage } from './core.js';
 
-export type ConnectionStatus = 'offline' | 'connecting' | 'open';
+/** The socket's: `online` once it is open */
+export type ConnectionStatus = 'offline' | 'connecting' | 'online';
+/** A client's: `online` once its socket is open and its store is synced (a snapshot or delta applied) */
 export type ClientStatus = 'offline' | 'connecting' | 'online';
 
 // --- Transports and connections -----------------------------------------------
@@ -221,7 +223,9 @@ export interface ClientOptionsBase<S extends object = any> {
   replicaId?: string;
   /** Outbox and state-cache persistence (default: memory) */
   storage?: ClientStorage;
-  /** Persist the state and start from it on the next load (default true) */
+  /** A client that only reads: `cache`, `undo` and `presence` default to false, each still settable on its own (default false) */
+  mirror?: boolean;
+  /** Persist the state and start from it on the next load (default true; false under `mirror`) */
   cache?: boolean;
   /** Attach an undo manager (default true) */
   undo?: boolean;

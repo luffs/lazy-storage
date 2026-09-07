@@ -25,7 +25,7 @@ interface State { tasks: Record<string, Task>; order: string[] }
 // --- Client ---------------------------------------------------------------------
 
 const connection = createConnection({ transport: webSocketTransport(() => 'ws://localhost:3200/ws?token=x'), reconnect: { min: 500, max: 10_000 }, keepalive: false });
-const status: 'offline' | 'connecting' | 'open' = connection.status;
+const status: 'offline' | 'connecting' | 'online' = connection.status;
 
 const db: Client<State> = createClient<State>({
   connection,

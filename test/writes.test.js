@@ -1,6 +1,7 @@
 // writes.test.js - Write authorization: read-only paths and the validate hook
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { LazyWatch } from 'lazy-watch';
 import { createStore } from '../src/server/index.js';
 import { createClient } from '../src/client/index.js';
 import { createNetwork } from './helpers.js';
@@ -192,6 +193,53 @@ test('apply without a session is the server and skips the gates; the trusted pat
   const r = store.apply({ replicaId: 'import', seq: 1, ts: [Date.now(), 0, 'import'], diff: { team: { name: 'Imported' } } });
   assert.notEqual(r.accepted, null);
   assert.equal(store.snapshot().team.name, 'Imported');
+});
+
+test('patchFrom serves a LazyWatch the server writes: array fragments become whole arrays, and clients follow', async () => {
+  const live = new LazyWatch({ procs: {}, order: [], tags: [] });
+  const store = createStore({ initial: { procs: {}, order: [], tags: [] }, registers: ['order'], validate: () => false });
+  const net = createNetwork(store);
+  const mirror = net.client({ initial: { procs: {}, order: [], tags: [] }, registers: ['order'], mirror: true });
+  await net.settle();
+  const results = [];
+  LazyWatch.on(live, diff => results.push(store.patchFrom(diff, live)));
+
+  live.procs.web = { state: 'online', pid: 41 };
+  live.order = ['b', 'a'];
+  live.tags = ['x'];
+  LazyWatch.flush(live);
+  live.order.unshift('c');   // a $splice fragment on the wire
+  live.tags.push('y');       // a { 1: 'y', $length: 2 } fragment, outside any register
+  LazyWatch.flush(live);
+  assert.equal(results.length, 2);
+  assert.ok(results.every(r => r.accepted && r.rejected.length === 0));
+  assert.deepEqual(store.snapshot(), { procs: { web: { state: 'online', pid: 41 } }, order: ['c', 'b', 'a'], tags: ['x', 'y'] });
+  await net.settle();
+  assert.deepEqual(mirror.state.order, ['c', 'b', 'a']);
+  assert.deepEqual(mirror.state.tags, ['x', 'y']);
+  // A deleted array is a deletion, not a fragment
+  delete live.order;
+  LazyWatch.flush(live);
+  assert.equal(store.snapshot().order, undefined);
+});
+
+test('mirror: true is a follower\'s defaults — no undo, no cache, no presence — each still settable', async () => {
+  const store = createStore({ initial: INITIAL, presence: true });
+  const net = createNetwork(store);
+  const follower = net.client({ initial: INITIAL, mirror: true }, { user: { id: 'f' } });
+  const editor = net.client({ initial: INITIAL }, { user: { id: 'e' } });
+  const unmirrored = net.client({ initial: INITIAL, mirror: true, undo: true }, { user: { id: 'u' } });
+  await net.settle();
+  follower.state.tasks.a = { id: 'a', title: 'local' };
+  editor.state.tasks.b = { id: 'b', title: 'local' };
+  unmirrored.state.tasks.c = { id: 'c', title: 'local' };
+  await net.settle();
+  assert.equal(follower.canUndo, false, 'no undo manager');
+  assert.equal(editor.canUndo, true);
+  assert.equal(unmirrored.canUndo, true, 'undo: true wins over mirror');
+  assert.deepEqual(follower.peers, [], 'opted out of presence: never has peers');
+  assert.ok(editor.peers.length >= 2, 'an ordinary client sees the room');
+  assert.equal(follower.restored, false);
 });
 
 test('a server patch re-adds a record it had deleted, id or not, and the clients follow; a trusted op is still judged', async () => {

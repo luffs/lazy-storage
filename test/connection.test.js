@@ -38,7 +38,7 @@ test('a closed message without a store ends the socket: no retry, the reason on 
   a.connect();
   b.connect();
   last().onopen();
-  assert.equal(connection.status, 'open');
+  assert.equal(connection.status, 'online');
   assert.deepEqual(last().sent.map(m => [m.t, m.store]), [['hello', 'a'], ['hello', 'b']]);
 
   last().onmessage({ t: 'closed', code: 'unauthorized', message: 'Not signed in' });

@@ -224,6 +224,12 @@ export interface Store<S extends object = any> {
   apply(op: Op, session?: Session): ApplyResult;
   /** A change from the server itself, timestamped now. The authority: a tombstone on its way is lifted, so what it writes at a deleted path re-adds it, `id` or not */
   patch(diff: Diff): ApplyResult;
+  /**
+   * A lazy-watch batch from state the server keeps elsewhere: array fragments are replaced with the whole arrays
+   * read from `state` (the LazyWatch the diff came from, or a plain object shaped like it), then patched as the server.
+   * `LazyWatch.on(live, diff => store.patchFrom(diff, live))` serves a LazyWatch other code already writes
+   */
+  patchFrom(diff: Diff, state: object): ApplyResult;
   session(options: SessionOptions): Session;
   /** Evict every session the predicate selects; returns how many */
   closeSessions(predicate: (session: Session) => boolean, message?: string): number;

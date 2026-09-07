@@ -255,7 +255,7 @@ export function sharedConnection({
     get status() { return follower.status; },
     get attached() { return follower.attached; },
     get closed() { return follower.closed; },
-    /** The browser's socket ('offline' | 'connecting' | 'open'), which this tab's clients report as their status */
+    /** The browser's socket ('offline' | 'connecting' | 'online'), which this tab's clients report as their status */
     get upstream() { return relay ? relay.status : upstream; },
     /** Whether this tab runs the browser's replica */
     get leader() { return relay !== null; },

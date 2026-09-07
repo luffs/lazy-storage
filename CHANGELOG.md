@@ -2,6 +2,30 @@
 
 All notable changes to lazy-storage are documented here. The format follows Keep a Changelog; versions follow Semantic Versioning.
 
+## [Unreleased]
+
+### Added
+
+- **`store.patchFrom(diff, state)`** publishes a lazy-watch batch from
+  state the server keeps elsewhere: the array fragments lazy-watch emits
+  (`{ 2: 'c', $length: 3 }`, a `$splice`) are replaced with the whole
+  arrays read from `state`, then patched as the server's own change.
+  `LazyWatch.on(live, diff => store.patchFrom(diff, live))` serves a
+  LazyWatch that other code already writes
+- **`mirror: true` on `createClient`**: a follower's defaults — no undo
+  manager, no state cache, no presence — each still settable on its own
+- README: "Serving state the server owns", for the server-authoritative
+  case — isolation as store layout, read-only stores, mirror clients,
+  `patchFrom`, and a store that lives as long as a job
+
+### Changed
+
+- **A connection's status is `online`, not `open`.** `createConnection`
+  and `sharedConnection` report `'offline' | 'connecting' | 'online'`, the
+  same words as a client, whose `online` additionally means its store is
+  synced. Code comparing `connection.status` (or `upstream`) to `'open'`
+  must change
+
 ## [0.10.1] - 2026-09-07
 
 ### Changed

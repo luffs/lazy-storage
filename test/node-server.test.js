@@ -100,7 +100,7 @@ test('serve: other requests reach the app, a bad token is refused, two sockets s
     const b2 = attach(bob, 't2', 'b2');
     await until(() => a1.status === 'online' && a2.status === 'online' && b1.status === 'online', 'three stores online');
     await until(() => b2.closed?.code === 'forbidden', 'bob may not open t2');
-    assert.equal(bob.status, 'open', 'the refusal did not drop the socket');
+    assert.equal(bob.status, 'online', 'the refusal did not drop the socket');
 
     a1.collection('tasks').add({ id: 'x', title: 'from alice' });
     await until(() => b1.state.tasks.x?.title === 'from alice', 'bob sees the task');
@@ -114,7 +114,7 @@ test('serve: other requests reach the app, a bad token is refused, two sockets s
 
     assert.equal(stores.get('t1').closeSessions(s => s.user?.id === 'u2', 'You were removed'), 1);
     await until(() => b1.closed?.code === 'evicted', 'bob evicted');
-    assert.equal(bob.status, 'open', 'the socket survives the eviction');
+    assert.equal(bob.status, 'online', 'the socket survives the eviction');
     await until(() => a1.presence.length === 1, 'presence drops bob');
 
     alice.close();
