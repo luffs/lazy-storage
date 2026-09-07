@@ -523,10 +523,11 @@ export function createStore({
   /**
    * Merge one op. Idempotent per (replicaId, seq): a resent op is ignored.
    * With a `session` the op is a client's and passes the gates first; the
-   * server's own ops are trusted.
+   * server's own ops are trusted. `authority` marks the store's own patch,
+   * which a tombstone never holds back (see merge.js).
    * @returns {{ duplicate: boolean, accepted: Object|null, rejected: string[][], correction: Object|null }}
    */
-  function apply(op, session) {
+  function apply(op, session, { authority = false } = {}) {
     assertOp(op);
     maybeCompact();
     const last = replicas.get(op.replicaId)?.seq ?? 0;
@@ -540,7 +541,7 @@ export function createStore({
     replicas.set(op.replicaId, { seq: op.seq, seen });
     clock.receive(op.ts);
 
-    const { accepted, rejected, won, dropped } = mergeOp(clocks, op.ts, diff, regs);
+    const { accepted, rejected, won, dropped } = mergeOp(clocks, op.ts, diff, regs, { authority });
     if (accepted) {
       LazyWatch.patch(state, accepted);
       stateJSON = null;
@@ -793,9 +794,13 @@ export function createStore({
     return closed;
   }
 
-  /** Apply a change from the server itself, timestamped now */
+  /**
+   * Apply a change from the server itself, timestamped now. The authority:
+   * a tombstone on its way is lifted, so what it writes at a deleted path
+   * re-adds it, id or not.
+   */
   function patch(diff) {
-    return apply({ replicaId: 'server', seq: ++serverSeq, ts: clock.now(), diff });
+    return apply({ replicaId: 'server', seq: ++serverSeq, ts: clock.now(), diff }, undefined, { authority: true });
   }
 
   self = {
@@ -807,7 +812,8 @@ export function createStore({
     get sessions() { return sessions.size; },
     /** Replica ids the store remembers progress for (pruned by compaction) */
     get replicas() { return [...replicas.keys()]; },
-    apply,
+    /** A trusted op, gates skipped — judged by the merge like any replica's */
+    apply: (op, session) => apply(op, session),
     patch,
     session,
     closeSessions,

@@ -9,7 +9,11 @@
 //   tombstoned. An older ancestor tombstone still blocks a plain field
 //   write (a deleted record's field must not come back as a partial
 //   record); it is lifted only by a newer RECORD write, an object carrying
-//   an `id`, which re-adds the record wholesale.
+//   an `id`, which re-adds the record wholesale. The authority's own op
+//   (`authority`: the server's patch) lifts a newer tombstone on its way
+//   whatever it writes there: it is not a stale replica but the source of
+//   truth, and a record it recreates under a deleted key carries no id
+//   more often than not.
 // - A deletion at P wins if nothing at or below P is newer; it then drops
 //   every descendant entry and leaves a tombstone at P.
 // - A write that changes a container into a leaf (or a register) drops the
@@ -37,6 +41,9 @@ const { Utils } = LazyWatch;
  * @param {any[]} ts - the op's timestamp
  * @param {Object} diff - the op's diff (validated against the model here)
  * @param {Set<string>} registers
+ * @param {{ authority?: boolean }} [options] - `authority`: the op is the
+ *   server's own; a newer tombstone at any object it writes is lifted, id
+ *   or not
  * @returns {{
  *   accepted: Object|null,   rebuilt diff of the winning leaves (null when none)
  *   rejected: string[][],    paths of the losing leaves
@@ -45,10 +52,10 @@ const { Utils } = LazyWatch;
  *                            write or deletion, lifted tombstones)
  * }}
  */
-export function mergeOp(clocks, ts, diff, registers) {
+export function mergeOp(clocks, ts, diff, registers, { authority = false } = {}) {
   const entries = leaves(diff, registers);
   const dropped = new Set();
-  liftTombstones(diff, clocks, ts, [], dropped);
+  liftTombstones(diff, clocks, ts, [], dropped, authority);
 
   const won = [];
   const rejected = [];
@@ -69,8 +76,9 @@ export function mergeOp(clocks, ts, diff, registers) {
 /**
  * A newer object carrying an `id` at a tombstoned path re-adds the record:
  * lift the tombstone so its leaves can be judged on their own timestamps.
+ * The authority's op re-adds whatever object it writes there.
  */
-function liftTombstones(node, clocks, ts, path, dropped) {
+function liftTombstones(node, clocks, ts, path, dropped, authority) {
   if (!Utils.isPlainObject(node)) return;
   for (const key of Object.keys(node)) {
     const value = node[key];
@@ -78,11 +86,11 @@ function liftTombstones(node, clocks, ts, path, dropped) {
     const p = [...path, key];
     const k = pathKey(p);
     const entry = clocks.get(k);
-    if (entry && entry.deleted && Object.hasOwn(value, 'id') && compareTs(ts, entry.ts) > 0) {
+    if (entry && entry.deleted && (authority || Object.hasOwn(value, 'id')) && compareTs(ts, entry.ts) > 0) {
       clocks.delete(k);
       dropped.add(k);
     }
-    liftTombstones(value, clocks, ts, p, dropped);
+    liftTombstones(value, clocks, ts, p, dropped, authority);
   }
 }
 

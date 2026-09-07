@@ -193,3 +193,26 @@ test('apply without a session is the server and skips the gates; the trusted pat
   assert.notEqual(r.accepted, null);
   assert.equal(store.snapshot().team.name, 'Imported');
 });
+
+test('a server patch re-adds a record it had deleted, id or not, and the clients follow; a trusted op is still judged', async () => {
+  // A server mirroring something it does not own (processes, containers)
+  // deletes and recreates records under the same key all the time
+  const store = createStore({ initial: { procs: {} } });
+  const net = createNetwork(store);
+  const mirror = net.client({ initial: { procs: {} } });
+  await net.settle();
+
+  store.patch({ procs: { web: { state: 'online', pid: 1 } } });
+  store.patch({ procs: { web: null } });
+  const r = store.patch({ procs: { web: { state: 'stopped', pid: 2 } } });
+  assert.deepEqual(r.accepted, { procs: { web: { state: 'stopped', pid: 2 } } });
+  assert.deepEqual(r.rejected, []);
+  assert.deepEqual(store.snapshot().procs, { web: { state: 'stopped', pid: 2 } });
+  await net.settle();
+  assert.deepEqual(mirror.state.procs, { web: { state: 'stopped', pid: 2 } }, 'the mirror has the record back');
+
+  // The same through apply: a replica's op, trusted but not the authority
+  store.patch({ procs: { web: null } });
+  const late = store.apply({ replicaId: 'import', seq: 1, ts: [Date.now() + 1, 0, 'import'], diff: { procs: { web: { state: 'online' } } } });
+  assert.equal(late.accepted, null, 'a field under a deleted record does not come back without an id');
+});

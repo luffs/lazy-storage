@@ -2,6 +2,20 @@
 
 All notable changes to lazy-storage are documented here. The format follows Keep a Changelog; versions follow Semantic Versioning.
 
+## [0.10.1] - 2026-09-07
+
+### Changed
+
+- **A server patch is never held back by a tombstone.** `store.patch` is
+  the authority: whatever it writes at a deleted path re-adds it, `id` or
+  not. Until now the merge lifted a tombstone only for a newer object
+  carrying an `id` — the right rule for a replica's edit, which may be a
+  stale field write, but a server that recreated a record under a key it
+  had deleted (a process that came back, an entry rebuilt from another
+  source) was refused for good, since its next patches carry only what
+  changed. Client ops and `store.apply` are judged as before; `mergeOp`
+  takes the rule as an `authority` option
+
 ## [0.10.0] - 2026-09-05
 
 ### Added

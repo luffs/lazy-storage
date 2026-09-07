@@ -125,8 +125,13 @@ export class ClockMap extends Map<string, ClockEntry> {
   descendants(path: Path): IterableIterator<string>;
 }
 
+export interface MergeOptions {
+  /** The op is the server's own: a newer tombstone at any object it writes is lifted, `id` or not */
+  authority?: boolean;
+}
+
 /** With a ClockMap descendants come from its index; with a plain Map every key is scanned */
-export function mergeOp(clocks: Map<string, ClockEntry>, ts: Timestamp, diff: Diff, registers: RegisterSet): MergeResult;
+export function mergeOp(clocks: Map<string, ClockEntry>, ts: Timestamp, diff: Diff, registers: RegisterSet, options?: MergeOptions): MergeResult;
 /** Forget tombstones older than a timestamp; returns the removed keys */
 export function compactTombstones(clocks: Map<string, ClockEntry>, olderThan: Timestamp): string[];
 

@@ -186,7 +186,13 @@ timestamp of the last accepted write per leaf path and decides per leaf:
   tombstone, so an older edit that arrives later cannot resurrect a
   partial record. A newer edit of a single field of a deleted record is
   also refused (a deleted record does not come back as one field); a
-  newer *record* write, an object with an `id`, re-adds it.
+  newer *record* write, an object with an `id`, re-adds it. The server's
+  own `store.patch` is never held back this way: it is the authority, not
+  a replica that may be stale, and whatever it writes at a deleted path
+  re-adds it, `id` or not, so a record the server recreates under a key it
+  had deleted (a process that came back, an entry rebuilt from another
+  source) needs no ceremony. `store.apply`, a replica's op taken on trust,
+  is judged like any other.
 - An **array** is one leaf, whether an array of primitives anywhere or a
   declared register: the newest whole value wins. A list of records is
   not an array on the wire (see [Lists](#lists)), so its records merge
@@ -703,7 +709,7 @@ runs on the synced state and shows in the array view like any other change.
 - `store.session({ send, user, onEvict, broadcast, httpSnapshot })` → `{ receive(message), close(), user, replicaId }` — one per connection, transport-agnostic; `broadcast` is a transport's fan-out to every session at once, `httpSnapshot` `{ url, threshold }` where a client that can fetch gets a large snapshot
 - `store.snapshotJSON()` — the state as JSON, encoded once per change; `snapshotResponse(store, request)` — the snapshot route's Response (`{ v, epoch, state }`, brotli or gzip as accepted, an ETag and 304s), for a server of your own
 - `store.closeSessions(predicate, message)` — evict sessions; `store.presence()` — distinct users with a live session; `store.peers()` — every live session as `{ replicaId, user, data }`
-- `store.patch(diff)` — a server-side change, timestamped and broadcast; `store.apply(op)` — a trusted op, gates skipped
+- `store.patch(diff)` — a server-side change, timestamped and broadcast, never held back by a tombstone; `store.apply(op)` — a trusted op, gates skipped
 - `store.on(listener)`, `store.snapshot()`, `store.state`, `store.version`, `store.replicas`
 - `store.compact()` → `{ tombstones, replicas }` removed; `store.flush()`, `store.dispose()`
 - `memoryStorage()`, `jsonFileStorage(path, { debounce })`

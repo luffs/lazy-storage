@@ -222,7 +222,7 @@ export interface Store<S extends object = any> {
   readonly replicas: string[];
   /** Merge one op; with a session it is a client's and passes the gates, without one it is trusted */
   apply(op: Op, session?: Session): ApplyResult;
-  /** A change from the server itself, timestamped now */
+  /** A change from the server itself, timestamped now. The authority: a tombstone on its way is lifted, so what it writes at a deleted path re-adds it, `id` or not */
   patch(diff: Diff): ApplyResult;
   session(options: SessionOptions): Session;
   /** Evict every session the predicate selects; returns how many */

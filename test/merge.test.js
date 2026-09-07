@@ -102,6 +102,25 @@ test('turning a container into a leaf drops the entries beneath it', () => {
   assert.deepEqual(r.accepted, { cfg: { theme: 'light' } }, 'no entry blocks a fresh write below the leaf (it is newer than nothing)');
 });
 
+test('the authority is never held back by a tombstone: an object it writes at a deleted path re-adds it, id or not', () => {
+  const clocks = new Map();
+  mergeOp(clocks, T(10), { procs: { web: { state: 'online', pid: 1 } } }, NONE);
+  mergeOp(clocks, T(20), { procs: { web: null } }, NONE);
+  // A replica's newer field write stays refused: a deleted record must not come back as one field
+  assert.equal(mergeOp(clocks, T(25), { procs: { web: { state: 'online' } } }, NONE).accepted, null);
+  // The authority's lands, the tombstone lifted (dropped), no id needed
+  let r = mergeOp(clocks, T(30), { procs: { web: { state: 'stopped', pid: 2 } } }, NONE, { authority: true });
+  assert.deepEqual(r.accepted, { procs: { web: { state: 'stopped', pid: 2 } } });
+  assert.deepEqual(r.dropped, ['["procs","web"]']);
+  // The record is live again: a replica's newer edit is judged on timestamps alone
+  assert.deepEqual(mergeOp(clocks, T(35), { procs: { web: { state: 'online' } } }, NONE).accepted, { procs: { web: { state: 'online' } } });
+  // Only the id requirement is waived, not the clock: an authority write older than the deletion still loses
+  mergeOp(clocks, T(40), { procs: { web: null } }, NONE);
+  r = mergeOp(clocks, T(38), { procs: { web: { state: 'online' } } }, NONE, { authority: true });
+  assert.equal(r.accepted, null);
+  assert.deepEqual(r.dropped, []);
+});
+
 test('compactTombstones forgets old tombstones and keeps live entries', () => {
   const clocks = new Map();
   mergeOp(clocks, T(10), { a: 1, b: 2 }, NONE);
