@@ -10,6 +10,14 @@
 // server's memory follows the stores in use rather than every store ever
 // opened; the next request for it loads it from storage again. Off by
 // default: a store on memoryStorage would lose its data.
+//
+// Idle counts sessions, and a server that writes to a store is not one. A
+// writer that holds a reference across the sweep is left with a disposed
+// store (its next patch throws and says so), while the next `get` builds a
+// fresh instance from storage that the writer never reaches. With `idle`
+// set, a writer resolves the store through `get(id)` before each write —
+// which also resets its idle clock — or keeps such stores out of the
+// registry altogether.
 
 const STORE_ID = /^[A-Za-z0-9][A-Za-z0-9._~-]{0,127}$/;
 
@@ -21,7 +29,8 @@ export const isStoreId = id => typeof id === 'string' && STORE_ID.test(id);
  *   refuse an id
  * @param {Object} [options]
  * @param {number} [options.idle=Infinity] - release a store after this many
- *   ms without a session
+ *   ms without a session. A server writer is not a session: with idle set it
+ *   resolves the store with get(id) before each write rather than holding it
  * @param {number} [options.sweepEvery=60000] - how often to look (ms)
  * @param {() => number} [options.now] - wall clock (injectable for tests)
  */

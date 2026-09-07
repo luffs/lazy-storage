@@ -556,6 +556,13 @@ when the job starts, written with `patch`, and ended with
 `closeSessions(() => true, 'finished')` then `dispose()`: every follower
 hears `evicted` and knows to look elsewhere for the final record.
 
+**Registries and `idle`.** A registry's idle sweep counts sessions, and
+a server writer is not one, so a store the server writes continuously
+looks abandoned whenever no browser is on it. Either resolve it with
+`stores.get(id)` before each write, or keep server-written stores in a
+map of your own (a resolver function serves the transport just as well
+as a registry) and never let them idle.
+
 ## Limits, memory, and observability
 
 A public server needs a few ceilings, all on by default:
@@ -637,7 +644,13 @@ A public server needs a few ceilings, all on by default:
 time: `createStores(factory, { idle: 30 * 60_000 })` releases a store
 that has had no session for that long (its storage is flushed first) and
 loads it again on the next request. Off by default, since a store on
-`memoryStorage` would lose its data.
+`memoryStorage` would lose its data. Idle counts sessions, and a server
+that writes to a store is not one: a writer holding a reference across
+the sweep is left with a disposed store, whose next `patch` throws and
+says so, while the next `get` builds a fresh instance the writer never
+reaches. With `idle` set, resolve the store with `stores.get(id)` before
+each write (which also resets its idle clock), or keep the stores a
+server writes out of the registry.
 
 **Watching a store.** `store.observe('op' | 'refused' | 'session', fn)`
 reports every merged op (`{ replicaId, seq, user, accepted, rejected,

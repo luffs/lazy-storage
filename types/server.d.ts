@@ -249,6 +249,8 @@ export interface Store<S extends object = any> {
   compact(): { tombstones: number; replicas: number };
   flush(): void;
   dispose(): void;
+  /** True once dispose() ran (a registry's idle sweep does): patch, apply and session throw from then on */
+  readonly disposed: boolean;
 }
 
 export function createStore<S extends object = any>(options?: StoreOptions<S>): Store<S>;

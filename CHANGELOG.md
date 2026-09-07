@@ -2,7 +2,7 @@
 
 All notable changes to lazy-storage are documented here. The format follows Keep a Changelog; versions follow Semantic Versioning.
 
-## [Unreleased]
+## [0.11.0] - 2026-09-07
 
 ### Added
 
@@ -19,6 +19,12 @@ All notable changes to lazy-storage are documented here. The format follows Keep
   `patchFrom`, and a store that lives as long as a job
 - **`readOnly: true`** locks a whole store: every client op is refused
   with `forbidden`, the server still writes
+- **A disposed store says so.** `patch`, `apply` and `session` on a store
+  that was disposed (a registry's idle sweep does that) throw an error
+  naming the cause and the cure — resolve it again with `stores.get(id)`
+  before each write — where the proxy underneath used to complain;
+  `store.disposed` reads the flag. The registry docs say that idle counts
+  sessions and a server writer is not one
 - **`httpSnapshots.origins`** says which origins may fetch a snapshot
   cross-origin: `'*'` (the default, as before), an array of origins to
   echo and no other, or `false` for no CORS header at all.

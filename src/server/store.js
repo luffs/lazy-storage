@@ -804,12 +804,24 @@ export function createStore({
     return closed;
   }
 
+  // A disposed store is dead: a registry's idle sweep released it, or
+  // dispose() was called. A writer still holding it is told so, and what
+  // to do, rather than hearing the proxy underneath complain
+  let disposed = false;
+  function alive(what) {
+    if (disposed) {
+      throw new Error(`Cannot ${what} a disposed store. A registry with \`idle\` releases a store that has had no session for that long, ` +
+        'and a server that writes to a store is not a session: resolve it again with stores.get(id) before each write instead of holding a reference');
+    }
+  }
+
   /**
    * Apply a change from the server itself, timestamped now. The authority:
    * a tombstone on its way is lifted, so what it writes at a deleted path
    * re-adds it, id or not.
    */
   function patch(diff) {
+    alive('patch');
     return apply({ replicaId: 'server', seq: ++serverSeq, ts: clock.now(), diff }, undefined, { authority: true });
   }
 
@@ -838,10 +850,18 @@ export function createStore({
     /** Replica ids the store remembers progress for (pruned by compaction) */
     get replicas() { return [...replicas.keys()]; },
     /** A trusted op, gates skipped — judged by the merge like any replica's */
-    apply: (op, session) => apply(op, session),
+    apply: (op, session) => {
+      alive('apply an op to');
+      return apply(op, session);
+    },
     patch,
     patchFrom,
-    session,
+    session: options => {
+      alive('open a session on');
+      return session(options);
+    },
+    /** True once dispose() ran (a registry's idle sweep does): the store takes no more writes or sessions */
+    get disposed() { return disposed; },
     closeSessions,
     /** The state as JSON, encoded once per change: what a snapshot carries, inline or over HTTP */
     snapshotJSON: encodedState,
@@ -876,6 +896,8 @@ export function createStore({
     compact,
     flush: () => storage.flush(),
     dispose() {
+      if (disposed) return;
+      disposed = true;
       storage.flush();
       for (const s of [...sessions]) s.close();
       // Nobody is left to tell

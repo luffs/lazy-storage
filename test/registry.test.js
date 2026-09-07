@@ -109,3 +109,24 @@ test('stats() rolls up the live stores: how many are live and idle, and the sums
   stores.dispose();
   assert.deepEqual(stores.stats(), { stores: 0, idle: 0, sessions: 0, replicas: 0, rows: 0, tombstones: 0, log: 0 });
 });
+
+test('a writer holding a store the sweep released is told so, and what to do', () => {
+  const time = fakeTime(1000);
+  const stores = createStores(id => createStore({ initial: INITIAL, storage: memoryStorage() }), { idle: 100, sweepEvery: 100, now: time });
+  const held = stores.get('panel');   // a server writer keeps this reference
+  held.patch({ tasks: { a: { id: 'a' } } });
+  assert.deepEqual(stores.sweep(), [], 'no session: marked idle from now');
+  time.advance(150);
+  assert.deepEqual(stores.sweep(), ['panel'], 'idle for longer than `idle`, writer or not');
+  assert.equal(held.disposed, true);
+  assert.throws(() => held.patch({ tasks: { a: { done: true } } }), /Cannot patch a disposed store.*stores\.get\(id\)/);
+  assert.throws(() => held.session({ send() {} }), /Cannot open a session on a disposed store/);
+  assert.throws(() => held.apply({ replicaId: 'x', seq: 1, ts: [1000, 0, 'x'], diff: {} }), /Cannot apply an op to a disposed store/);
+  held.dispose();   // again: harmless
+  // Resolving again is the cure: a fresh instance, and get() resets the idle clock
+  const fresh = stores.get('panel');
+  assert.notEqual(fresh, held);
+  assert.equal(fresh.disposed, false);
+  fresh.patch({ tasks: { b: { id: 'b' } } });
+  assert.deepEqual(stores.sweep(), [], 'just resolved: not idle');
+});
