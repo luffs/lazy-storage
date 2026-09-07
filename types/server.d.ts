@@ -136,8 +136,8 @@ export interface StoreOptions<S extends object = any> {
   initial?: S;
   /** Paths whose value is one unit (arrays live only here) */
   registers?: RegisterSpec[];
-  /** Paths clients may not write; an op touching a leaf at or under one is refused whole */
-  readOnly?: RegisterSpec[];
+  /** Paths clients may not write; an op touching a leaf at or under one is refused whole. `true` locks the whole store: clients only read */
+  readOnly?: RegisterSpec[] | true;
   /**
    * Judges every client op after the read-only check: return false or
    * throw to refuse, a diff to accept that instead, true or nothing to
@@ -327,4 +327,4 @@ export function tagStore<M extends object>(message: M, store: string): M & { sto
  * and kept until the state changes, with an ETag that answers 304 while
  * the store is unchanged. Authenticate and authorize the request first
  */
-export function snapshotResponse(store: Store, request: Request): Response;
+export function snapshotResponse(store: Store, request: Request, options?: { origins?: '*' | false | string[] }): Response;

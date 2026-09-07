@@ -17,8 +17,22 @@ All notable changes to lazy-storage are documented here. The format follows Keep
 - README: "Serving state the server owns", for the server-authoritative
   case — isolation as store layout, read-only stores, mirror clients,
   `patchFrom`, and a store that lives as long as a job
+- **`readOnly: true`** locks a whole store: every client op is refused
+  with `forbidden`, the server still writes
+- **`httpSnapshots.origins`** says which origins may fetch a snapshot
+  cross-origin: `'*'` (the default, as before), an array of origins to
+  echo and no other, or `false` for no CORS header at all.
+  `snapshotResponse` takes the same as an option
 
 ### Changed
+
+- **Policy is judged before age.** The gates run clock guard, read-only
+  paths and `validate`, then retention: an op the store would refuse
+  anyway is told `forbidden` rather than `expired`
+- `db.status` docs say when `online` fires: the moment a snapshot or
+  delta is applied, before the batch reaches `watch` (and a snapshot equal
+  to what the client had produces none), so "the store is current" is the
+  status event
 
 - **A connection's status is `online`, not `open`.** `createConnection`
   and `sharedConnection` report `'offline' | 'connecting' | 'online'`, the

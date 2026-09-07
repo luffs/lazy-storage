@@ -27,7 +27,7 @@ export interface HandlerOptions {
    * for its socket alone. The route authenticates and authorizes like an
    * upgrade. false turns it off. Default true
    */
-  httpSnapshots?: boolean | { threshold?: number };
+  httpSnapshots?: boolean | { threshold?: number; origins?: '*' | false | string[] };
   /** Server faults; default console */
   onError?(error: unknown): void;
 }

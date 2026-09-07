@@ -46,12 +46,30 @@ const compress = {
   gzip: plain => gzipSync(plain)
 };
 
-/** The adapters' `httpSnapshots` option normalized: `{ threshold }`, or null when off */
+/** The adapters' `httpSnapshots` option normalized: `{ threshold, origins }`, or null when off */
 export function snapshotOptions(httpSnapshots) {
   if (!httpSnapshots) return null;
-  const { threshold = SNAPSHOT_THRESHOLD } = httpSnapshots === true ? {} : httpSnapshots;
+  const { threshold = SNAPSHOT_THRESHOLD, origins = '*' } = httpSnapshots === true ? {} : httpSnapshots;
   if (!(threshold >= 0)) throw new TypeError('httpSnapshots.threshold must be a number of bytes');
-  return { threshold };
+  if (origins !== '*' && origins !== false && !(Array.isArray(origins) && origins.every(o => typeof o === 'string'))) {
+    throw new TypeError("httpSnapshots.origins must be '*', false, or an array of origins");
+  }
+  return { threshold, origins };
+}
+
+/**
+ * The CORS header for a snapshot response, by the `origins` option: '*'
+ * lets any origin ask (the default: credentials travel in the URL as they
+ * do for the socket, and a browser withholds cookies from a cross-origin
+ * request under '*', which keeps a cookie session same-origin); an array
+ * echoes a listed origin and no other; false sends no header, so only the
+ * page's own origin may fetch
+ */
+function corsHeaders(request, origins) {
+  if (origins === '*') return { 'access-control-allow-origin': '*' };
+  if (!origins) return {};
+  const origin = request.headers.get('origin');
+  return origin && origins.includes(origin) ? { 'access-control-allow-origin': origin, vary: 'accept-encoding, origin' } : { vary: 'accept-encoding, origin' };
 }
 
 /** The store id a request path names under `<path>/snapshot/`, or null when the path is not that route */
@@ -92,19 +110,18 @@ function matchesETag(header, etag) {
  * both; see serveSnapshot).
  * @param {Object} store
  * @param {Request} request
+ * @param {{ origins?: '*' | false | string[] }} [options] - which origins
+ *   may fetch cross-origin (see corsHeaders); default '*'
  * @returns {Response}
  */
-export function snapshotResponse(store, request) {
+export function snapshotResponse(store, request, { origins = '*' } = {}) {
   const body = snapshotBody(store);
   const etag = `"${body.epoch}:${body.v}"`;
   const headers = {
     etag,
     'cache-control': 'private, no-cache',   // kept, and revalidated: unchanged is a 304
     vary: 'accept-encoding',
-    // Credentials travel in the URL as they do for the socket, so any origin
-    // may ask; a browser withholds cookies from a cross-origin request under
-    // this header, which keeps a cookie session same-origin
-    'access-control-allow-origin': '*'
+    ...corsHeaders(request, origins)
   };
   if (matchesETag(request.headers.get('if-none-match'), etag)) return new Response(null, { status: 304, headers });
   headers['content-type'] = 'application/json';
@@ -123,10 +140,10 @@ export function snapshotResponse(store, request) {
  * the snapshot answered (see snapshotResponse). GET and HEAD only (405).
  * @param {Request} request
  * @param {string} id - the store id the path named
- * @param {{ resolveStore: (id: string) => Object|null, authenticate?: Function, authorize?: Function, onError?: Function }} options
+ * @param {{ resolveStore: (id: string) => Object|null, authenticate?: Function, authorize?: Function, onError?: Function, origins?: '*' | false | string[] }} options
  * @returns {Promise<Response>}
  */
-export async function serveSnapshot(request, id, { resolveStore, authenticate, authorize, onError }) {
+export async function serveSnapshot(request, id, { resolveStore, authenticate, authorize, onError, origins = '*' }) {
   if (request.method !== 'GET' && request.method !== 'HEAD') return new Response('Method not allowed', { status: 405, headers: { allow: 'GET, HEAD' } });
   let user;
   if (authenticate) {
@@ -151,5 +168,5 @@ export async function serveSnapshot(request, id, { resolveStore, authenticate, a
     }
     if (!allowed) return new Response('Forbidden', { status: 403 });
   }
-  return snapshotResponse(store, request);
+  return snapshotResponse(store, request, { origins });
 }

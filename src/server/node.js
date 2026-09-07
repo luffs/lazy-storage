@@ -156,7 +156,7 @@ export function createHandlers({
       response = new Response('Server shutting down', { status: 503, headers: { 'retry-after': '1' } });
     } else {
       try {
-        response = await serveSnapshot(toRequest(req), id, { resolveStore, authenticate, authorize, onError });
+        response = await serveSnapshot(toRequest(req), id, { resolveStore, authenticate, authorize, onError, origins: snapshots.origins });
       } catch (err) {
         onError(err);
         response = new Response('Something went wrong', { status: 500 });

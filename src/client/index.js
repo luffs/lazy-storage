@@ -236,6 +236,11 @@ function build({
   const status = () => {
     if (!linked()) return 'offline';
     if (!synced) return 'connecting';
+    // 'online' the moment a snapshot or delta is applied: `state` is
+    // current from here, while the batch that carries it to `watch`
+    // listeners follows on the microtask (and a snapshot equal to what
+    // the client had produces none), so "the store is current" is the
+    // status event rather than the first watch
     const upstream = connection.upstream;
     if (upstream === undefined || upstream === 'online') return 'online';
     return upstream === 'offline' ? 'offline' : 'connecting';

@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import { gunzipSync, brotliDecompressSync } from 'node:zlib';
 import { LazyWatch } from 'lazy-watch';
 import { createStore, createHub, memoryStorage, snapshotResponse } from '../src/server/index.js';
+import { snapshotOptions } from '../src/server/snapshot.js';
 import { createClient } from '../src/client/index.js';
 import { createNetwork } from './helpers.js';
 
@@ -175,6 +176,13 @@ test('snapshotResponse: the state with its version and epoch, brotli or gzip as 
   assert.equal(plain.headers.get('content-type'), 'application/json');
   assert.equal(plain.headers.get('content-encoding'), null);
   assert.equal(plain.headers.get('access-control-allow-origin'), '*');
+  // `origins`: an allowlist echoes a listed origin and no other, false sends no CORS header
+  const listed = snapshotResponse(store, request({ origin: 'https://app.example' }), { origins: ['https://app.example'] });
+  assert.equal(listed.headers.get('access-control-allow-origin'), 'https://app.example');
+  assert.match(listed.headers.get('vary'), /origin/);
+  assert.equal(snapshotResponse(store, request({ origin: 'https://evil.example' }), { origins: ['https://app.example'] }).headers.get('access-control-allow-origin'), null);
+  assert.equal(snapshotResponse(store, request({ origin: 'https://app.example' }), { origins: false }).headers.get('access-control-allow-origin'), null);
+  assert.throws(() => snapshotOptions({ origins: 'https://app.example' }), TypeError, 'a bare string is neither * nor a list');
   const document = await plain.json();
   assert.deepEqual(document, { v: store.version, epoch: store.epoch, state: store.snapshot() });
   const etag = plain.headers.get('etag');

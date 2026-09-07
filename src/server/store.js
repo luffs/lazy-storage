@@ -16,12 +16,14 @@
 //   server's clock is refused (code 'clock-skew', with the server's time
 //   so the client can correct itself), since a fast clock would otherwise
 //   win every conflict and drag the server's clock along
+// - write authorization: a leaf at or under a `readOnly` path refuses the
+//   op (`readOnly: true` locks the whole store), and `validate(diff, {
+//   user, replicaId, store })` may refuse it or hand back a trimmed diff
+//   to accept instead (code 'forbidden')
 // - retention: an op older than `retention` is refused (code 'expired'),
 //   because deletions older than that may have been compacted away and
-//   the op could resurrect what they removed
-// - write authorization: a leaf at or under a `readOnly` path refuses the
-//   op, and `validate(diff, { user, replicaId, store })` may refuse it or
-//   hand back a trimmed diff to accept instead (code 'forbidden')
+//   the op could resurrect what they removed. Policy is judged first so
+//   an op the store would refuse anyway is told so, not that it is old
 // The server's own writes (`patch`, and `apply` called without a session)
 // skip all three. Compaction of old tombstones and idle replicas runs by
 // itself once an hour of store time has passed since the last one.
@@ -150,9 +152,10 @@ const defaultPresenceKey = user =>
  *   persisted, and the base persisted rows are applied onto
  * @param {Array<string|string[]>} [options.registers] - paths whose value
  *   is one unit (arrays live only here); `*` matches one segment
- * @param {Array<string|string[]>} [options.readOnly] - paths clients may
+ * @param {Array<string|string[]>|true} [options.readOnly] - paths clients may
  *   not write, same syntax as registers; a client op touching a leaf at or
- *   under one is refused whole. The server's own `patch` is not bound
+ *   under one is refused whole. `true` locks the whole store: clients only
+ *   read. The server's own `patch` is not bound
  * @param {(diff: Object, context: { user: any, replicaId: string, store: Object }) => boolean|Object|void} [options.validate]
  *   - judges every client op after the read-only check: return `false` or
  *   throw to refuse it (the error's message reaches the client), return a
@@ -224,7 +227,7 @@ export function createStore({
   if (rateLimit && !(rateLimit.burst > 0 && rateLimit.perSecond > 0)) throw new TypeError('rateLimit needs positive burst and perSecond');
   const time = now ?? Date.now;
   const regs = registerSet(registers);
-  const locked = registerSet(readOnly);
+  const locked = readOnly === true ? null : registerSet(readOnly);   // null: the whole store is read-only
   const saved = storage.load();
   const state = new LazyWatch(rebuild(initial, saved ? saved.rows.map(([key, row]) => [key, row.deleted ? null : row.value]) : []));
   const clocks = new ClockMap(saved ? saved.rows.map(([key, row]) => [key, row.deleted ? { ts: row.ts, deleted: true } : { ts: row.ts }]) : []);
@@ -478,8 +481,9 @@ export function createStore({
     if (!Utils.isPlainObject(op.diff)) throw new TypeError('op.diff must be a plain object');
   }
 
-  /** True when some read-only pattern matches the path or one of its ancestors */
+  /** True when some read-only pattern matches the path or one of its ancestors; always, for a store locked whole */
   function underReadOnly(path) {
+    if (!locked) return true;
     for (let i = 1; i <= path.length; i++) if (locked.matches(path.slice(0, i))) return true;
     return false;
   }
@@ -499,14 +503,20 @@ export function createStore({
       throw new RefusedError('clock-skew',
         `The op is stamped ${Math.round((op.ts[0] - wall) / 1000)} s ahead of the server's clock`, { now: wall, ts: op.ts });
     }
+    const lockedLeaf = entries.find(([path]) => underReadOnly(path));
+    if (lockedLeaf) throw new RefusedError('forbidden', locked ? `"${lockedLeaf[0].join('/')}" is read-only` : 'The store is read-only');
+    const admitted = validated(op, session, entries);
+    // Policy first, age last: an op the store would refuse anyway hears that
     if (op.ts[0] < wall - retention) {
       throw new RefusedError('expired',
         `The op is ${Math.round((wall - op.ts[0]) / DAY)} days old, older than the store keeps history for`);
     }
-    const lockedLeaf = entries.find(([path]) => underReadOnly(path));
-    if (lockedLeaf) throw new RefusedError('forbidden', `"${lockedLeaf[0].join('/')}" is read-only`);
-    if (!validate) return { diff: op.diff, stripped: [] };
+    return admitted;
+  }
 
+  /** The validator's verdict on an op: the diff to merge and the leaves it left out */
+  function validated(op, session, entries) {
+    if (!validate) return { diff: op.diff, stripped: [] };
     let verdict;
     try {
       verdict = validate(op.diff, { user: session.user, replicaId: op.replicaId, store: self });

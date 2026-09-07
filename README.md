@@ -439,6 +439,8 @@ Two hooks on the Bun adapter decide who gets a session on which store:
 Opening a store is not the same as writing to it, so the store itself
 decides what a client may write:
 
+- `readOnly: true` locks the whole store: clients only read, and every op
+  they send is refused with code `forbidden`.
 - `readOnly: ['team', 'tasks/*/createdAt']` names paths clients may not
   touch (same syntax as registers). An op with a leaf at or under one is
   refused whole, with code `forbidden`; the client drops it and resyncs,
@@ -519,10 +521,10 @@ So cut the state along the lines people may see, and let `authorize`
 enforce them: a store per team, per owner, per job. A view whose readers
 are a subset of another's is a separate store, not a filtered one.
 
-**Clients only read.** `validate: () => false` refuses every client op
-(the client drops it and resyncs, so a stray local edit falls back in
-line), and on the client `mirror: true` turns off what a follower never
-uses: the undo manager, the state cache, presence.
+**Clients only read.** `readOnly: true` refuses every client op (the
+client drops it and resyncs, so a stray local edit falls back in line),
+and on the client `mirror: true` turns off what a follower never uses:
+the undo manager, the state cache, presence.
 
 **The server's patch is the authority.** `store.patch` lifts any tombstone
 on its way, so a record the server recreates under a key it had deleted
@@ -536,7 +538,7 @@ lives in a lazy-watch proxy that other code mutates, forward its batches:
 
 ```js
 const live = new LazyWatch({ procs: {}, order: [] });
-const store = createStore({ initial: { procs: {}, order: [] }, registers: ['order'], validate: () => false });
+const store = createStore({ initial: { procs: {}, order: [] }, registers: ['order'], readOnly: true });
 LazyWatch.on(live, diff => store.patchFrom(diff, live));
 live.procs.web = { state: 'online', pid: 41 };   // reaches every session as a patch
 ```
@@ -604,7 +606,12 @@ A public server needs a few ceilings, all on by default:
   newer than the snapshot it fetched on top of it. A fetch that fails (a
   proxy that does not pass the route, a cookie session across origins) is
   reported as an error with code `snapshot-fetch`, and the client asks
-  again, for the snapshot inline. `httpSnapshots: false` on the adapter,
+  again, for the snapshot inline. `httpSnapshots.origins` says which
+  origins may fetch it cross-origin: `'*'` by default (credentials travel
+  in the URL as they do for the socket, and a browser withholds cookies
+  from a cross-origin request under `'*'`, so a cookie session stays
+  same-origin), an array of origins to echo and no other, or `false` for
+  no CORS header at all. `httpSnapshots: false` on the adapter,
   or `fetch: false` on the transport, keeps every snapshot on the socket;
   `snapshotResponse(store, request)` serves the route from a server of
   your own.
@@ -736,7 +743,7 @@ runs on the synced state and shows in the array view like any other change.
 - `db.presence` — users with a live session on this store; `db.peers` — every live session as `{ replicaId, user, data }`, this client's own included; `db.share(data)` — what this client shares with them (JSON, `null` clears), read back as `db.shared`; `db.closed` — `{ code, message }` after the server ended this store for us, else null
 - `db.collection(name)` — `add(record) → id`, `update(id, fields)`, `remove(id)`, `get(id)`, `has(id)`, `ids()`, `all()`
 - `db.list(path, { position })` — an ordered list of records: `all()`, `ids()`, `get(id)`, `has(id)`, `add(record, where) → id`, `move(id, where)`, `remove(id)`, `reconcile(ids) → written`, `keyFor(where)`; `where` is `{ before }`, `{ after }`, `{ at }`, or nothing for the end
-- `db.connect()`, `db.disconnect()`, `db.status` (`'offline' | 'connecting' | 'online'`), `db.pending`
+- `db.connect()`, `db.disconnect()`, `db.status` (`'offline' | 'connecting' | 'online'` — `online` the moment a snapshot or delta is applied, with `db.state` already current; the batch carrying it to `watch` listeners follows on the microtask, and a snapshot equal to what the client had produces none, so "the store is current" is the status event, not the first `watch`), `db.pending`
 - `db.watch(listener)` — state changes; `meta?.origin === 'remote'` marks the server's
 - `db.on('status' | 'error' | 'sync' | 'presence' | 'peers' | 'closed' | 'history', fn)` — lifecycle events; a refused op is an error with a `code` (`forbidden`, `expired`, `invalid`, `too-large` drop the op; `rate-limited` keeps it and retries; `clock-skew` is handled without one), and so is a snapshot that could not be fetched (`snapshot-fetch`, after which the client asks for it inline); `history` carries `{ canUndo, canRedo }` after a local batch, an undo, a redo, or `clearHistory()`
 - `db.undo()`, `db.redo()`, `db.canUndo`, `db.canRedo`, `db.checkpoint()`, `db.group(fn)`, `db.clearHistory()`

@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { LazyWatch } from 'lazy-watch';
 import { createStore } from '../src/server/index.js';
 import { createClient } from '../src/client/index.js';
-import { createNetwork } from './helpers.js';
+import { createNetwork, fakeTime } from './helpers.js';
 
 const INITIAL = { tasks: {}, team: {} };
 
@@ -186,6 +186,37 @@ test('refusals inside a hello leave the other queued ops standing and end in one
   assert.deepEqual(Object.keys(a.state.tasks).sort(), ['t1', 't2']);
   assert.equal(a.pending, 0);
   assert.equal(a.status, 'online');
+});
+
+test('readOnly: true locks the whole store: every client op is forbidden, the server still writes', async () => {
+  const store = createStore({ initial: INITIAL, readOnly: true });
+  const net = createNetwork(store);
+  const a = net.client({ initial: INITIAL, mirror: true });
+  await net.settle();
+  const errors = [];
+  a.on('error', err => errors.push([err.code, err.message]));
+  a.collection('tasks').add({ id: 't1', title: 'mine' });
+  await net.settle();
+  assert.deepEqual(errors, [['forbidden', 'The store is read-only']]);
+  assert.equal(store.snapshot().tasks.t1, undefined);
+  assert.equal(a.state.tasks.t1, undefined, 'the client fell back in line');
+  store.patch({ tasks: { s: { id: 's', title: 'From the server' } } });
+  await net.settle();
+  assert.equal(a.state.tasks.s.title, 'From the server');
+});
+
+test('policy is judged before age: an op the store would refuse anyway is told forbidden, not expired', async () => {
+  const DAY = 24 * 60 * 60 * 1000;
+  const store = createStore({ initial: INITIAL, readOnly: ['team'], now: fakeTime(100 * DAY), retention: 30 * DAY });
+  const net = createNetwork(store);
+  const stale = offlineClient(net, { replicaId: 'stale', now: fakeTime(60 * DAY) });
+  stale.state.team.name = 'Red';   // stamped 40 days ago, on a read-only path
+  await net.settle();
+  const errors = [];
+  stale.on('error', err => errors.push(err.code));
+  stale.connect();
+  await net.settle();
+  assert.deepEqual(errors, ['forbidden']);
 });
 
 test('apply without a session is the server and skips the gates; the trusted path is for migrations and tests', () => {

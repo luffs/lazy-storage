@@ -51,7 +51,11 @@ import { snapshotOptions, snapshotId, serveSnapshot } from './snapshot.js';
  *   pointed there in place of a snapshot of `threshold` bytes or more
  *   (default 64 KB) instead of having the state compressed and buffered
  *   for its socket alone. The route authenticates and authorizes like an
- *   upgrade. false turns it off; every client then gets its snapshot inline
+ *   upgrade. `origins` says which origins may fetch it cross-origin: '*'
+ *   (the default: credentials travel in the URL as for the socket, and a
+ *   browser withholds cookies under '*'), an array of origins to echo and
+ *   no other, or false for no CORS header at all. false turns the route
+ *   off; every client then gets its snapshot inline
  * @param {(error: any) => void} [options.onError] - server faults: a
  *   store factory that threw, a bug while handling a message; default console
  * @returns {{ upgrade: (req: Request, server: any) => Promise<Response|undefined|null>, websocket: Object, close: (options?: { reason?: string }) => Promise<void>, get closing(): boolean }}
@@ -95,7 +99,7 @@ export function createHandlers({
     if (closing) return new Response('Server shutting down', { status: 503, headers: { 'retry-after': '1' } });
     if (snapshotOf !== null) {
       try {
-        return await serveSnapshot(req, snapshotOf, { resolveStore, authenticate, authorize, onError });
+        return await serveSnapshot(req, snapshotOf, { resolveStore, authenticate, authorize, onError, origins: snapshots.origins });
       } catch (err) {
         onError(err);
         return new Response('Something went wrong', { status: 500 });
