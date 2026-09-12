@@ -2,6 +2,19 @@
 
 All notable changes to lazy-storage are documented here. The format follows Keep a Changelog; versions follow Semantic Versioning.
 
+## [0.12.1] - 2026-09-12
+
+### Fixed
+
+- **A register's new value is its whole value.** A key removed from
+  inside a register (a field deleted, or the value assigned without it)
+  stayed on the server and in every other client, since the value was
+  merged in as a patch, which keeps what it does not mention; only the
+  persisted row and a fresh snapshot had it right. A register written by
+  a client, by the server's own `patch`, or by a follower through a
+  shared connection's relay now replaces what was there, and the patch
+  sent on says so, all the way down (`replacingRegisters` in core)
+
 ## [0.12.0] - 2026-09-12
 
 ### Added

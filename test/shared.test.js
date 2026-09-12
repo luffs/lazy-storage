@@ -392,9 +392,43 @@ test('a page on a MessagePort follows the replica for the stores its host allows
   page.dispose();
   other.dispose();
   link.close();
+  port1.close();
+  port2.close();
   // A plain connection on the port works too, without the socket's status
-  const plain = createConnection({ transport: messagePortTransport(new MessageChannel().port2), keepalive: false });
+  const spare = new MessageChannel();
+  const plain = createConnection({ transport: messagePortTransport(spare.port2), keepalive: false });
   assert.equal(plain.upstream, undefined);
+  spare.port1.close();
+  spare.port2.close();
+});
+
+test('a key deleted inside a register by a tab, or by a page on a port, goes from the replica, the server and the other tab', async t => {
+  const store = createStore({ initial: { ...INITIAL, profile: {} }, registers: ['profile'], presence: true });
+  const net = createNetwork(store);
+  const b = browser(net);
+  t.after(() => b.close());
+  const a = b.tab('a', { registers: ['profile'] });
+  const c = b.tab('c', { registers: ['profile'] });
+  await b.until(() => a.db.status === 'online' && c.db.status === 'online', 'both online');
+  a.db.state.profile = { name: 'Ann', nick: 'annie' };
+  await b.until(() => c.db.state.profile?.nick === 'annie', 'the register reached the other tab');
+  delete a.db.state.profile.nick;
+  await b.until(() => store.snapshot().profile?.nick === undefined && c.db.state.profile?.nick === undefined, 'and its deletion, on the server and in the other tab');
+  assert.deepEqual(store.snapshot().profile, { name: 'Ann' });
+
+  const { port1, port2 } = new MessageChannel();
+  const stop = a.connection.follow(port1, [{ store: 'main', initial: INITIAL, registers: ['profile'] }]);
+  const page = createClient({ connection: portConnection(port2, { reconnect: { min: 10, max: 50 } }), store: 'main', initial: INITIAL, registers: ['profile'], replicaId: 'page-2' });
+  page.connect();
+  await b.until(() => page.status === 'online' && page.state.profile?.name === 'Ann', 'the page has the register');
+  page.state.profile.nick = 'A';
+  await b.until(() => c.db.state.profile?.nick === 'A', 'its write reached the other tab');
+  delete page.state.profile.nick;
+  await b.until(() => store.snapshot().profile?.nick === undefined && c.db.state.profile?.nick === undefined && a.db.state.profile?.nick === undefined, 'and its deletion, everywhere');
+  stop();
+  page.dispose();
+  port1.close();
+  port2.close();
 });
 
 test('connect() from any tab prods the browser\'s socket, so a tab looked at again reconnects at once rather than at the next backoff step', async t => {

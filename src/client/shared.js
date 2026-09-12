@@ -40,6 +40,7 @@ import { memoryOutbox } from './storage.js';
 import { createClock } from '../core/hlc.js';
 import { randomId } from '../core/ids.js';
 import { registerSet } from '../core/paths.js';
+import { replacingRegisters } from '../core/model.js';
 
 const { Utils } = LazyWatch;
 
@@ -411,7 +412,8 @@ function createRelay({ tabId, transport, storage, reconnect, keepalive, infos, l
     let entry = entries.get(store);
     if (entry) return entry;
     const info = infos.get(store) ?? { initial: {}, registers: [] };
-    entry = { store, client: null, adapter: null, registers: registerSet(info.registers).patterns.map(p => p.join('/')), sessions: new Map(), queue: [], stops: [], timer: null };
+    const regs = registerSet(info.registers);
+    entry = { store, client: null, adapter: null, regs, registers: regs.patterns.map(p => p.join('/')), sessions: new Map(), queue: [], stops: [], timer: null };
     entries.set(store, entry);
     const adapter = storage(store);
     entry.adapter = adapter;
@@ -472,12 +474,12 @@ function createRelay({ tabId, transport, storage, reconnect, keepalive, infos, l
     if (typeof entry.adapter?.close === 'function') entry.adapter.close();
   }
 
-  /** Apply a follower's op to the replica (once per seq) */
+  /** Apply a follower's op to the replica (once per seq): a register it writes is replaced, as the server would */
   function apply(entry, session, op) {
     if (!Utils.isPlainObject(op) || !Number.isInteger(op.seq)) return;
     if (op.seq > session.lastSeq) {
       session.lastSeq = op.seq;
-      if (Utils.isPlainObject(op.diff)) LazyWatch.patch(entry.client.wire, op.diff);
+      if (Utils.isPlainObject(op.diff)) LazyWatch.patch(entry.client.wire, replacingRegisters(op.diff, entry.regs, entry.client.wire));
     }
   }
 

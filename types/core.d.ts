@@ -82,6 +82,8 @@ export type Row = [key: string, value: unknown];
 /** Flatten a diff into leaves; throws a ModelError for an array outside a register */
 export function leaves(diff: Diff, registers: RegisterSet, path?: Path, out?: Leaf[]): Leaf[];
 export function assertModel(diff: Diff, registers: RegisterSet): void;
+/** Turn a diff that writes a register into one that replaces it: keys of the current value the new one lacks become null, all the way down */
+export function replacingRegisters(diff: Diff, registers: RegisterSet, state: object): Diff;
 /** Replace every register fragment in a diff with the register's whole value from the live state */
 export function expandRegisters(diff: Diff, registers: RegisterSet, state: object): Diff;
 export function fromLeaves(entries: Leaf[]): Diff;

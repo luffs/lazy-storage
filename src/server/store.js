@@ -82,7 +82,7 @@
 import { LazyWatch } from 'lazy-watch';
 import { createClock, isTimestamp } from '../core/hlc.js';
 import { registerSet, pathKey, parsePathKey, setAt, valueAt } from '../core/paths.js';
-import { leaves, assertModel, rebuild, expandRegisters } from '../core/model.js';
+import { leaves, assertModel, rebuild, expandRegisters, replacingRegisters } from '../core/model.js';
 import { mergeOp, compactTombstones } from '../core/merge.js';
 import { ClockMap } from '../core/clocks.js';
 import { memoryStorage } from './storage.js';
@@ -552,12 +552,15 @@ export function createStore({
     clock.receive(op.ts);
 
     const { accepted, rejected, won, dropped } = mergeOp(clocks, op.ts, diff, regs, { authority });
-    if (accepted) {
-      LazyWatch.patch(state, accepted);
+    // A register the op writes becomes its new value whole: what the value had and the
+    // new one lacks goes, here and, through the patch sent on, in every client
+    const applied = accepted ? replacingRegisters(accepted, regs, state) : null;
+    if (applied) {
+      LazyWatch.patch(state, applied);
       stateJSON = null;
       version++;
       if (deltaLog > 0) {
-        log.push({ v: version, diff: accepted });
+        log.push({ v: version, diff: applied });
         if (log.length > deltaLog) log.splice(0, log.length - deltaLog);
       }
     }
@@ -567,10 +570,10 @@ export function createStore({
       replica: { id: op.replicaId, seq: op.seq, seen },
       // The log entry this op made, and the oldest version the store still
       // keeps, so an adapter persisting the log can prune to match
-      log: accepted && deltaLog > 0 ? { v: version, diff: accepted } : undefined,
+      log: applied && deltaLog > 0 ? { v: version, diff: applied } : undefined,
       logFloor: log.length ? log[0].v : version + 1
     });
-    if (accepted) broadcast({ t: 'patch', diff: accepted, ts: op.ts, v: version });
+    if (applied) broadcast({ t: 'patch', diff: applied, ts: op.ts, v: version });
     const lost = [...rejected, ...stripped];
     if (observers.op.size) {
       notify('op', { replicaId: op.replicaId, seq: op.seq, user: session?.user, accepted: accepted !== null, rejected: lost.length, version });

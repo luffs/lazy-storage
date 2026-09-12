@@ -86,6 +86,38 @@ export function assertModel(diff, registers) {
 }
 
 /**
+ * A register travels as a whole value, and its whole value is what it becomes: a key
+ * its new value lacks is gone. A merging patch keeps it, so a diff that writes a
+ * register is turned into one that replaces it: at each register path, the keys of
+ * the value there now that the new value lacks are written as null, all the way
+ * down. Arrays and everything outside registers pass as they are. `state` is the
+ * live state (a LazyWatch proxy or plain object) the diff is about to be applied to
+ * @param {Object} diff
+ * @param {{ matches: (path: string[]) => boolean }} registers - from registerSet()
+ * @param {Object} state
+ */
+export function replacingRegisters(diff, registers, state) {
+  const replacing = (current, next) => {
+    if (!Utils.isPlainObject(next) || !Utils.isPlainObject(current)) return next;
+    const out = {};
+    for (const key of Object.keys(current)) if (!Object.hasOwn(next, key)) out[key] = null;
+    for (const key of Object.keys(next)) out[key] = replacing(current[key], next[key]);
+    return out;
+  };
+  const walk = (node, path) => {
+    if (!Utils.isPlainObject(node)) return node;
+    const out = {};
+    for (const key of Object.keys(node)) {
+      const p = [...path, key];
+      const value = node[key];
+      out[key] = registers.matches(p) ? replacing(valueAt(state, p), value) : walk(value, p);
+    }
+    return out;
+  };
+  return walk(diff, []);
+}
+
+/**
  * lazy-watch emits array changes as fragments ({ 2: 'c', $length: 3 }).
  * Arrays travel as whole values, so replace every array the diff touches
  * (a fragment, a whole array, or a register node) with a deep copy of its
