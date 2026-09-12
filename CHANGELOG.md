@@ -2,6 +2,18 @@
 
 All notable changes to lazy-storage are documented here. The format follows Keep a Changelog; versions follow Semantic Versioning.
 
+## [0.11.1] - 2026-09-12
+
+### Fixed
+
+- **`connect()` from inside a `closed` event no longer breaks the other
+  clients.** When the server turned the socket away, the connection read
+  its reason again for each client and listener it told; a client that
+  called `connect()` from its own `closed` handler (having new credentials
+  by then) cleared the reason, and the next client was handed `null` and
+  threw, which in a shared connection left the tab offline. The reason is
+  read once now, before anyone hears it
+
 ## [0.11.0] - 2026-09-07
 
 ### Added

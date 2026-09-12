@@ -91,9 +91,13 @@ export function createConnection({ transport, reconnect = { min: 500, max: 10_00
     stopKeepalive();
     setStatus('offline');
     for (const { handler } of [...handlers.values()]) handler.onClose();
-    if (ended) {
-      for (const { handler } of [...handlers.values()]) handler.onClosed?.(ended);
-      notify('closed', ended);
+    // The reason is read once: a client that calls connect() from inside its own
+    // closed event (with fresh credentials, say) clears it, and the clients and
+    // listeners after it still hear why the socket went
+    const reason = ended;
+    if (reason) {
+      for (const { handler } of [...handlers.values()]) handler.onClosed?.(reason);
+      notify('closed', reason);
     } else if (!closedByUser && reconnect) {
       scheduleRetry();
     }
