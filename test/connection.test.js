@@ -112,3 +112,60 @@ test('the close code alone ends the socket the same way, in case the message did
   assert.throws(() => connection.on('open', () => {}), /Unknown connection event/);
   connection.close();
 });
+
+test('connect() from a status listener, on the way offline, is the same: everyone hears the reason that was, offline, and the socket comes back once', async () => {
+  const { factory, sockets, last } = fakeTransport();
+  const connection = createConnection({ transport: factory, reconnect: { min: 1, max: 2 }, keepalive: false });
+  const a = createClient({ connection, store: 'a', initial: {} });
+  const b = createClient({ connection, store: 'b', initial: {} });
+  const heard = [];
+  // An app that reconnects whenever it finds itself offline
+  a.on('status', s => { if (s === 'offline') a.connect(); });
+  a.on('closed', c => heard.push(['a', c.code, a.status]));
+  b.on('closed', c => heard.push(['b', c.code, b.status]));
+  connection.on('closed', c => heard.push(['connection', c.code, connection.status, connection.closed?.code]));
+  a.connect();
+  b.connect();
+  last().onopen();
+
+  last().onmessage({ t: 'closed', code: 'unauthorized', message: 'Not signed in' });
+  assert.deepEqual(heard, [['a', 'unauthorized', 'offline'], ['b', 'unauthorized', 'offline'], ['connection', 'unauthorized', 'offline', 'unauthorized']], 'everyone hears why, offline, with the reason still on the connection');
+  assert.equal(sockets.length, 2, 'then the connect() took effect');
+  assert.equal(connection.status, 'connecting');
+  assert.equal(connection.closed, null);
+  await sleep(10);
+  assert.equal(sockets.length, 2, 'and no retry on top of it');
+
+  // An ordinary drop with the same listener: its connect() brings the socket back, and the retry does not double it
+  last().onopen();
+  last().onclose({ code: 1006 });
+  assert.equal(sockets.length, 3, 'back at once');
+  await sleep(10);
+  assert.equal(sockets.length, 3, 'once');
+  a.dispose();
+  b.dispose();
+});
+
+test('a handler that throws does not keep the others from hearing, and a transport that reports its close at once drops the socket once', async t => {
+  const sockets = [];
+  const factory = () => {
+    const t = { onopen: null, onmessage: null, onclose: null, send() {}, close() { t.onclose?.({ code: 1000, reason: '' }); } };   // synchronously
+    sockets.push(t);
+    return t;
+  };
+  const connection = createConnection({ transport: factory, reconnect: { min: 1, max: 2 }, keepalive: false });
+  const heard = [];
+  connection.attach('x', { onOpen() {}, onMessage() {}, onClose() { heard.push('x offline'); }, onClosed() { throw new Error('boom'); } });
+  connection.attach('y', { onOpen() {}, onMessage() {}, onClose() { heard.push('y offline'); }, onClosed(info) { heard.push(['y', info.code]); } });
+  connection.on('closed', c => heard.push(['connection', c.code]));
+  const errors = t.mock.method(console, 'error', () => {});
+  connection.connect();
+  sockets[0].onopen();
+  sockets[0].onmessage({ t: 'closed', code: 'unauthorized', message: 'Not signed in' });
+  assert.deepEqual(heard, ['x offline', 'y offline', ['y', 'unauthorized'], ['connection', 'unauthorized']], 'once each, whatever x threw');
+  assert.equal(errors.mock.calls.length, 1, 'the throw is reported');
+  assert.match(errors.mock.calls[0].arguments[0], /handler/);
+  await sleep(10);
+  assert.equal(sockets.length, 1, 'no retry');
+  connection.close();
+});

@@ -49,6 +49,8 @@ export function createConnection({ transport, reconnect = { min: 500, max: 10_00
   let retryDelay = reconnect ? reconnect.min : 0;
   let retryTimer = null;
   let keepaliveTimer = null;
+  let dropping = false;   // inside dropped(): a connect() from a listener waits until everyone has heard
+  let wanted = false;     // connect() was called while dropping
 
   function startKeepalive() {
     stopKeepalive();
@@ -65,14 +67,22 @@ export function createConnection({ transport, reconnect = { min: 500, max: 10_00
     keepaliveTimer = null;
   }
 
-  function notify(event, payload) {
-    for (const fn of listeners[event]) {
-      try {
-        fn(payload);
-      } catch (err) {
-        console.error('Error in lazy-storage connection listener:', err);
-      }
+  /** One listener or handler throwing does not keep the rest from hearing */
+  function tell(what, fn, payload) {
+    try {
+      fn(payload);
+    } catch (err) {
+      console.error(`Error in lazy-storage connection ${what}:`, err);
     }
+  }
+
+  function notify(event, payload) {
+    for (const fn of listeners[event]) tell('listener', fn, payload);
+  }
+
+  /** Call a hook on every attached handler, in the order attached */
+  function each(hook, payload) {
+    for (const { handler } of [...handlers.values()]) if (handler[hook]) tell('handler', payload => handler[hook](payload), payload);
   }
 
   function setStatus(next) {
@@ -84,26 +94,44 @@ export function createConnection({ transport, reconnect = { min: 500, max: 10_00
   /**
    * The socket is gone: offline for everyone, then either a retry or,
    * when the server turned it away, the reason, which every client hears
-   * once its status already says offline
+   * once its status already says offline. A connect() called from inside
+   * any of these events (a client with fresh credentials, say) takes
+   * effect once everyone has heard: the reason stays what it was, every
+   * client and listener is told it, and the socket comes back once
    */
   function dropped() {
     conn = null;
     stopKeepalive();
-    setStatus('offline');
-    for (const { handler } of [...handlers.values()]) handler.onClose();
-    // The reason is read once: a client that calls connect() from inside its own
-    // closed event (with fresh credentials, say) clears it, and the clients and
-    // listeners after it still hear why the socket went
-    const reason = ended;
-    if (reason) {
-      for (const { handler } of [...handlers.values()]) handler.onClosed?.(reason);
-      notify('closed', reason);
-    } else if (!closedByUser && reconnect) {
+    dropping = true;
+    try {
+      setStatus('offline');
+      each('onClose');
+      if (ended) {
+        each('onClosed', ended);
+        notify('closed', ended);
+      }
+    } finally {
+      dropping = false;
+    }
+    if (wanted) {
+      wanted = false;
+      connect();
+    } else if (!ended && !closedByUser && reconnect) {
       scheduleRetry();
     }
   }
 
+  function connect() {
+    if (dropping) return void (wanted = true);
+    closedByUser = false;
+    ended = null;
+    clearTimeout(retryTimer);
+    open();
+  }
+
+  /** Open a socket, unless one is open or opening */
   function open() {
+    if (conn) return;
     setStatus('connecting');
     const c = transport();
     conn = c;
@@ -112,7 +140,7 @@ export function createConnection({ transport, reconnect = { min: 500, max: 10_00
       retryDelay = reconnect ? reconnect.min : 0;
       setStatus('online');
       startKeepalive();
-      for (const { handler, link } of [...handlers.values()]) handler.onOpen(link);
+      for (const { handler, link } of [...handlers.values()]) tell('handler', () => handler.onOpen(link));
     };
     c.onmessage = msg => {
       if (conn !== c || !Utils.isPlainObject(msg) || msg.t === 'pong') return;
@@ -122,8 +150,10 @@ export function createConnection({ transport, reconnect = { min: 500, max: 10_00
         // status and the reason land together
         if (msg.t === 'closed' && !ended) {
           ended = { code: msg.code, message: msg.message };
-          c.close();
+          // Dropped first, so the socket's own close (at once, in a transport
+          // that reports it synchronously) finds it no longer current
           dropped();
+          c.close();
         }
         return;
       }
@@ -166,25 +196,22 @@ export function createConnection({ transport, reconnect = { min: 500, max: 10_00
      * Open the socket (idempotent); attached clients say hello when it
      * opens. After the server turned the socket away this is the way back
      * in: the transport factory runs afresh, so a URL built by a function
-     * carries whatever credentials the app has now
+     * carries whatever credentials the app has now. Called from inside a
+     * status or closed event, it takes effect once every listener has heard
      */
-    connect() {
-      closedByUser = false;
-      ended = null;
-      clearTimeout(retryTimer);
-      if (!conn) open();
-    },
+    connect,
 
     /** Close the socket for every attached client; no automatic reconnect */
     close() {
       closedByUser = true;
+      wanted = false;
       clearTimeout(retryTimer);
       stopKeepalive();
       const c = conn;
       conn = null;
       c?.close();
       setStatus('offline');
-      for (const { handler } of [...handlers.values()]) handler.onClose();
+      each('onClose');
     },
 
     /**

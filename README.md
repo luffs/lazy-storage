@@ -428,9 +428,11 @@ Two hooks on the Bun adapter decide who gets a session on which store:
   would only fail again, and reports it on every store attached:
   `db.closed` is `{ code: 'unauthorized', message }`, `db.on('closed')`
   fires, and `connection.closed` holds the same. Once the app has signed
-  in again, `db.connect()` (or `connection.connect()`) is the way back:
+  in again, `db.connect()` (or `connection.connect()`) is the way back,
+  from inside the `closed` event itself if it has credentials by then:
   the transport factory runs afresh, so a URL built by a function carries
-  the new token.
+  the new token. Called with the same token, it is refused again at once,
+  with no backoff in between, so reconnect on `closed` only with a new one.
 - `authorize(user, storeId, store)` runs per store, before its session
   exists; a refusal arrives as a `closed` message with code `forbidden` and
   affects only that store, while the socket stays up for the others. Both

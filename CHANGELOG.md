@@ -6,13 +6,25 @@ All notable changes to lazy-storage are documented here. The format follows Keep
 
 ### Fixed
 
-- **`connect()` from inside a `closed` event no longer breaks the other
-  clients.** When the server turned the socket away, the connection read
-  its reason again for each client and listener it told; a client that
-  called `connect()` from its own `closed` handler (having new credentials
-  by then) cleared the reason, and the next client was handed `null` and
-  threw, which in a shared connection left the tab offline. The reason is
-  read once now, before anyone hears it
+- **`connect()` from inside a `closed` or `status` event no longer breaks
+  the other clients.** When the server turned the socket away, the
+  connection read its reason again for each client and listener it told;
+  a client that called `connect()` from its own `closed` handler (having
+  new credentials by then) cleared the reason, and the next client was
+  handed `null` and threw, which in a shared connection left the tab
+  offline. A listener reconnecting on `offline` cleared it for everyone,
+  and on an ordinary drop left a retry on top of its own socket, which
+  opened a second one and never closed the first. A `connect()` called
+  from inside any event of the drop now takes effect once every client
+  and listener has heard: the reason stays what it was and
+  `connection.closed` holds it throughout. A handler or listener that
+  throws no longer keeps the rest from hearing, and a transport that
+  reports its close synchronously drops the socket once
+- **In a shared connection, the socket turned away reaches every tab
+  once.** It reached each tab twice, as the store's and as the socket's,
+  so a tab that signed in again from inside the event was told again once
+  it was back and stayed offline, and a tab that reconnected on every
+  `closed` looped
 
 ## [0.11.0] - 2026-09-07
 
@@ -203,7 +215,8 @@ All notable changes to lazy-storage are documented here. The format follows Keep
   `connection.on('closed')` carry the reason, and every client on it
   reports it as its own `closed`. `connect()` is the way back once the
   app has fresh credentials: the transport factory runs afresh
-- **Vue and React entries.** `lazy-storage/vue` exports `useClient(db)`:
+
+- **Vue and React entries.** `lazy-storage/vue` exports `useClient(db)`:
   a reactive mirror of the client's state, patched in place on every
   batch, local or remote, with refs for its status, presence, outbox
   size, closed reason, and undo state; it stops with the component (or
@@ -239,7 +252,8 @@ All notable changes to lazy-storage are documented here. The format follows Keep
 - A transport's `onclose` receives `{ code, reason }` where the socket
   knows them; the connection reads code 4401 in case the `closed`
   message did not make it
-- **Presence is off by default and set up as one option.**
+
+- **Presence is off by default and set up as one option.**
   `createStore({ presence })` takes `false` (the default: nothing is
   broadcast, `store.presence()` and `store.peers()` are empty, a share is
   refused with `forbidden`), `true`, or `{ key, user, validate, every,

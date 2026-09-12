@@ -377,3 +377,26 @@ test('a lock manager that refuses the request leaves the tab leading on its own,
   }
   assert.ok(store.snapshot().tasks.x, 'and syncs');
 });
+
+test('the socket turned away reaches every tab once, and a tab that signs in again from inside the event brings the browser back', async t => {
+  const store = createStore({ initial: INITIAL, presence: true });
+  const net = createNetwork(store);
+  const b = browser(net);
+  t.after(() => b.close());
+  const a = b.tab('a');
+  const c = b.tab('c');
+  await b.until(() => a.db.status === 'online' && c.db.status === 'online', 'both online');
+  const leader = a.connection.leader ? a : c;
+  const closed = [];
+  // Every tab has credentials by then and comes straight back, from inside the event
+  for (const tab of [a, c]) tab.db.on('closed', info => { closed.push([tab.id, info.code, tab.db.status]); tab.db.connect(); });
+  // What the server sends before closing with 4401 (server/wire.js)
+  leader.link.current.onmessage({ t: 'closed', code: 'unauthorized', message: 'Unauthorized' });
+  await b.until(() => closed.length === 2 && a.db.status === 'online' && c.db.status === 'online', 'both back');
+  await sleep(20);
+  await net.settle();
+  assert.deepEqual(closed.sort(), [['a', 'unauthorized', 'offline'], ['c', 'unauthorized', 'offline']], 'each tab heard it once, offline');
+  assert.equal(store.sessions, 1, 'one socket');
+  assert.equal(a.db.closed, null);
+  assert.equal(c.db.closed, null);
+});

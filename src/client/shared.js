@@ -328,7 +328,7 @@ function createRelay({ tabId, transport, storage, reconnect, keepalive, infos, l
     }),
     // The socket was turned away (not signed in): final for every follower's connection too
     socket.on('closed', info => {
-      for (const entry of entries.values()) for (const s of entry.sessions.values()) send(s.tab, { t: 'closed', code: info.code, message: info.message });
+      for (const entry of [...entries.values()]) for (const s of [...entry.sessions.values()]) send(s.tab, { t: 'closed', code: info.code, message: info.message });
     })
   ];
 
@@ -350,12 +350,15 @@ function createRelay({ tabId, transport, storage, reconnect, keepalive, infos, l
       if (entries.get(store) !== entry) return void client.dispose();   // let go while it was opening
       if (!saved) persistIdentity(adapter, client);
       entry.client = client;
-      const all = message => { for (const s of entry.sessions.values()) send(s.tab, { ...message, store }); };
+      // Over a copy: a follower told may leave and come back from inside the event, which must not have it told again
+      const all = message => { for (const s of [...entry.sessions.values()]) send(s.tab, { ...message, store }); };
       entry.stops = [
         // Every batch the replica sees, its followers' own included, reaches every follower
         client.watch(diff => all({ t: 'patch', diff, ts: clock.now(), v: client.version })),
         client.on('peers', peers => { for (const s of entry.sessions.values()) if (s.presence) send(s.tab, { t: 'presence', peers, store }); }),
-        client.on('closed', c => all({ t: 'closed', code: c.code, message: c.message })),
+        // A store the server closed for us. The socket turned away is the hidden client's closed too,
+        // but reaches the followers once, as the socket's (above), after every hidden client has heard
+        client.on('closed', c => { if (!socket.closed) all({ t: 'closed', code: c.code, message: c.message }); }),
         client.on('error', err => all({ t: 'error', code: err.code, message: err.message })),
         client.on('sync', () => onPending(store, client.pending))
       ];
