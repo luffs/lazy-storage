@@ -130,8 +130,33 @@ export interface SharedConnection extends Connection {
   on(event: 'closed', fn: (closed: Closed) => void): Unsubscribe;
   /** The replica's outbox changed */
   on(event: 'sync', fn: () => void): Unsubscribe;
+  /**
+   * Let the page on the other end of a MessagePort (an iframe, a worker) have clients on the
+   * browser's replica, as this tab's are, for the stores named and no other; the other end runs
+   * a client on `messagePortTransport(port)`. Returns what ends it
+   */
+  follow(port: MessagePortLike, stores: Array<{ store: string; initial?: object; registers?: string[] }>): () => void;
   /** This tab is done: its clients disconnect and, if it led, the replica closes and another tab takes over */
   dispose(): void;
+}
+
+/** What `follow` and `messagePortTransport` need of a port: a MessagePort's shape */
+export interface MessagePortLike {
+  postMessage(message: unknown): void;
+  onmessage: ((event: { data: unknown }) => void) | null;
+  start?(): void;
+}
+
+/** The other end of `follow`: a connection over the port that also knows the browser's socket and outbox, as the host says */
+export interface PortConnection extends Connection {
+  /** The browser's socket, which this page's clients report as their status */
+  readonly upstream: ConnectionStatus;
+  /** The replica's unsent ops for a store, counted into this page's clients' `pending` */
+  pending(storeId: string): number;
+  on(event: 'status', fn: (status: ConnectionStatus) => void): Unsubscribe;
+  on(event: 'closed', fn: (closed: Closed) => void): Unsubscribe;
+  /** The replica's outbox changed */
+  on(event: 'sync', fn: () => void): Unsubscribe;
 }
 
 // --- Storage adapters -------------------------------------------------------------

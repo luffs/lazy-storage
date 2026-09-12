@@ -1,6 +1,6 @@
 // Type declarations for the `lazy-storage` entry: everything a browser or
 // Bun/Node client needs. The server lives under `lazy-storage/server`.
-import type { Connection, ConnectionOptions, DocumentStorage, RowDocument, RowStorage, SharedConnection, SharedConnectionOptions, TransportFactory } from './client.js';
+import type { Connection, ConnectionOptions, DocumentStorage, MessagePortLike, PortConnection, RowDocument, RowStorage, SharedConnection, SharedConnectionOptions, TransportFactory } from './client.js';
 
 export { LazyWatch } from 'lazy-watch';
 export * from './core.js';
@@ -16,6 +16,14 @@ export * from './client.js';
  * every snapshot over the socket
  */
 export function webSocketTransport(url: string | (() => string), options?: { WebSocket?: any; fetch?: false | typeof fetch }): TransportFactory;
+/** A transport over a MessagePort, for a page a shared connection lets follow the browser's replica (`connection.follow`) */
+export function messagePortTransport(port: MessagePortLike, options?: { onControl?: (message: { lazy: string; [key: string]: unknown }) => void }): TransportFactory;
+/**
+ * The connection of a page that follows a browser's replica over a MessagePort (the other end of
+ * `connection.follow`): a plain connection on the port, plus the browser's socket status
+ * (`upstream`, which its clients report as theirs) and the replica's unsent ops (`pending`), as the host says
+ */
+export function portConnection(port: MessagePortLike, options?: { reconnect?: { min: number; max: number } | false; keepalive?: number | false }): PortConnection;
 
 /** One socket shared by any number of clients */
 export function createConnection(options: ConnectionOptions): Connection;

@@ -71,3 +71,46 @@ export function webSocketTransport(url, { WebSocket: WS = globalThis.WebSocket, 
   }
   return factory;
 }
+
+/**
+ * A transport over a MessagePort, for a page (an iframe, a worker) whose host lets it
+ * follow the browser's replica through its shared connection (`connection.follow(port,
+ * stores)`): the client on it has the stores the host allows, and no socket of its own.
+ * The host says { lazy: 'reconnect' } when the page should say hello again (the
+ * browser's replica moved to another tab): the connection retries, as after any close.
+ * What else the host says about itself ({ lazy: 'status' | 'pending', ... }) goes to
+ * `onControl`, which `portConnection` gives (see port.js); a plain connection ignores it
+ */
+export function messagePortTransport(port, { onControl } = {}) {
+  if (!port || typeof port.postMessage !== 'function') throw new TypeError('messagePortTransport needs a MessagePort');
+  return () => {
+    let open = true;
+    const t = {
+      onopen: null,
+      onmessage: null,
+      onclose: null,
+      send(message) {
+        if (open) port.postMessage(message);
+      },
+      close() {
+        closed();
+      }
+    };
+    const closed = () => {
+      if (!open) return;
+      open = false;
+      port.onmessage = null;
+      t.onclose?.({});
+    };
+    port.onmessage = event => {
+      const message = event?.data;
+      if (!open || !message || typeof message !== 'object') return;
+      if (message.lazy === 'reconnect') return void closed();
+      if (message.lazy !== undefined) return void onControl?.(message);
+      t.onmessage?.(message);
+    };
+    if (typeof port.start === 'function') port.start();
+    queueMicrotask(() => { if (open) t.onopen?.(); });
+    return t;
+  };
+}

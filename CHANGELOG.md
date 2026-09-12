@@ -2,6 +2,20 @@
 
 All notable changes to lazy-storage are documented here. The format follows Keep a Changelog; versions follow Semantic Versioning.
 
+## [0.12.0] - 2026-09-12
+
+### Added
+
+- **Port followers.** `connection.follow(port, stores)` on a shared
+  connection lets the page on the other end of a MessagePort (an iframe,
+  a worker) have clients on the browser's replica, as the tab's own are:
+  for the stores named and no other, under the tab's rights, in a session
+  that lives as long as the tab's, through a change of leader. The other
+  end runs an ordinary client on `portConnection(port)`, with no socket of
+  its own, whose status and pending are the browser's, as the host tells
+  it; a host that is done calls what `follow` returned.
+  `messagePortTransport(port)` is the transport underneath
+
 ## [0.11.1] - 2026-09-12
 
 ### Fixed

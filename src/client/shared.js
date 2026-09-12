@@ -86,6 +86,8 @@ export function sharedConnection({
 
   const bus = channel ? channel(`lazy-storage:${name}`) : null;
   const infos = new Map();            // store -> { initial, registers } this tab's clients declared
+  const ports = new Map();            // port followers (see follow): id -> { port, allowed }
+  let nextPort = 0;
   const listeners = { status: new Set(), sync: new Set() };
   let relay = null;                   // the browser's replica, while this tab leads
   let upstream = 'connecting';        // the socket's status, as the leader last told this tab
@@ -159,12 +161,19 @@ export function sharedConnection({
   function socketStatus(status) {
     upstream = status;
     notify('status', follower.status);
+    for (const { port } of ports.values()) port.postMessage({ lazy: 'status', status });
+  }
+
+  /** The replica's unsent ops for a store, to the pages whose store it is (see follow) */
+  function pendingToPorts(store, n) {
+    for (const { port, allowed } of ports.values()) if (allowed.has(store)) port.postMessage({ lazy: 'pending', store, n });
   }
 
   function pendingChanged(store, n) {
     if (pendingByStore.get(store) === n) return;
     pendingByStore.set(store, n);
     notify('sync');
+    pendingToPorts(store, n);
   }
 
   if (bus) {
@@ -181,13 +190,18 @@ export function sharedConnection({
         }
         return;
       }
-      if (m.kind === 'down') return void (m.to === tabId && down(m.message));
+      if (m.kind === 'down') {
+        if (m.to === tabId) down(m.message);
+        else ports.get(m.to)?.port.postMessage(m.message);
+        return;
+      }
       if (m.kind !== 'ctl' || relay || (m.to !== undefined && m.to !== tabId)) return;   // a leader hears no other leader
       if (m.ctl === 'leader') {
         // A new leader: start over with it, resending what the old one had not acknowledged
         upstream = 'connecting';
         current?.close();
         reconnectSoon();
+        reconnectPorts();
       } else if (m.ctl === 'status') {
         socketStatus(m.status);
       } else if (m.ctl === 'pending') {
@@ -219,13 +233,22 @@ export function sharedConnection({
     if (typeof sweeper.unref === 'function') sweeper.unref();
   }
 
+  /** The pages on this tab's ports start over too: a fresh hello, to the leader there is now */
+  function reconnectPorts() {
+    for (const { port } of ports.values()) port.postMessage({ lazy: 'reconnect' });
+  }
+
   function lead() {
     if (disposed || relay) return;
     relay = createRelay({
       tabId, transport, storage, reconnect, keepalive, infos, onError, linger,
-      send: (tab, message) => { if (tab === tabId) down(structuredClone(message)); else post({ kind: 'down', to: tab, message }); },
+      send: (tab, message) => {
+        if (tab === tabId) down(structuredClone(message));
+        else if (ports.has(tab)) ports.get(tab).port.postMessage(message);
+        else post({ kind: 'down', to: tab, message });
+      },
       onStatus: status => { post({ kind: 'ctl', ctl: 'status', status }); socketStatus(status); },
-      onPending: (store, n) => { post({ kind: 'ctl', ctl: 'pending', store, n }); notify('sync'); }
+      onPending: (store, n) => { post({ kind: 'ctl', ctl: 'pending', store, n }); notify('sync'); pendingToPorts(store, n); }
     });
     pendingByStore = new Map();
     startSweeping();
@@ -233,6 +256,7 @@ export function sharedConnection({
     // Our own clients were talking to the old leader (or to nobody); they start over with the relay here
     current?.close();
     reconnectSoon();
+    reconnectPorts();
   }
 
   if (locks && typeof locks.request === 'function') {
@@ -288,9 +312,55 @@ export function sharedConnection({
       }
       return follower.attach(storeId, handler);
     },
+    /**
+     * Let the page on the other end of a MessagePort (an iframe, a worker) have clients on
+     * the browser's replica, as this tab's are, for the stores named and no other: its
+     * messages go to the relay under this tab's rights, in a session of its own that lives
+     * as long as this tab's, and the replica's answers come back over the port. The other
+     * end runs an ordinary client on `messagePortTransport(port)`. `stores` are
+     * { store, initial, registers } as clients declare them. Returns what ends it
+     */
+    follow(port, stores) {
+      if (!port || typeof port.postMessage !== 'function') throw new TypeError('follow needs a MessagePort');
+      if (!Array.isArray(stores) || stores.length === 0) throw new TypeError('follow needs the stores the port may use');
+      const id = `${tabId}/port/${++nextPort}`;
+      const allowed = new Set();
+      for (const { store, initial, registers } of stores) {
+        if (typeof store !== 'string' || !store) throw new TypeError('follow: each store needs an id');
+        allowed.add(store);
+        if (!infos.has(store)) {
+          infos.set(store, { initial: initial ?? {}, registers: registers ?? [] });
+          if (current?.open) up({ ctl: 'store', store, ...infos.get(store) });
+        }
+      }
+      const entry = { port, allowed };
+      ports.set(id, entry);
+      // What the page's clients report as theirs: the socket's status, and the replica's unsent ops
+      port.postMessage({ lazy: 'status', status: relay ? relay.status : upstream });
+      for (const store of allowed) port.postMessage({ lazy: 'pending', store, n: relay ? relay.pending(store) : pendingByStore.get(store) ?? 0 });
+      const toRelay = message => {
+        if (relay) relay.receive(id, message);
+        else post({ kind: 'up', from: id, message });
+      };
+      // Only wire messages for the stores allowed: nothing a tab says about itself (ctl), no other store
+      port.onmessage = event => {
+        const message = event?.data;
+        if (!Utils.isPlainObject(message) || message.ctl !== undefined || !allowed.has(message.store)) return;
+        toRelay(message);
+      };
+      if (typeof port.start === 'function') port.start();
+      return () => {
+        if (ports.get(id) !== entry) return;
+        ports.delete(id);
+        port.onmessage = null;
+        for (const store of allowed) toRelay({ t: 'leave', store });
+      };
+    },
     /** This tab is done: its clients disconnect and, if it led, the replica closes and another tab takes over */
     dispose() {
       disposed = true;
+      for (const { port } of ports.values()) port.onmessage = null;
+      ports.clear();
       follower.close();
       clearInterval(sweeper);
       sweeper = null;
@@ -467,10 +537,11 @@ function createRelay({ tabId, transport, storage, reconnect, keepalive, infos, l
           return;
       }
     },
-    /** Drop the sessions of tabs no longer alive (their locks gone); `alive` holds the tab ids that are */
+    /** Drop the sessions of tabs no longer alive (their locks gone); `alive` holds the tab ids that are. A port's session lives as long as its tab's */
     sweep(alive) {
+      const live = tab => alive.has(tab) || alive.has(tab.split('/port/')[0]);
       for (const entry of [...entries.values()]) {
-        for (const tab of [...entry.sessions.keys()]) if (tab !== tabId && !alive.has(tab)) dropSession(entry, tab);
+        for (const tab of [...entry.sessions.keys()]) if (tab !== tabId && !live(tab)) dropSession(entry, tab);
       }
     },
     dispose() {

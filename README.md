@@ -405,6 +405,29 @@ the next tab to open it. A tab that closes without a word is found by the
 lock it held, which the leader checks every `sweepEvery` (default ten
 seconds). Leave the clients' own `storage` at its default: the replica is
 what persists.
+
+A page the tab holds in a frame, or a worker, can follow the replica too,
+over a MessagePort: `connection.follow(port, [{ store, initial, registers }])`
+lets the other end have clients on the stores named and no other, under
+the tab's rights, in a session that lives as long as the tab's and that
+follows a change of leader; the other end runs an ordinary client on
+`portConnection(port)`, with no socket, no token and no storage of its
+own, whose `db.status` and `db.pending` are the browser's, as a tab's are
+(the host tells it the socket's status and the replica's unsent ops).
+`follow` returns what ends it. So a sandboxed iframe gets a live
+`db.state` on exactly the store its host means it to have:
+
+```js
+// The host tab
+const { port1, port2 } = new MessageChannel();
+const stop = connection.follow(port1, [{ store: 'team-1', initial, registers }]);
+frame.contentWindow.postMessage({ hello: true }, '*', [port2]);
+
+// The page in the frame
+const port = (await new Promise(resolve => addEventListener('message', e => resolve(e.ports[0]), { once: true })));
+const db = createClient({ connection: portConnection(port), store: 'team-1', initial, registers });
+db.connect();
+```
 `connection.leader` says whether this tab leads, `dispose()` hands
 leadership on early, `connect()` also prods the browser's socket when it
 is down (for a tab the user just came back to), and what a tab shares (`db.share`) is the browser's
@@ -752,7 +775,8 @@ runs on the synced state and shows in the array view like any other change.
 - `createClient({ store, connection | transport, initial, registers, lists, position, replicaId, storage, mirror, cache, undo, undoLimit, reconnect, presence, now })` — `mirror: true` is a follower's defaults: `cache`, `undo` and `presence` off, each still settable; `db.restored` — started from the cached state; `db.version` — the store version this client has seen everything up to; `db.wire` — the synced state under a lists view
 - `openClient(options)` → `Promise<db>` — the same, for a storage adapter whose `load()` returns a promise
 - `createConnection({ transport, reconnect, keepalive })` → `connect()`, `close()`, `status` (`'offline' | 'connecting' | 'online'` — the socket's; a client says `online` only once its store is synced as well), `attached`, `closed` — why the server turned the socket away, or null — `fetch(path)` when the transport can — `on('status' | 'closed', fn)` — a socket shared by clients
-- `sharedConnection({ name, transport, storage, reconnect, keepalive, channel, locks, tabId, linger, sweepEvery, onError })` → the same, plus `leader`, `tabId`, `upstream` — the socket's status — `pending(store)` — the replica's unsent ops — `on('sync', fn)`, `dispose()` — one socket and one replica per browser, the tabs electing a leader (see [One socket per browser](#one-socket-per-browser))
+- `sharedConnection({ name, transport, storage, reconnect, keepalive, channel, locks, tabId, linger, sweepEvery, onError })` → the same, plus `leader`, `tabId`, `upstream` — the socket's status — `pending(store)` — the replica's unsent ops — `on('sync', fn)`, `follow(port, stores)` — a page on a MessagePort following the replica for those stores, ended by what it returns — `dispose()` — one socket and one replica per browser, the tabs electing a leader (see [One socket per browser](#one-socket-per-browser))
+- `portConnection(port, { reconnect, keepalive })` → the connection for the other end of `follow`: a client with no socket of its own, whose `upstream` and `pending(store)` are the browser's, as the host says; `messagePortTransport(port)` is the transport underneath, for a plain connection that wants neither
 - `db.state` — the mirror (a lazy-watch proxy). Read and write it directly
 - `db.store`, `db.connection` — the store id and the connection
 - `db.presence` — users with a live session on this store; `db.peers` — every live session as `{ replicaId, user, data }`, this client's own included; `db.share(data)` — what this client shares with them (JSON, `null` clears), read back as `db.shared`; `db.closed` — `{ code, message }` after the server ended this store for us, else null

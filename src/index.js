@@ -9,4 +9,5 @@ export { createConnection } from './client/connection.js';
 export { sharedConnection } from './client/shared.js';
 export { memoryOutbox, localStorageOutbox } from './client/storage.js';
 export { indexedDBStorage } from './client/indexeddb.js';
-export { webSocketTransport } from './client/transport.js';
+export { webSocketTransport, messagePortTransport } from './client/transport.js';
+export { portConnection } from './client/port.js';

@@ -4,7 +4,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createStore, createStores, createHub } from '../src/server/index.js';
 import { createClient } from '../src/client/index.js';
+import { createConnection } from '../src/client/connection.js';
 import { sharedConnection } from '../src/client/shared.js';
+import { messagePortTransport } from '../src/client/transport.js';
+import { portConnection } from '../src/client/port.js';
 import { memoryOutbox } from '../src/client/storage.js';
 import { indexedDBStorage } from '../src/client/indexeddb.js';
 import { createNetwork } from './helpers.js';
@@ -332,6 +335,66 @@ test('a store no tab has open anymore is let go after a moment, its session with
   await b.until(() => stores.get('team-2').sessions === 0, 'swept, then let go');
   assert.equal(a.db.status, 'online', 'the leader is untouched');
   assert.equal(b.persisted.has('team-2'), true, 'the replica\'s storage for the store stays');
+});
+
+test('a page on a MessagePort follows the replica for the stores its host allows, in a session of its own, through a change of leader', async t => {
+  const store = createStore({ initial: INITIAL, presence: true });
+  const net = createNetwork(store);
+  const b = browser(net);
+  t.after(() => b.close());
+  const c = b.tab('c');   // first in, so it leads
+  const a = b.tab('a');   // follows, and hosts the page
+  await b.until(() => a.db.status === 'online' && c.db.status === 'online', 'both online');
+  assert.equal(c.connection.leader, true);
+
+  const { port1, port2 } = new MessageChannel();
+  const stop = a.connection.follow(port1, [{ store: 'main', initial: INITIAL }]);
+  const link = portConnection(port2, { reconnect: { min: 10, max: 50 } });
+  const page = createClient({ connection: link, store: 'main', initial: INITIAL, replicaId: 'page-1' });
+  const other = createClient({ connection: link, store: 'other', initial: {}, replicaId: 'page-1' });
+  page.connect();
+  other.connect();
+  await b.until(() => page.status === 'online', 'the page is online through the port, via the leader in the other tab');
+  assert.equal(store.sessions, 1, 'still the browser\'s one session on the server');
+
+  page.state.tasks.p = { title: 'from the page' };
+  await b.until(() => store.snapshot().tasks.p?.title === 'from the page', 'its edit reached the server');
+  await b.until(() => c.db.state.tasks.p?.title === 'from the page' && a.db.state.tasks.p?.title === 'from the page', 'and both tabs');
+  c.db.state.tasks.q = { title: 'from a tab' };
+  await b.until(() => page.state.tasks.q?.title === 'from a tab', 'a tab\'s edit reached the page');
+  await sleep(60);
+  assert.notEqual(other.status, 'online', 'a store the host did not allow never answers');
+
+  // The page's status is the browser's socket's, and its pending the replica's, as the host says
+  c.link.goOffline();
+  await b.until(() => page.status === 'offline' && a.db.status === 'offline', 'offline in the page as in the tabs');
+  page.state.tasks.held = { title: 'while offline' };
+  await b.until(() => page.pending === 1 && a.db.pending === 1, 'the edit waits in the browser\'s outbox, counted in the page');
+  c.link.goOnline();
+  await b.until(() => page.status === 'online' && page.pending === 0, 'online again, the edit sent');
+  assert.equal(store.snapshot().tasks.held?.title, 'while offline');
+
+  // The leader goes; the host tab takes over, and the page says hello again to the relay there
+  c.close();
+  await b.until(() => a.connection.leader, 'the host tab leads');
+  await b.until(() => page.status === 'online', 'the page is back');
+  page.state.tasks.r = { title: 'after the change' };
+  await b.until(() => store.snapshot().tasks.r?.title === 'after the change', 'its edits still reach the server');
+  a.db.state.tasks.s = { title: 'from the host' };
+  await b.until(() => page.state.tasks.s?.title === 'from the host', 'and the host\'s reach it');
+
+  // Ended by the host: what the page says goes nowhere
+  stop();
+  page.state.tasks.t = { title: 'too late' };
+  await sleep(60);
+  await net.settle();
+  assert.equal(store.snapshot().tasks.t, undefined);
+  page.dispose();
+  other.dispose();
+  link.close();
+  // A plain connection on the port works too, without the socket's status
+  const plain = createConnection({ transport: messagePortTransport(new MessageChannel().port2), keepalive: false });
+  assert.equal(plain.upstream, undefined);
 });
 
 test('connect() from any tab prods the browser\'s socket, so a tab looked at again reconnects at once rather than at the next backoff step', async t => {
