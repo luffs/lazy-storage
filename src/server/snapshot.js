@@ -140,10 +140,10 @@ export function snapshotResponse(store, request, { origins = '*' } = {}) {
  * the snapshot answered (see snapshotResponse). GET and HEAD only (405).
  * @param {Request} request
  * @param {string} id - the store id the path named
- * @param {{ resolveStore: (id: string) => Object|null, authenticate?: Function, authorize?: Function, onError?: Function, origins?: '*' | false | string[] }} options
+ * @param {{ resolveStore: (id: string) => Object|null, authenticate?: Function, authorizeId?: Function, authorize?: Function, onError?: Function, origins?: '*' | false | string[] }} options
  * @returns {Promise<Response>}
  */
-export async function serveSnapshot(request, id, { resolveStore, authenticate, authorize, onError, origins = '*' }) {
+export async function serveSnapshot(request, id, { resolveStore, authenticate, authorizeId, authorize, onError, origins = '*' }) {
   if (request.method !== 'GET' && request.method !== 'HEAD') return new Response('Method not allowed', { status: 405, headers: { allow: 'GET, HEAD' } });
   let user;
   if (authenticate) {
@@ -151,6 +151,16 @@ export async function serveSnapshot(request, id, { resolveStore, authenticate, a
     if (user === null || user === undefined) return new Response('Unauthorized', { status: 401 });
   }
   if (!isStoreId(id)) return new Response('Not found', { status: 404 });
+  // Before the store is touched, as on the socket: a refusal loads nothing
+  if (authorizeId) {
+    let allowed;
+    try {
+      allowed = await authorizeId(user, id);
+    } catch {
+      allowed = false;
+    }
+    if (!allowed) return new Response('Forbidden', { status: 403 });
+  }
   let store;
   try {
     store = resolveStore(id);

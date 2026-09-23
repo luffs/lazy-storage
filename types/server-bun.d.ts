@@ -1,5 +1,5 @@
 // Type declarations for `lazy-storage/server/bun`
-import type { Authorize, Store, StoreRegistry, StoreResolver } from './server.js';
+import type { Authorize, AuthorizeId, Store, StoreRegistry, StoreResolver } from './server.js';
 
 export interface HandlerOptions {
   /** A registry from createStores, or a resolver; for a single store, `() => store` */
@@ -8,6 +8,9 @@ export interface HandlerOptions {
   path?: string;
   /** The user for a request, or null/undefined to refuse (401); may return a promise */
   authenticate?(req: Request): unknown;
+  /** Whether the user may open a store, before it is loaded: false closes it 'forbidden' and loads nothing. Prefer it for any check that needs only the user and the id */
+  authorizeId?: AuthorizeId;
+  /** The same once the store is loaded, for a check that needs it */
   authorize?: Authorize;
   /** The largest message (bytes) a socket may send; default 4 MB */
   maxPayload?: number;

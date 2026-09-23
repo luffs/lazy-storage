@@ -287,6 +287,8 @@ export function isStoreId(id: unknown): id is string;
 
 export type StoreResolver = (id: string) => Store | null;
 export type Authorize = (user: unknown, storeId: string, store: Store) => boolean | Promise<boolean>;
+/** Judged before the store is loaded: a refusal loads nothing and reads the same whether the store exists or not */
+export type AuthorizeId = (user: unknown, storeId: string) => boolean | Promise<boolean>;
 
 /** A transport that can fan a store's message out to every socket on it at once (Bun's topic publish) */
 export interface HubChannel {
@@ -298,6 +300,9 @@ export interface HubChannel {
 export interface HubOptions {
   send(message: Tagged<ServerMessage> | { t: 'pong' } | { t: 'error'; message: string }): void;
   user?: unknown;
+  /** Before the store is resolved; prefer it for any check that needs only the user and the id */
+  authorizeId?: AuthorizeId;
+  /** Once the store is resolved, for a check that needs it */
   authorize?: Authorize;
   /** Fan a store's patch out to every subscribed socket at once, rather than a send per socket */
   channel?: HubChannel;

@@ -186,9 +186,12 @@ const storeName: string = tagged.store;
 const handlers = createHandlers({
   stores,
   authenticate: req => new URL(req.url).searchParams.get('token'),
-  authorize: (user, storeId) => typeof user === 'string' && storeId.length > 0,
+  authorizeId: async (user, storeId) => typeof user === 'string' && storeId.length > 0,
+  authorize: (user, storeId, store) => store.version >= 0,
   maxPayload: 1024 * 1024
 });
+// @ts-expect-error authorizeId has no store to hand
+createHandlers({ stores, authorizeId: (user: unknown, storeId: string, store: object) => true });
 async function bun() {
   await handlers.close({ reason: 'deploy' });
   const server = serve({ stores, port: 0 });

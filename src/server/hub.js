@@ -4,9 +4,10 @@
 // session (receive/close) but every incoming message names a `store`, and
 // the hub keeps one real session per store on this socket, tagging what
 // the sessions send back with the store id. Store sessions are created
-// lazily on the first message for a store, after `authorize(user, id,
-// store)` allowed it (synchronously or through a promise; messages for
-// that store queue meanwhile), and closed by `leave`, by eviction, or when
+// lazily on the first message for a store, after `authorizeId(user, id)`
+// (before the store is resolved) and `authorize(user, id, store)` (after)
+// allowed it (synchronously or through a promise; messages for that store
+// queue meanwhile), and closed by `leave`, by eviction, or when
 // the connection closes. The per-store protocol is untouched, so a store
 // cannot tell a hub session from a direct one.
 //
@@ -25,7 +26,12 @@ const { Utils } = LazyWatch;
  * @param {(message: Object) => void} options.send
  * @param {any} [options.user] - the authenticated user, attached to every
  *   store session opened on this connection
+ * @param {(user: any, storeId: string) => boolean|Promise<boolean>} [options.authorizeId]
+ *   runs before the store is resolved, so a refusal loads nothing and
+ *   reads the same whether the store exists or not; the check to use when
+ *   it needs only the user and the id
  * @param {(user: any, storeId: string, store: Object) => boolean|Promise<boolean>} [options.authorize]
+ *   runs once the store is resolved, for a check that needs the store
  * @param {{ subscribe(id: string): void, unsubscribe(id: string): void, publish(id: string, message: Object): void }} [options.channel]
  *   a transport that can fan a message out to every socket on a store at
  *   once (Bun's topic publish). Given one, a store's patch goes out as a
@@ -38,7 +44,7 @@ const { Utils } = LazyWatch;
  * @param {(error: any) => void} [options.onError] - server faults (a store
  *   factory that threw); default console
  */
-export function createHub(resolveStore, { send, user, authorize, channel, httpSnapshots, onError = err => console.error('lazy-storage:', err) } = {}) {
+export function createHub(resolveStore, { send, user, authorizeId, authorize, channel, httpSnapshots, onError = err => console.error('lazy-storage:', err) } = {}) {
   if (typeof send !== 'function') throw new TypeError('A hub needs a send function');
   const sessions = new Map();
   const pending = new Map(); // store id -> messages queued while authorization is in flight
@@ -73,6 +79,60 @@ export function createHub(resolveStore, { send, user, authorize, channel, httpSn
     sessions.get(id)?.receive(inner);
   }
 
+  /**
+   * Open a store for this connection: `authorizeId`, then the store, then
+   * `authorize`, each of which may answer through a promise. Messages for
+   * the store queue meanwhile. The queue is this attempt's token: a `leave`
+   * (and perhaps a new attempt) disowns it, and whatever it was waiting for
+   * is then ignored rather than opening a second session
+   */
+  function admit(id, msg) {
+    const queued = [msg];
+    pending.set(id, queued);
+    const current = () => !closed && pending.get(id) === queued;
+    const deny = message => {
+      pending.delete(id);
+      refuse(id, 'forbidden', message || `Not allowed to access store "${id}"`);
+    };
+    // Run a step, then `next` with its verdict, now or when its promise settles
+    const step = (run, next) => {
+      let verdict;
+      try {
+        verdict = run();
+      } catch (err) {
+        return deny(err?.message);
+      }
+      if (!verdict || typeof verdict.then !== 'function') return next(verdict);
+      verdict.then(v => { if (current()) next(v); }, err => { if (current()) deny(err?.message); });
+    };
+    // Before the store is touched: a refusal here loads nothing, and reads
+    // the same whether the store exists or not
+    step(() => (authorizeId ? authorizeId(user, id) : true), allowed => {
+      if (!allowed) return deny();
+      // A store that cannot be opened (a factory or migration that throws)
+      // is refused like an unknown one and logged as the server fault it
+      // is; the connection and its other stores are unaffected
+      let store;
+      try {
+        store = resolveStore(id);
+      } catch (err) {
+        onError(err);
+        pending.delete(id);
+        return refuse(id, 'unknown-store', `Store "${id}" could not be opened: ${err?.message ?? err}`);
+      }
+      if (!store) {
+        pending.delete(id);
+        return refuse(id, 'unknown-store', `Unknown store "${id}"`);
+      }
+      step(() => (authorize ? authorize(user, id, store) : true), ok => {
+        if (!ok) return deny();
+        pending.delete(id);
+        open(id, store);
+        for (const m of queued) deliver(id, m);
+      });
+    });
+  }
+
   return {
     receive(msg) {
       if (closed) return;
@@ -91,51 +151,7 @@ export function createHub(resolveStore, { send, user, authorize, channel, httpSn
       if (sessions.has(id)) return deliver(id, msg);
       if (pending.has(id)) return void pending.get(id).push(msg);
 
-      // A store that cannot be opened (a factory or migration that throws)
-      // is refused like an unknown one and logged as the server fault it
-      // is; the connection and its other stores are unaffected
-      let store;
-      try {
-        store = resolveStore(id);
-      } catch (err) {
-        onError(err);
-        return refuse(id, 'unknown-store', `Store "${id}" could not be opened: ${err?.message ?? err}`);
-      }
-      if (!store) return refuse(id, 'unknown-store', `Unknown store "${id}"`);
-      const forbidden = () => refuse(id, 'forbidden', `Not allowed to access store "${id}"`);
-      let verdict;
-      try {
-        verdict = authorize ? authorize(user, id, store) : true;
-      } catch (err) {
-        return refuse(id, 'forbidden', err?.message || `Not allowed to access store "${id}"`);
-      }
-      if (verdict && typeof verdict.then === 'function') {
-        // The queue is this attempt's token: a `leave` (and perhaps a new
-        // attempt) while authorization is in flight disowns it, and its
-        // verdict is then ignored rather than opening a second session
-        const queued = [msg];
-        pending.set(id, queued);
-        const current = () => pending.get(id) === queued;
-        verdict.then(
-          ok => {
-            if (!current()) return;
-            pending.delete(id);
-            if (closed) return;
-            if (!ok) return forbidden();
-            open(id, store);
-            for (const m of queued) deliver(id, m);
-          },
-          err => {
-            if (!current()) return;
-            pending.delete(id);
-            if (!closed) refuse(id, 'forbidden', err?.message || `Not allowed to access store "${id}"`);
-          }
-        );
-        return;
-      }
-      if (!verdict) return forbidden();
-      open(id, store);
-      deliver(id, msg);
+      admit(id, msg);
     },
     /** Store ids with a live session on this connection */
     get stores() { return [...sessions.keys()]; },

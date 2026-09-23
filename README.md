@@ -47,7 +47,7 @@ serve({
   stores,
   port: 3200,
   authenticate: req => userForToken(new URL(req.url).searchParams.get('token')), // null → closed 'unauthorized'
-  authorize: (user, storeId) => user.teams.includes(storeId)                     // false → closed 'forbidden'
+  authorizeId: (user, storeId) => user.teams.includes(storeId)                   // false → closed 'forbidden', nothing loaded
 });
 // clients connect to ws://host:3200/ws?token=... and name their store per client
 ```
@@ -477,10 +477,17 @@ Two hooks on the Bun adapter decide who gets a session on which store:
   the transport factory runs afresh, so a URL built by a function carries
   the new token. Called with the same token, it is refused again at once,
   with no backoff in between, so reconnect on `closed` only with a new one.
-- `authorize(user, storeId, store)` runs per store, before its session
-  exists; a refusal arrives as a `closed` message with code `forbidden` and
-  affects only that store, while the socket stays up for the others. Both
-  hooks may return promises.
+- `authorizeId(user, storeId)` runs per store, before the store is even
+  loaded; a refusal arrives as a `closed` message with code `forbidden` and
+  affects only that store, while the socket stays up for the others. It is
+  the check to use whenever it needs only the user and the id: a store is
+  loaded (all its rows, into memory, until a registry's `idle` lets it go)
+  only for a user it lets through, and a refused id is answered the same
+  whether the store exists or not, so nobody learns which ids do.
+  `authorize(user, storeId, store)` runs after it, once the store is
+  loaded, for a check that needs the store itself; given alone, every id
+  asked for is loaded before it is judged. All three hooks may return
+  promises.
 
 Opening a store is not the same as writing to it, so the store itself
 decides what a client may write:
@@ -561,9 +568,9 @@ server is the only writer and browsers follow. lazy-storage serves this
 shape well, with a few choices that differ from the collaborative default.
 
 **Isolation is store layout.** A session on a store receives every patch
-on it: `authorize` decides who may open a store, and there is no per-user
+on it: `authorizeId` decides who may open a store, and there is no per-user
 filter inside one (that is what lets a patch go out as a single publish).
-So cut the state along the lines people may see, and let `authorize`
+So cut the state along the lines people may see, and let `authorizeId`
 enforce them: a store per team, per owner, per job. A view whose readers
 are a subset of another's is a separate store, not a filtered one.
 
@@ -654,7 +661,7 @@ A public server needs a few ceilings, all on by default:
   `webSocketTransport`, by default) says so in its hello, and a snapshot
   of `httpSnapshots.threshold` bytes or more (default 64 KB) is answered
   with where to fetch it rather than the state. The route sits behind the
-  same `authenticate` and `authorize` as the socket, and the response
+  same `authenticate`, `authorizeId` and `authorize` as the socket, and the response
   carries an ETag, so a reload that finds the store unchanged costs a 304.
   Patches keep flowing on the socket meanwhile; the client lays the ones
   newer than the snapshot it fetched on top of it. A fetch that fails (a
@@ -723,7 +730,7 @@ sockets can live inside a server that already has routes:
 ```js
 import { createHandlers } from 'lazy-storage/server/bun';
 
-const lazy = createHandlers({ stores, authenticate, authorize });
+const lazy = createHandlers({ stores, authenticate, authorizeId });
 Bun.serve({
   port: 3200,
   async fetch(req, server) {
@@ -778,7 +785,7 @@ import { sqliteStorage } from 'lazy-storage/server/sqlite-node';
 
 const sqlite = sqliteStorage('data/state.sqlite');
 const stores = createStores(id => createStore({ initial, storage: sqlite.store(id) }));
-const server = serve({ stores, port: 3200, authenticate, authorize });
+const server = serve({ stores, port: 3200, authenticate, authorizeId });
 await once(server, 'listening');
 ```
 
@@ -839,19 +846,19 @@ runs on the synced state and shows in the array view like any other change.
 - `store.compact()` → `{ tombstones, replicas }` removed; `store.flush()`, `store.dispose()`
 - `memoryStorage()`, `jsonFileStorage(path, { debounce })`
 - `createStores(factory, { idle, sweepEvery, now })` → `get(id)`, `has(id)`, `ids()`, `stats()` — the live stores' stats rolled up: `{ stores, idle, sessions, replicas, rows, tombstones, log }` — `release(id)`, `sweep()`, `dispose()`; `isStoreId(id)`
-- `createHub(resolveStore, { send, user, authorize, channel, httpSnapshots, onError })` → `{ receive(message), close(), stores, user }` — the server side of a multiplexed connection, session-shaped; `channel` is a transport's topic fan-out, `httpSnapshots` `{ url(id), threshold }` its snapshot route
+- `createHub(resolveStore, { send, user, authorizeId, authorize, channel, httpSnapshots, onError })` → `{ receive(message), close(), stores, user }` — the server side of a multiplexed connection, session-shaped; `channel` is a transport's topic fan-out, `httpSnapshots` `{ url(id), threshold }` its snapshot route
 - `toJSON(message)` — a message's JSON, encoded once however many sockets it goes to; use it in a transport of your own so a broadcast is not re-encoded per socket (`tagStore(message, id)` is what a hub does)
 
 **SQLite** (`lazy-storage/server/sqlite`, Bun): `sqliteStorage(file, { wal })` →
 `store(id)`, `ids()`, `remove(id)`, `db`, `close()`.
 
-**Bun adapter** (`lazy-storage/server/bun`): `serve({ stores, port, path, fetch, authenticate, authorize, maxPayload, perMessageDeflate, httpSnapshots, onError })` —
+**Bun adapter** (`lazy-storage/server/bun`): `serve({ stores, port, path, fetch, authenticate, authorizeId, authorize, maxPayload, perMessageDeflate, httpSnapshots, onError })` —
 `stores` is a registry or `id => store|null` (for one store, `() => store`); the
 hub listens at `path` and the snapshot route under it; the returned server gains `shutdown({ reason })`.
-`createHandlers({ stores, path, authenticate, authorize, maxPayload, perMessageDeflate, httpSnapshots, onError })` →
+`createHandlers({ stores, path, authenticate, authorizeId, authorize, maxPayload, perMessageDeflate, httpSnapshots, onError })` →
 `{ upgrade(req, server), websocket, close({ reason }), closing }` for mounting inside your own `Bun.serve`.
 
-**Node adapter** (`lazy-storage/server/node`, needs `ws`): `serve({ stores, port, host, request, path, authenticate, authorize, maxPayload, perMessageDeflate, httpSnapshots, idleTimeout, maxBuffered, onError })` →
+**Node adapter** (`lazy-storage/server/node`, needs `ws`): `serve({ stores, port, host, request, path, authenticate, authorizeId, authorize, maxPayload, perMessageDeflate, httpSnapshots, idleTimeout, maxBuffered, onError })` →
 an `http.Server` with `shutdown({ reason })`; `createHandlers(options)` → `{ upgrade(req, socket, head), request(req, res), close({ reason }), closing, wss }`;
 `toRequest(req)` — the Web `Request` `authenticate` sees. **node:sqlite** (`lazy-storage/server/sqlite-node`): `sqliteStorage(file, { wal })`, as the Bun one.
 
@@ -944,8 +951,8 @@ without help from the app, which only hears an `error` event:
 
 ### Closed codes
 
-`evicted` (`closeSessions` on the server), `forbidden` (`authorize`
-refused the store), `unknown-store` (the resolver returned null, or the
+`evicted` (`closeSessions` on the server), `forbidden` (`authorizeId`
+or `authorize` refused the store), `unknown-store` (the resolver returned null, or the
 store factory threw), and `invalid-store` (an id outside the allowed
 alphabet, or a message without one) each end one store. `unauthorized`
 (`authenticate` returned nothing) ends the socket: it arrives without a

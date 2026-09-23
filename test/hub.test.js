@@ -287,3 +287,51 @@ test('a commit that fails unloads the store; the client keeps its op and lands i
   assert.deepEqual(errors, []);
   assert.equal(createStore({ initial: INITIAL, storage: disk }).state.tasks.kept.id, 'kept', 'and it is on disk');
 });
+
+test('authorizeId runs before the store is loaded: a refusal loads nothing and reads the same whether the store exists or not', async () => {
+  const loaded = [];
+  const stores = createStores(id => {
+    loaded.push(id);
+    return id === 'ghost' ? null : createStore({ initial: INITIAL });
+  });
+  const sent = [];
+  const allowed = new Set(['team-1']);
+  const hub = createHub(id => stores.get(id), {
+    send: m => sent.push(m),
+    user: { id: 'u' },
+    authorizeId: async (user, id) => allowed.has(id),
+    authorize: (user, id, store) => store.version >= 0
+  });
+  hub.receive({ t: 'hello', store: 'team-2', replicaId: 'r', ops: [] });   // exists, not allowed
+  hub.receive({ t: 'hello', store: 'ghost', replicaId: 'r', ops: [] });    // does not exist, not allowed
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(loaded, [], 'nothing was loaded for a refused id');
+  assert.deepEqual(sent.map(m => [m.store, m.code]), [['team-2', 'forbidden'], ['ghost', 'forbidden']], 'the same answer either way');
+
+  sent.length = 0;
+  hub.receive({ t: 'hello', store: 'team-1', replicaId: 'r', ops: [] });
+  hub.receive({ t: 'share', store: 'team-1', data: null });   // queued while the verdicts are out
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(loaded, ['team-1']);
+  assert.equal(sent[0].t, 'snapshot', 'then authorize, then the session');
+  assert.deepEqual(hub.stores, ['team-1']);
+
+  // A throw is a refusal with its message; a leave while the verdict is out disowns it
+  const hub2 = createHub(id => stores.get(id), {
+    send: m => sent.push(m),
+    authorizeId: id => { throw new Error('not today'); }
+  });
+  sent.length = 0;
+  hub2.receive({ t: 'hello', store: 'team-1', replicaId: 'r2', ops: [] });
+  assert.deepEqual(sent.map(m => [m.code, m.message]), [['forbidden', 'not today']]);
+  let release;
+  const hub3 = createHub(id => stores.get(id), { send: m => sent.push(m), authorizeId: () => new Promise(r => { release = r; }) });
+  sent.length = 0;
+  hub3.receive({ t: 'hello', store: 'team-1', replicaId: 'r3', ops: [] });
+  hub3.receive({ t: 'leave', store: 'team-1' });
+  release(true);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(sent, [], 'the left attempt opened nothing');
+  hub.close();
+  stores.dispose();
+});

@@ -32,7 +32,13 @@ import { snapshotOptions, snapshotId, serveSnapshot } from './snapshot.js';
  *   request, or null/undefined to turn it away: a socket is told so in a
  *   `closed` message with code 'unauthorized' and closed with code 4401,
  *   a plain request gets a 401; may return a promise
+ * @param {(user: any, storeId: string) => boolean|Promise<boolean>} [options.authorizeId]
+ *   whether the user may open a store, judged before the store is loaded:
+ *   false (or a throw) closes it with 'forbidden' and nothing is loaded,
+ *   whether the store exists or not. Prefer it to `authorize` for any
+ *   check that needs only the user and the id
  * @param {(user: any, storeId: string, store: Object) => boolean|Promise<boolean>} [options.authorize]
+ *   the same, judged once the store is loaded, for a check that needs it
  * @param {number} [options.maxPayload=4194304] - the largest message (bytes)
  *   a socket may send; Bun closes a socket that exceeds it. A hello carries
  *   at most 1000 ops, so a long offline spell stays well under 4 MB
@@ -67,6 +73,7 @@ export function createHandlers({
   stores,
   path = '/ws',
   authenticate,
+  authorizeId,
   authorize,
   maxPayload = 4 * 1024 * 1024,
   perMessageDeflate = true,
@@ -99,7 +106,7 @@ export function createHandlers({
     if (closing) return new Response('Server shutting down', { status: 503, headers: { 'retry-after': '1' } });
     if (snapshotOf !== null) {
       try {
-        return await serveSnapshot(req, snapshotOf, { resolveStore, authenticate, authorize, onError, origins: snapshots.origins });
+        return await serveSnapshot(req, snapshotOf, { resolveStore, authenticate, authorizeId, authorize, onError, origins: snapshots.origins });
       } catch (err) {
         onError(err);
         return new Response('Something went wrong', { status: 500 });
@@ -129,7 +136,7 @@ export function createHandlers({
         unsubscribe: id => { try { ws.unsubscribe(topic(id)); } catch { /* a closing socket is already gone */ } },
         publish: (id, message) => { const json = toJSON(message); bunServer.publish(topic(id), json, shouldCompress(json)); }
       };
-      hubs.set(ws, createHub(resolveStore, { send: message => send(ws, message), user: ws.data.user, authorize, channel, httpSnapshots: snapshotRoute, onError }));
+      hubs.set(ws, createHub(resolveStore, { send: message => send(ws, message), user: ws.data.user, authorizeId, authorize, channel, httpSnapshots: snapshotRoute, onError }));
     },
     message(ws, raw) {
       let msg;

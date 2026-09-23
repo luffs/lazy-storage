@@ -213,3 +213,16 @@ test('snapshotResponse: the state with its version and epoch, brotli or gzip as 
   assert.equal((await changed.json()).state.tasks.a.done, true);
   store.dispose();
 });
+
+test('the snapshot route asks authorizeId before it loads the store', async () => {
+  const { serveSnapshot } = await import('../src/server/snapshot.js');
+  const loaded = [];
+  const resolveStore = id => { loaded.push(id); return createStore({ initial: { tasks: {} } }); };
+  const request = new Request('http://x/ws/snapshot/team-2');
+  const refused = await serveSnapshot(request, 'team-2', { resolveStore, authorizeId: (user, id) => id === 'team-1' });
+  assert.equal(refused.status, 403);
+  assert.deepEqual(loaded, [], 'nothing loaded');
+  const ok = await serveSnapshot(new Request('http://x/ws/snapshot/team-1'), 'team-1', { resolveStore, authorizeId: (user, id) => id === 'team-1' });
+  assert.equal(ok.status, 200);
+  assert.deepEqual(loaded, ['team-1']);
+});

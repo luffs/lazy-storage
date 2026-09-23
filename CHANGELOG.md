@@ -37,6 +37,18 @@ All notable changes to lazy-storage are documented here. The format follows Keep
   still ride free), so hellos cannot be replayed in a loop, and the
   server merges at most 1000 ops of one hello (`HELLO_OPS`), as the
   client already sent
+- **`authorizeId(user, storeId)` judges a store before it is loaded.**
+  `authorize(user, storeId, store)` receives the store, so the hub and
+  the snapshot route loaded it first: any signed-in user could have
+  every store id they asked for read into memory (kept for good without
+  a registry `idle`), run the store factory for each, and tell existing
+  ids from unknown ones by `forbidden` against `unknown-store`. The new
+  hook, on `serve`, `createHandlers` (Bun and Node) and `createHub`,
+  runs first; a refusal loads nothing and answers `forbidden` whether
+  the store exists or not. `authorize` still runs after it, for a check
+  that needs the store. An app whose `authorize` looks only at the user
+  and the id should rename it to `authorizeId`; the README's examples
+  now do
 
 ### Fixed
 

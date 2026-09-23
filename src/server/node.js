@@ -58,6 +58,7 @@ export function createHandlers({
   stores,
   path = '/ws',
   authenticate,
+  authorizeId,
   authorize,
   maxPayload = 4 * 1024 * 1024,
   perMessageDeflate = true,
@@ -111,6 +112,7 @@ export function createHandlers({
     const hub = createHub(resolveStore, {
       send: message => send(ws, message),
       user,
+      authorizeId,
       authorize,
       httpSnapshots: snapshotRoute,
       onError
@@ -181,7 +183,7 @@ export function createHandlers({
       response = new Response('Server shutting down', { status: 503, headers: { 'retry-after': '1' } });
     } else {
       try {
-        response = await serveSnapshot(toRequest(req), id, { resolveStore, authenticate, authorize, onError, origins: snapshots.origins });
+        response = await serveSnapshot(toRequest(req), id, { resolveStore, authenticate, authorizeId, authorize, onError, origins: snapshots.origins });
       } catch (err) {
         onError(err);
         response = new Response('Something went wrong', { status: 500 });
