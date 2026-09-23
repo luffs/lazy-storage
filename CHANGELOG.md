@@ -102,6 +102,10 @@ All notable changes to lazy-storage are documented here. The format follows Keep
   own) closes a socket that has sent nothing for that long, and
   `maxBuffered` (default 16 MB) closes one whose unsent output passes it
   with code 1013; the client reconnects and catches up with a delta
+- **`localStorageOutbox` reports a failed write.** A full quota was
+  swallowed, so an app could not tell its user that edits made offline
+  no longer survived a reload. `localStorageOutbox(key, { onError })`
+  hears it, as `indexedDBStorage` already did
 
 ## [0.12.1] - 2026-09-12
 

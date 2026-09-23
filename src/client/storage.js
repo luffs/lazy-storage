@@ -36,9 +36,13 @@ export function memoryOutbox() {
 /**
  * Outbox in `localStorage` under `key`, the state cache under `key:state`.
  * Reads and writes are guarded: with storage unavailable the client simply
- * does not survive a reload offline.
+ * does not survive a reload offline. A write that fails (the quota is full,
+ * storage is disabled) is handed to `onError`, so the app can tell the user
+ * that edits made offline are no longer kept across a reload
+ * @param {string} [key]
+ * @param {{ onError?: (error: any) => void }} [options]
  */
-export function localStorageOutbox(key = 'lazy-storage') {
+export function localStorageOutbox(key = 'lazy-storage', { onError = () => {} } = {}) {
   const stateKey = `${key}:state`;
   const read = k => {
     try {
@@ -51,8 +55,9 @@ export function localStorageOutbox(key = 'lazy-storage') {
   const write = (k, data) => {
     try {
       globalThis.localStorage?.setItem(k, JSON.stringify(data));
-    } catch {
-      /* storage full or unavailable: this part lives in memory only */
+    } catch (err) {
+      // Storage full or unavailable: this part lives in memory only
+      onError(err);
     }
   };
   return {

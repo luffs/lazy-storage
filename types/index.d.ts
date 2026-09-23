@@ -35,7 +35,7 @@ export function sharedConnection(options: SharedConnectionOptions): SharedConnec
 export function memoryOutbox(): DocumentStorage & { clear(): void };
 
 /** Outbox under `key` in localStorage, the state cache under `key:state`; `clear()` removes both keys */
-export function localStorageOutbox(key?: string): DocumentStorage & { clear(): void };
+export function localStorageOutbox(key?: string, options?: { onError?(error: unknown): void }): DocumentStorage & { clear(): void };
 
 export interface IndexedDBStorageOptions {
   /** Defaults to the global */

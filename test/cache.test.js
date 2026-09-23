@@ -91,6 +91,13 @@ test('the localStorage adapter keeps the outbox and the state under separate key
     adapter.clear();
     assert.equal(adapter.load(), null, 'clear() forgets the store');
     assert.deepEqual([...backing.keys()], [], 'both keys removed');
+
+    const errors = [];
+    const full = localStorageOutbox('app:full', { onError: err => errors.push(err.name) });
+    globalThis.localStorage.setItem = () => { throw Object.assign(new Error('quota'), { name: 'QuotaExceededError' }); };
+    full.save({ replicaId: 'a', seq: 1, ops: [] });
+    full.saveState({ state: {} });
+    assert.deepEqual(errors, ['QuotaExceededError', 'QuotaExceededError'], 'a failed write is reported, not swallowed');
   } finally {
     if (previous === undefined) delete globalThis.localStorage;
     else globalThis.localStorage = previous;
