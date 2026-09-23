@@ -74,7 +74,9 @@
 //       nothing here is written, and none of it is sent while the store's
 //       presence is off (the default)
 //   { t: 'closed', code, message }              this session is over
-//       (code 'evicted'; hubs also send 'forbidden', 'unknown-store', 'invalid-store')
+//       (code 'evicted', or 'unavailable' when the store is disposed under
+//       it, which the client answers with a new hello; hubs also send
+//       'forbidden', 'unknown-store', 'invalid-store')
 //   { t: 'error', seq?, code?, message, now?, ts? }  a refused op carries its
 //       seq and a code: 'invalid' (breaks the model), 'clock-skew' (with
 //       the server's `now` and the op's `ts`), 'expired', 'forbidden'
@@ -976,7 +978,16 @@ export function createStore({
       if (disposed) return;
       disposed = true;
       storage.flush();
-      for (const s of [...sessions]) s.close();
+      // Sessions still open are told the store went away but is not gone
+      // for good: the client says hello again, and a registry loads the
+      // store afresh, where an op sent to this one would be refused and lost
+      for (const s of [...sessions]) {
+        try {
+          s.send({ t: 'closed', code: 'unavailable', message: 'The store was unloaded; say hello again' });
+        } catch { /* the transport may already be gone */ }
+        s.close();
+        s.onEvict?.();
+      }
       // Nobody is left to tell
       cancelFlush?.();
       cancelFlush = null;

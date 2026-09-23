@@ -65,6 +65,19 @@ All notable changes to lazy-storage are documented here. The format follows Keep
   it) until compaction, a month by default. Such a deletion is now
   refused with `forbidden`; emptying the container still works, and the
   server's own `patch` may still delete it
+- **A store disposed under open sessions tells them.** `store.dispose()`
+  (a registry's `release`, or its idle sweep) closed its sessions without
+  a word, and the hub kept routing to them: the client's next op was
+  refused as `invalid` and dropped. The store now sends a `closed` with
+  the new code `unavailable` and lets the hub forget the session; a
+  client takes that code as passing, not final, and says hello again
+  after a moment, which loads the store afresh with nothing lost
+- **Leaving a store while its authorization was in flight leaked a
+  session.** A `leave` and a new hello for the same store before an async
+  `authorize` answered let both verdicts open a session; the first was
+  never closed, stayed in presence, and kept the store from going idle
+  (React StrictMode's double mount does this). A verdict for an attempt
+  that was left is now ignored
 
 ## [0.12.1] - 2026-09-12
 

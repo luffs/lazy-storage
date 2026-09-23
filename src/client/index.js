@@ -550,6 +550,24 @@ function build({
         applyPresence(msg);
         return;
       case 'closed': {
+        if (msg.code === 'unavailable') {
+          // Not final: the server unloaded the store under us (a registry
+          // released it) and loads it again on the next hello. Nothing
+          // pending is dropped; the hello resends it
+          synced = false;
+          fetching++;
+          held = null;
+          clearPresence();
+          refreshStatus();
+          if (!retryTimer) {
+            retryTimer = setTimeout(() => {
+              retryTimer = null;
+              if (linked()) hello();
+            }, 250 + Math.random() * 750);
+            if (typeof retryTimer?.unref === 'function') retryTimer.unref();
+          }
+          return;
+        }
         // Final for this store: evicted, forbidden, or unknown. Detach and
         // stay offline until connect() is called again
         ended = { code: msg.code, message: msg.message };

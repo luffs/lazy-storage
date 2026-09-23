@@ -110,10 +110,15 @@ export function createHub(resolveStore, { send, user, authorize, channel, httpSn
         return refuse(id, 'forbidden', err?.message || `Not allowed to access store "${id}"`);
       }
       if (verdict && typeof verdict.then === 'function') {
-        pending.set(id, [msg]);
+        // The queue is this attempt's token: a `leave` (and perhaps a new
+        // attempt) while authorization is in flight disowns it, and its
+        // verdict is then ignored rather than opening a second session
+        const queued = [msg];
+        pending.set(id, queued);
+        const current = () => pending.get(id) === queued;
         verdict.then(
           ok => {
-            const queued = pending.get(id) ?? [];
+            if (!current()) return;
             pending.delete(id);
             if (closed) return;
             if (!ok) return forbidden();
@@ -121,6 +126,7 @@ export function createHub(resolveStore, { send, user, authorize, channel, httpSn
             for (const m of queued) deliver(id, m);
           },
           err => {
+            if (!current()) return;
             pending.delete(id);
             if (!closed) refuse(id, 'forbidden', err?.message || `Not allowed to access store "${id}"`);
           }

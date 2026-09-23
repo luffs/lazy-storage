@@ -205,3 +205,51 @@ test('given a channel, a broadcast is one publish to the sockets subscribed per 
   assert.equal(patches(direct), 3, 'the direct session still hears everything');
   store.dispose();
 });
+
+test('leaving and reopening a store while authorization is in flight opens one session, not two', async () => {
+  const store = createStore({ initial: INITIAL });
+  const verdicts = [];
+  const sent = [];
+  const hub = createHub(() => store, {
+    send: m => sent.push(m),
+    user: { id: 'u' },
+    authorize: () => new Promise(resolve => verdicts.push(resolve))
+  });
+  hub.receive({ t: 'hello', store: 'main', replicaId: 'r', ops: [] });
+  hub.receive({ t: 'leave', store: 'main' });
+  hub.receive({ t: 'hello', store: 'main', replicaId: 'r', ops: [] });
+  verdicts[0](true);   // the first attempt's verdict arrives after the leave
+  verdicts[1](true);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(store.stats().sessions, 1, 'the disowned attempt opened nothing');
+  assert.equal(sent.filter(m => m.t === 'snapshot').length, 1);
+  hub.close();
+  assert.equal(store.stats().sessions, 0, 'and closing the hub leaves no session behind');
+  store.dispose();
+});
+
+test('a store released under live sessions tells them; the clients say hello again and nothing pending is lost', async () => {
+  const kept = memoryStorage();   // outlives the store instance, as a database does
+  const { stores, net, connect, attach } = setup(() => createStore({ initial: INITIAL, storage: kept }));
+  const connection = connect();
+  const a = attach(connection, 'main', 'a');
+  await net.settle();
+  a.collection('tasks').add({ id: 'before' });
+  await net.settle();
+  const errors = [];
+  a.on('error', err => errors.push(err.code));
+  const closed = [];
+  a.on('closed', info => closed.push(info));
+
+  stores.release('main');                     // an idle sweep, say, with the client still attached
+  a.collection('tasks').add({ id: 'during' });
+  await net.settle();
+  assert.equal(a.status, 'connecting');
+  assert.deepEqual(closed, [], 'not final');
+  await new Promise(resolve => setTimeout(resolve, 1100));   // the client's retry, on real time
+  await net.settle();
+  assert.equal(a.status, 'online');
+  assert.equal(a.pending, 0);
+  assert.deepEqual(Object.keys(stores.get('main').state.tasks).sort(), ['before', 'during']);
+  assert.deepEqual(errors, []);
+});

@@ -146,7 +146,7 @@ export type ErrorCode = 'invalid' | 'forbidden' | 'expired' | 'too-large' | 'rat
 
 /** Why the server ended a store for a client */
 /** `unauthorized` ends the socket itself (the request did not authenticate); the others end one store on it */
-export type ClosedCode = 'evicted' | 'forbidden' | 'unknown-store' | 'invalid-store' | 'unauthorized';
+export type ClosedCode = 'evicted' | 'forbidden' | 'unknown-store' | 'invalid-store' | 'unauthorized' | 'unavailable';
 
 /** A live session on a store, as presence lists them; `key` is what presence groups users by (absent for an anonymous session), `data` what that client shares */
 export interface Peer {

@@ -928,7 +928,10 @@ store factory threw), and `invalid-store` (an id outside the allowed
 alphabet, or a message without one) each end one store. `unauthorized`
 (`authenticate` returned nothing) ends the socket: it arrives without a
 `store`, and the close that follows carries code 4401 in case the message
-did not make it.
+did not make it. `unavailable` is the one that is not final: the store was
+disposed under an open session (a registry released it), and the client
+says hello again after a moment, which loads it afresh; nothing pending
+is lost and the app hears no `closed`.
 
 ## Scope
 
