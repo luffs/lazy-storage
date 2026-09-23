@@ -439,6 +439,9 @@ function createRelay({ tabId, transport, storage, reconnect, keepalive, infos, l
       entry.queue = [];
       for (const [tab, message] of queued) relay.receive(tab, message);
     };
+    // The leader's lock already makes it the one tab on this storage: a
+    // lease a crashed leader left behind must not turn it away
+    if (typeof adapter.takeOver === 'function') adapter.takeOver();
     const loaded = adapter.load();
     if (loaded && typeof loaded.then === 'function') {
       loaded.then(saved => openClient(options).then(client => ready(saved, client))).catch(err => {

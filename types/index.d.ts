@@ -35,7 +35,11 @@ export function sharedConnection(options: SharedConnectionOptions): SharedConnec
 export function memoryOutbox(): DocumentStorage & { clear(): void };
 
 /** Outbox under `key` in localStorage, the state cache under `key:state`; `clear()` removes both keys */
-export function localStorageOutbox(key?: string, options?: { onError?(error: unknown): void }): DocumentStorage & { clear(): void };
+/**
+ * One tab at a time: a second tab on the key keeps nothing, starts a replica of its own, and hears
+ * an error with code `storage-in-use`; `close()` gives the key up, `takeOver()` holds it regardless
+ */
+export function localStorageOutbox(key?: string, options?: { onError?(error: unknown): void }): DocumentStorage & { clear(): void; close(): void; takeOver(): void };
 
 export interface IndexedDBStorageOptions {
   /** Defaults to the global */

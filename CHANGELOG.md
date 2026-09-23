@@ -116,6 +116,17 @@ All notable changes to lazy-storage are documented here. The format follows Keep
   (`stores.get` replaces a disposed store rather than handing it out).
   The SQLite adapters set `busy_timeout` to five seconds, and a store's
   `dispose` still tells its sessions when the final flush throws
+- **Two tabs on one `localStorageOutbox` key no longer lose each other's
+  edits.** Both loaded the same replica id and sequence number, so the
+  server acknowledged one tab's ops and dropped the other's as
+  duplicates, and the two overwrote each other's outbox; the README's
+  first example was this setup whenever a second tab opened. A key is
+  now held by the tab that loaded it first, through a lease under
+  `key:lease` renewed while the tab is open and given up on `pagehide`
+  or `close()`. A second tab starts a replica of its own that keeps
+  nothing across a reload, and hears `storage-in-use` through `onError`.
+  A `sharedConnection` leader, which a lock already makes the only one,
+  takes the key over (`takeOver()`) whatever a crashed tab left behind
 
 ## [0.12.1] - 2026-09-12
 

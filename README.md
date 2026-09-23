@@ -222,6 +222,15 @@ its pending edits already applied (`db.restored` says so) rather than from
 `initial`; the snapshot on reconnect then brings it up to date. Pass
 `cache: false` to keep only the outbox.
 
+An outbox is one replica's, and a replica is one tab: two tabs loading
+the same outbox would number their ops alike, and the server would drop
+one tab's as duplicates of the other's. So a `localStorageOutbox` key is
+held by the tab that loaded it first (a lease it renews while open and
+gives up on `pagehide`); a second tab on the key starts a replica of its
+own that keeps nothing across a reload, and its `onError` hears
+`storage-in-use`. For a browser that is one replica however many tabs it
+has, use `sharedConnection` (below).
+
 There are two kinds of storage adapter. A **document** adapter
 (`localStorageOutbox`, `memoryOutbox`) keeps the outbox as one small
 document written with every op, and the state as another, written

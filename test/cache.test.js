@@ -85,12 +85,14 @@ test('the localStorage adapter keeps the outbox and the state under separate key
     adapter.save({ replicaId: 'a', seq: 1, ops: [] });
     assert.deepEqual(adapter.load(), { replicaId: 'a', seq: 1, ops: [] });
     adapter.saveState({ state: { tasks: {} }, version: 3, epoch: 'e' });
-    assert.deepEqual([...backing.keys()].sort(), ['app:outbox', 'app:outbox:state']);
+    assert.deepEqual([...backing.keys()].sort(), ['app:outbox', 'app:outbox:lease', 'app:outbox:state']);
     assert.deepEqual(adapter.load(), { replicaId: 'a', seq: 1, ops: [], state: { tasks: {} }, version: 3, epoch: 'e' });
     assert.equal(JSON.parse(backing.get('app:outbox')).state, undefined, 'the outbox document does not carry the state');
     adapter.clear();
     assert.equal(adapter.load(), null, 'clear() forgets the store');
-    assert.deepEqual([...backing.keys()], [], 'both keys removed');
+    assert.deepEqual([...backing.keys()], ['app:outbox:lease'], 'both keys removed; the lease is the tab\'s');
+    adapter.close();
+    assert.deepEqual([...backing.keys()], [], 'close() gives the key up');
 
     const errors = [];
     const full = localStorageOutbox('app:full', { onError: err => errors.push(err.name) });
@@ -119,4 +121,55 @@ test('memoryOutbox.clear() forgets the outbox and the cache', () => {
   assert.ok(adapter.load());
   adapter.clear();
   assert.equal(adapter.load(), null);
+});
+
+test('localStorageOutbox is one tab\'s at a time: a second tab on the key starts afresh, keeps nothing, and is told', () => {
+  const backing = new Map();
+  const previous = globalThis.localStorage;
+  globalThis.localStorage = {
+    getItem: k => (backing.has(k) ? backing.get(k) : null),
+    setItem: (k, v) => backing.set(k, String(v)),
+    removeItem: k => backing.delete(k)
+  };
+  try {
+    const first = localStorageOutbox('app');
+    first.load();
+    first.save({ replicaId: 'r1', seq: 4, ops: [] });
+    const errors = [];
+    const second = localStorageOutbox('app', { onError: err => errors.push(err.code) });
+    assert.equal(second.load(), null, 'not the first tab\'s replica: a replica of its own');
+    assert.deepEqual(errors, ['storage-in-use']);
+    second.save({ replicaId: 'r2', seq: 1, ops: [] });
+    second.saveState({ state: {} });
+    assert.equal(JSON.parse(backing.get('app')).replicaId, 'r1', 'the first tab\'s outbox is untouched');
+    assert.equal(first.load().replicaId, 'r1', 'and still the first tab\'s');
+
+    first.close();   // the first tab is done (pagehide does the same)
+    const third = localStorageOutbox('app');
+    assert.equal(third.load().replicaId, 'r1', 'a tab opened after it carries on the replica');
+    third.close();
+  } finally {
+    if (previous === undefined) delete globalThis.localStorage;
+    else globalThis.localStorage = previous;
+  }
+});
+
+test('takeOver() holds the key whatever lease a crashed tab left behind', () => {
+  const backing = new Map([['app:lease', JSON.stringify({ tab: 'crashed', at: Date.now() })]]);
+  const previous = globalThis.localStorage;
+  globalThis.localStorage = {
+    getItem: k => (backing.has(k) ? backing.get(k) : null),
+    setItem: (k, v) => backing.set(k, String(v)),
+    removeItem: k => backing.delete(k)
+  };
+  try {
+    backing.set('app', JSON.stringify({ replicaId: 'r1', seq: 2, ops: [] }));
+    const leader = localStorageOutbox('app', { onError: () => assert.fail('no error for the lock holder') });
+    leader.takeOver();
+    assert.equal(leader.load().replicaId, 'r1');
+    leader.close();
+  } finally {
+    if (previous === undefined) delete globalThis.localStorage;
+    else globalThis.localStorage = previous;
+  }
 });
