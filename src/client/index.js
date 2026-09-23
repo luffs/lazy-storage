@@ -197,6 +197,7 @@ function build({
   let retryTimer = null;  // a hello scheduled after a rate-limit refusal
   let throttled = false;  // refused for the rate: nothing goes live until that hello, which resends in order
   let helloCut = false;   // the last hello left part of the outbox out: the next hello carries it
+  let gapped = false;     // a patch skipped a version: a catch-up hello is out, and patches wait for it
 
   const persistence = createPersistence({
     storage,
@@ -461,6 +462,7 @@ function build({
     // The version first, so what persistence writes for the batches below
     // is stamped with the version the state is about to reflect
     if (Number.isInteger(msg.v)) known = { epoch: typeof msg.epoch === 'string' ? msg.epoch : null, v: msg.v };
+    gapped = false;
     acknowledge(msg.seq);
     applyServerState();
     // What the hello left out goes in the next hello, not as live ops: a
@@ -537,6 +539,20 @@ function build({
         });
       case 'patch':
         clock.receive(msg.ts);
+        // What a catch-up is on its way for, it brings
+        if (gapped) return;
+        // A server's versions count one per patch: one skipped means a
+        // patch never arrived (a socket that dropped it under
+        // backpressure), and applying on regardless would leave this
+        // replica wrong for good. Catch up from the last version held
+        // instead. (A relay's versions, epoch null, do not count so)
+        if (Number.isInteger(msg.v) && known.epoch !== null && synced && msg.v > known.v + 1) {
+          gapped = true;
+          synced = false;
+          refreshStatus();
+          hello();
+          return;
+        }
         if (Number.isInteger(msg.v)) known.v = msg.v;
         LazyWatch.patch(state, msg.diff, REMOTE);
         return;
@@ -663,6 +679,7 @@ function build({
     onMessage: handle,
     onClose() {
       synced = false;
+      gapped = false;
       fetching++;
       held = null;
       clearPresence();

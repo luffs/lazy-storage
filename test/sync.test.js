@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { LazyWatch } from 'lazy-watch';
-import { createStore, memoryStorage } from '../src/server/index.js';
+import { createStore, createHub, memoryStorage } from '../src/server/index.js';
 import { memoryOutbox } from '../src/client/storage.js';
 import { createNetwork, fakeTime } from './helpers.js';
 
@@ -295,4 +295,31 @@ test('a server-side patch reaches connected clients', async () => {
   store.patch({ tasks: { s: { id: 's', title: 'From the server' } } });
   await net.settle();
   assert.deepEqual(a.collection('tasks').get('s'), { id: 's', title: 'From the server' });
+});
+
+test('a patch that never arrived is noticed by the next one\'s version, and the client catches up from where it was', async () => {
+  const store = createStore({ initial: { tasks: {} } });
+  let drop = 0;   // patches still to lose on their way to b
+  const net = createNetwork({
+    session: ({ send, user }) => createHub(() => store, { send, user })
+  });
+  const lossy = createNetwork({
+    session: ({ send, user }) => createHub(() => store, {
+      send: m => { if (m.t === 'patch' && drop > 0) { drop--; return; } send(m); },
+      user
+    })
+  });
+  const a = net.client({ replicaId: 'a', initial: { tasks: {} } });
+  const b = lossy.client({ replicaId: 'b', initial: { tasks: {} } });
+  const settle = async () => { for (let i = 0; i < 3; i++) { await net.settle(); await lossy.settle(); } };
+  await settle();
+  drop = 1;
+  a.collection('tasks').add({ id: 'lost' });
+  await settle();
+  assert.equal(b.state.tasks.lost, undefined, 'the patch was dropped');
+  a.collection('tasks').add({ id: 'next' });
+  await settle();
+  assert.deepEqual(Object.keys(b.state.tasks).sort(), ['lost', 'next'], 'the gap brought a catch-up');
+  assert.equal(b.version, store.version);
+  assert.equal(b.status, 'online');
 });

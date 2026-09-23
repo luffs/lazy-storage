@@ -88,6 +88,13 @@ All notable changes to lazy-storage are documented here. The format follows Keep
   so a server that went away (a deploy closes every socket at once)
   brought every client back in the same instant; each retry now waits
   between half its delay and all of it
+- **A patch that never arrived is noticed.** The client took each
+  patch's version as it came, so a patch a socket dropped (under
+  backpressure, say) left the replica wrong for good: later reconnects
+  asked for a delta from after the gap. A patch whose version skips one
+  now sends a hello for a delta from the last version held, and patches
+  wait for its answer. A relay's patches (a `sharedConnection` tab),
+  whose versions do not count one per patch, are exempt
 
 ## [0.12.1] - 2026-09-12
 
