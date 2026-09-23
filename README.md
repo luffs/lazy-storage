@@ -364,7 +364,11 @@ that store (the socket stays up for the others), and `connection.close()`
 drops the socket for all of them. A client created with a `transport`
 instead of a `connection` owns a connection of its own, same protocol. While
 open, a connection pings every 30 seconds (`keepalive`, or `false`) so idle
-sockets survive proxies and server idle timeouts.
+sockets survive proxies and server idle timeouts, and drops and reopens a
+socket it has not heard from for two of those intervals (a half-open one
+that would otherwise stay `online` with nothing arriving). Reconnects back
+off with jitter, so a server restart does not bring every client back in
+the same instant.
 
 ### One socket per browser
 

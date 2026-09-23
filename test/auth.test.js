@@ -136,12 +136,41 @@ test('the connection pings while open and stops when closed', async () => {
   const connection = createConnection({ transport: link.factory, reconnect: false, keepalive: 10 });
   connection.connect();
   await net.settle();
-  await sleep(75);
-  await net.settle();
+  // Delivered as they come, as a socket would: pongs keep the socket alive
+  for (let i = 0; i < 8; i++) {
+    await sleep(10);
+    await net.settle();
+  }
   assert.ok(pings >= 3, `expected several pings, got ${pings}`);
+  assert.equal(connection.status, 'online', 'answered pings keep it up');
   connection.close();
   const after = pings;
   await sleep(50);
   await net.settle();
   assert.equal(pings, after, 'no pings after close');
+});
+
+test('a socket that stops answering is dropped by the next ping and reconnected', async () => {
+  let opened = 0;
+  let answering = true;
+  const net = createNetwork({
+    session: ({ send }) => {
+      opened++;
+      return { receive(msg) { if (msg.t === 'ping' && answering) send({ t: 'pong' }); }, close() {} };
+    }
+  });
+  const link = net.link();
+  const connection = createConnection({ transport: link.factory, reconnect: { min: 5, max: 5 }, keepalive: 10 });
+  const statuses = [];
+  connection.on('status', s => statuses.push(s));
+  connection.connect();
+  await net.settle();
+  answering = false;   // half-open: the socket still looks open, nothing comes back
+  for (let i = 0; i < 10; i++) {
+    await sleep(10);
+    await net.settle();
+  }
+  assert.ok(statuses.includes('offline'), `dropped: ${statuses.join(' ')}`);
+  assert.ok(opened >= 2, 'and opened again');
+  connection.close();
 });

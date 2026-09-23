@@ -78,6 +78,16 @@ All notable changes to lazy-storage are documented here. The format follows Keep
   never closed, stayed in presence, and kept the store from going idle
   (React StrictMode's double mount does this). A verdict for an attempt
   that was left is now ignored
+- **A dead socket is noticed.** The keepalive sent pings and discarded
+  the pongs, so a half-open socket (a network switch, a laptop waking)
+  stayed `online` while edits queued into nothing until the OS gave up
+  on it. A socket not heard from for two keepalive intervals (a minute
+  by default) is now dropped and reconnected. A server of your own must
+  answer `ping` with `pong`, as the hub and a store session do
+- **Reconnects are jittered.** The backoff doubled without randomness,
+  so a server that went away (a deploy closes every socket at once)
+  brought every client back in the same instant; each retry now waits
+  between half its delay and all of it
 
 ## [0.12.1] - 2026-09-12
 

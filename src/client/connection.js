@@ -31,8 +31,10 @@ const UNAUTHORIZED = 4401;
  * @param {{min: number, max: number}|false} [options.reconnect] - retry
  *   backoff after an unexpected close; false disables automatic reconnects
  * @param {number|false} [options.keepalive=30000] - ping interval in ms while
- *   open, so idle sockets survive proxies and server idle timeouts; false
- *   disables it
+ *   open, so idle sockets survive proxies and server idle timeouts, and a
+ *   dead one is noticed: a socket that has not been heard from (a pong or
+ *   anything else) for two intervals of pings is dropped and reconnected.
+ *   false disables both
  *
  * `status` is 'offline' | 'connecting' | 'online' — the socket's, `online`
  * meaning open. A client on it uses the same words, its `online` meaning
@@ -51,12 +53,30 @@ export function createConnection({ transport, reconnect = { min: 500, max: 10_00
   let keepaliveTimer = null;
   let dropping = false;   // inside dropped(): a connect() from a listener waits until everyone has heard
   let wanted = false;     // connect() was called while dropping
+  let heard = true;       // the socket has said something since the last ping
+  let silent = 0;         // intervals in a row it has not
 
   function startKeepalive() {
     stopKeepalive();
     if (!keepalive) return;
+    heard = true;
+    silent = 0;
     keepaliveTimer = setInterval(() => {
-      if (conn && status === 'online') conn.send({ t: 'ping' });
+      if (!conn || status !== 'online') return;
+      silent = heard ? 0 : silent + 1;
+      // Two intervals, not one: a pong can sit queued behind a timer that
+      // fires late after the page was busy
+      if (silent >= 2) {
+        // Silent since two pings: half-open (a network switch, a laptop
+        // waking) and nothing will ever arrive on it. Dropped as an
+        // unexpected close, so the reconnect follows
+        const c = conn;
+        dropped();
+        c.close();
+        return;
+      }
+      heard = false;
+      conn.send({ t: 'ping' });
     }, keepalive);
     // Never keep a Node process alive just for pings
     if (typeof keepaliveTimer?.unref === 'function') keepaliveTimer.unref();
@@ -143,7 +163,9 @@ export function createConnection({ transport, reconnect = { min: 500, max: 10_00
       for (const { handler, link } of [...handlers.values()]) tell('handler', () => handler.onOpen(link));
     };
     c.onmessage = msg => {
-      if (conn !== c || !Utils.isPlainObject(msg) || msg.t === 'pong') return;
+      if (conn !== c) return;
+      heard = true;
+      if (!Utils.isPlainObject(msg) || msg.t === 'pong') return;
       if (msg.store === undefined) {
         // About the socket itself: the server turning it away. Its close
         // follows in a moment; the socket is dropped here already so the
@@ -172,7 +194,9 @@ export function createConnection({ transport, reconnect = { min: 500, max: 10_00
 
   function scheduleRetry() {
     clearTimeout(retryTimer);
-    retryTimer = setTimeout(open, retryDelay);
+    // Jittered, half the delay to all of it: a server that went away drops
+    // every socket at once, and they should not all come back at once
+    retryTimer = setTimeout(open, retryDelay / 2 + Math.random() * (retryDelay / 2));
     retryDelay = Math.min(retryDelay * 2 || reconnect.min, reconnect.max);
   }
 
