@@ -17,6 +17,14 @@
 // localStorage adapter: the client keeps working from memory, and the
 // next snapshot replaces the rows wholesale.
 //
+// Another tab may close the database under us (its `destroy()`, or a
+// newer version of the app upgrading it): the connection is let go, and
+// the next write opens it again. When that finds the database gone and
+// made anew, what it held is lost, so the adapter tells `onReset`
+// listeners, and the client writes its whole state and every pending op
+// again: a reload must not come back from half the rows, or without the
+// edits it had not sent.
+//
 //   const db = await openClient({ store: 'team-1', storage: indexedDBStorage('app:team-1'), ... });
 //
 // Use one name per store (and per replica: a tab is a replica), and
@@ -46,19 +54,41 @@ export function indexedDBStorage(name = 'lazy-storage', {
   if (!idb) throw new TypeError('indexedDBStorage: no IndexedDB implementation available');
   let opening = null;
   let db = null;
+  let opened = 0;             // connections made so far
   const inFlight = new Set();
+  const resetListeners = new Set();
+
+  /** Let go of a connection that was closed under us, so the next write opens a new one */
+  const forget = d => {
+    if (db !== d) return;
+    db = null;
+    opening = null;
+  };
 
   const open = () => {
     opening ??= new Promise((resolve, reject) => {
       const request = idb.open(name, 1);
-      request.onupgradeneeded = () => {
+      let created = false;
+      request.onupgradeneeded = event => {
+        created = event.oldVersion === 0;
         const d = request.result;
         for (const store of STORES) if (!d.objectStoreNames.contains(store)) d.createObjectStore(store);
       };
       request.onsuccess = () => {
-        db = request.result;
-        db.onversionchange = () => db.close();
-        resolve(db);
+        const d = request.result;
+        db = d;
+        // Another tab deleting or upgrading the database: step aside, and reopen on the next write
+        d.onversionchange = () => {
+          d.close();
+          forget(d);
+        };
+        d.onclose = () => forget(d);
+        const lost = created && opened > 0;
+        opened++;
+        resolve(d);
+        // Made anew under us: what it held is gone (the writes waiting on
+        // this open go first; what the listeners write lands after them)
+        if (lost) for (const listener of resetListeners) listener();
       };
       request.onerror = () => reject(request.error);
     });
@@ -130,6 +160,15 @@ export function indexedDBStorage(name = 'lazy-storage', {
         stores.ops.delete(KeyRange.upperBound(seq));
         stores.meta.put(meta, META_KEY);
       });
+    },
+    /**
+     * `listener` is called when the database had to be made anew under us
+     * (another tab deleted it): the client writes everything again. Returns
+     * what stops it
+     */
+    onReset(listener) {
+      resetListeners.add(listener);
+      return () => resetListeners.delete(listener);
     },
     /** Resolves once every write issued so far has landed (or failed) */
     settled: () => Promise.all([...inFlight]).then(() => {}),

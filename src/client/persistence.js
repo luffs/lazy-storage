@@ -60,6 +60,17 @@ export const stateRows = (state, regs) => leaves(state, regs).map(([path, value]
  */
 export function createPersistence({ storage, cache, regs, state, meta, ops, onError, cacheDelay = 1000 }) {
   if (isRowAdapter(storage)) {
+    // The adapter lost what it held (IndexedDB deleted by another tab):
+    // everything is written again, the state's rows and every pending op
+    const stopReset = typeof storage.onReset === 'function' ? storage.onReset(() => {
+      const m = meta();
+      try {
+        if (cache) storage.replace({ rows: stateRows(LazyWatch.snapshot(state()), regs), meta: m });
+        for (const op of ops()) storage.saveOp(op, m);
+      } catch (err) {
+        onError(err);
+      }
+    }) : null;
     return {
       rows: true,
       /** A new op, after what it superseded in older ones: those rewritten, and the seqs of those emptied */
@@ -90,7 +101,9 @@ export function createPersistence({ storage, cache, regs, state, meta, ops, onEr
       /** The version moved without the state changing: the next drop or op carries it */
       version() {},
       flush() {},
-      dispose() {}
+      dispose() {
+        if (typeof stopReset === 'function') stopReset();
+      }
     };
   }
 

@@ -2,6 +2,21 @@
 
 All notable changes to lazy-storage are documented here. The format follows Keep a Changelog; versions follow Semantic Versioning.
 
+## [Unreleased]
+
+### Fixed
+
+- **IndexedDB storage no longer stops saving after another tab closes
+  the database.** The adapter closed its connection when another tab
+  deleted or upgraded the database, but kept handing out the closed one:
+  every later write failed into `onError`, offline edits included, until
+  a reload. It now lets go of a connection closed under it (by
+  `versionchange` or the browser's `close`) and opens a new one on the
+  next write. When that finds the database gone and made anew, it tells
+  the new `onReset` listeners, and the client writes its whole state and
+  every pending op again, so a reload does not come back from half the
+  rows or without the edits it had not sent
+
 ## [0.14.0] - 2026-09-23
 
 A replica now belongs to the user who first said hello with it, so a

@@ -221,6 +221,8 @@ export interface RowStorage {
   removeOp(seq: number, meta: ClientMeta): void;
   /** Remove every pending op up to and including `seq`, once acknowledged */
   dropOps(seq: number, meta: ClientMeta): void;
+  /** Optional: call `listener` when what the adapter held was lost (the client then writes everything again); returns what stops it */
+  onReset?(listener: () => void): () => void;
 }
 
 export type ClientStorage = DocumentStorage | RowStorage;

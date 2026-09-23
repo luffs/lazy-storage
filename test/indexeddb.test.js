@@ -103,3 +103,42 @@ test('a snapshot replaces the rows, and a closed adapter reopens for a later wri
   a.dispose();
   await seed.destroy();
 });
+
+test('a database another tab deleted is made anew and written whole again: every row, every pending op', async () => {
+  const store = createStore({ initial: INITIAL, registers: REGISTERS });
+  store.patch({ tasks: { a: { id: 'a', title: 'from the server' } } });
+  const net = createNetwork(store);
+  const link = net.link();
+  const errors = [];
+  const storage = indexedDBStorage('lazy-storage-reset', { onError: err => errors.push(err) });
+  const client = await openClient({ transport: link.factory, reconnect: false, store: 'main', initial: INITIAL, registers: REGISTERS, storage, replicaId: 'r' });
+  client.connect();
+  await net.settle();
+  link.goOffline();
+  await net.settle();
+  client.state.tasks.b = { id: 'b', title: 'offline one' };
+  await new Promise(resolve => setImmediate(resolve));
+  await storage.settled();
+
+  // Another tab deletes the database: this one steps aside, and it is gone
+  const other = indexedDBStorage('lazy-storage-reset');
+  await other.destroy();
+
+  client.state.tasks.c = { id: 'c', title: 'offline two' };   // the next write opens it anew
+  await new Promise(resolve => setImmediate(resolve));
+  await storage.settled();
+  await new Promise(resolve => setTimeout(resolve, 20));
+  await storage.settled();
+
+  const saved = await indexedDBStorage('lazy-storage-reset').load();
+  assert.ok(saved, 'there is a database again');
+  assert.deepEqual(saved.ops.map(op => op.seq), [1, 2], 'both pending ops, the one from before the deletion too');
+  assert.deepEqual(rebuild(INITIAL, saved.rows).tasks, {
+    a: { id: 'a', title: 'from the server' },
+    b: { id: 'b', title: 'offline one' },
+    c: { id: 'c', title: 'offline two' }
+  }, 'every row, not only the ones written since');
+  assert.deepEqual(errors, []);
+  client.dispose();
+  await storage.destroy();
+});
