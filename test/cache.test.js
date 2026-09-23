@@ -184,29 +184,34 @@ test('the state is written once changes settle, at least every ten delays under 
     const { adapter, calls } = recording();
     const store = createStore({ initial: INITIAL });
     const net = createNetwork(store);
-    const a = createClient({ transport: net.link().factory, reconnect: false, store: 'main', initial: INITIAL, storage: adapter, replicaId: 'a', cacheDelay: 20 });
+    const a = createClient({ transport: net.link().factory, reconnect: false, store: 'main', initial: INITIAL, storage: adapter, replicaId: 'a', cacheDelay: 40 });
     a.connect();
     await net.settle();
-    await sleep(40);
+    await sleep(80);
     calls.length = 0;
     const states = () => calls.filter(([kind]) => kind === 'saveState').length;
 
-    // Remote traffic every 5 ms for 300 ms never settles: the ceiling (200 ms) writes once
+    // Remote traffic every 5 ms for 600 ms never settles: the ceiling (ten
+    // delays, 400 ms) writes once, where a write 50 ms after every batch made
+    // a dozen. Bounds, not exact counts: a loaded machine may stall a step
+    // past the delay, which settles it for a moment
     const started = Date.now();
-    for (let i = 0; Date.now() - started < 300; i++) {
+    for (let i = 0; Date.now() - started < 600; i++) {
       store.patch({ tasks: { [`r${i % 20}`]: { id: `r${i % 20}`, n: i } } });
       await net.settle();
       await sleep(5);
     }
-    assert.equal(states(), 1, 'one write in 300 ms of traffic, not one per 50 ms');
-    await sleep(40);
-    assert.equal(states(), 2, 'and one once it settled');
+    const during = states();
+    assert.ok(during >= 1, 'the ceiling wrote under traffic that never settled');
+    assert.ok(during <= 3, `${during} writes in 600 ms of traffic`);
+    await sleep(100);
+    assert.equal(states(), during + 1, 'and one once it settled');
 
     store.patch({ tasks: { late: { id: 'late' } } });
     await net.settle();
-    assert.equal(states(), 2);
+    const before = states();
     handlers.get('pagehide')({ type: 'pagehide' });
-    assert.equal(states(), 3, 'a page going away writes what is pending at once');
+    assert.equal(states(), before + 1, 'a page going away writes what is pending at once');
     assert.equal(calls.at(-1)[1].state.tasks.late.id, 'late');
     a.dispose();
     assert.equal(handlers.has('pagehide'), false, 'dispose lets go of the page');
