@@ -347,7 +347,8 @@ test('a client with presence: false is sent no presence, has no peers, but is a 
 });
 
 test('a share draws on the replica\'s rate limit like an op: beyond it, refused with rate-limited, and the next hello carries the latest', async () => {
-  const store = createStore({ initial: INITIAL, presence: true, rateLimit: { burst: 2, perSecond: 50 } });
+  // Three tokens: the hello takes one, two shares the rest
+  const store = createStore({ initial: INITIAL, presence: true, rateLimit: { burst: 3, perSecond: 50 } });
   const net = createNetwork(store);
   const a = net.client({ replicaId: 'a', initial: INITIAL }, { user: { id: 'u1' } });
   const b = net.client({ replicaId: 'b', initial: INITIAL }, { user: { id: 'u2' } });

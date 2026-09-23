@@ -503,7 +503,7 @@ sessions yourself), which powers two more features:
   it, and the hello carries it, so a reconnect restores it. Shared data
   is never written to the store; it lives as long as the session and
   goes out as it changes (throttle a cursor yourself: a share draws on
-  the replica's `rateLimit` bucket like an op, and beyond it is refused
+  the user's `rateLimit` bucket like an op, and beyond it is refused
   with `rate-limited`, the client's next hello carrying its latest value
   instead). It must be JSON
   within `presence.maxShare` bytes (default 4096), and
@@ -594,8 +594,9 @@ A public server needs a few ceilings, all on by default:
 
 - **Message size.** `maxPayload` on the Bun adapter (default 4 MB) is the
   largest message a socket may send; Bun ends a socket that exceeds it. A
-  hello carries at most 1000 ops, the rest following as ordinary ops once
-  the answer lands, so a long offline spell stays well under it.
+  hello carries at most 1000 ops (the server merges no more), the rest
+  following in the next hello once the answer lands, so a long offline
+  spell stays well under it.
 - **Compression.** Both adapters offer the permessage-deflate extension
   by default, and a client that takes it (browsers do) receives large
   messages compressed: the JSON of a big store shrinks about tenfold
@@ -650,12 +651,16 @@ A public server needs a few ceilings, all on by default:
 - **Op size.** `maxLeaves` on the store (default 10 000) is the most leaves
   one op may touch; a larger one is refused with code `too-large`, and
   the client drops it and resyncs.
-- **Op rate.** `rateLimit` on the store is a token bucket per replica,
-  `{ burst: 500, perSecond: 100 }` by default. A live op beyond it is
-  refused with code `rate-limited` and a `retryAfter` in milliseconds;
-  the client keeps the op and resends its outbox in a hello after that,
-  so nothing is lost and a runaway client is throttled rather than
-  broken. Ops inside a hello are not counted. `false` turns it off.
+- **Op rate.** `rateLimit` on the store is a token bucket per user (by
+  presence's `key`, so minting replica ids does not refill it; per
+  replica for a session without a user), `{ burst: 500, perSecond: 100 }`
+  by default. A live op beyond it is refused with code `rate-limited` and
+  a `retryAfter` in milliseconds, and so is every later live op of that
+  session until its next hello; the client stops sending, keeps the ops,
+  and resends its outbox in a hello after `retryAfter`, in order, so
+  nothing is lost and a runaway client is throttled rather than broken.
+  A hello costs one token and the ops inside it are not counted. `false`
+  turns it off.
 - **Presence rate.** Presence is off unless a store asks for it. On, it
   travels as deltas, one small message to every session per change,
   batched per turn of the event loop; `presence.every` (milliseconds,
@@ -909,7 +914,7 @@ without help from the app, which only hears an `error` event:
 | `forbidden` | A leaf under a read-only path, or `validate` refused | Same |
 | `expired` | Stamped before the retention window | Same |
 | `too-large` | More leaves than `maxLeaves` | Same |
-| `rate-limited` | Beyond the replica's token bucket; `retryAfter` says how long in ms | Keeps the op and resends its outbox in a hello after `retryAfter` |
+| `rate-limited` | Beyond the user's token bucket, or after such a refusal and before the next hello; `retryAfter` says how long in ms | Keeps the op, sends nothing more live, and resends its outbox in a hello after `retryAfter` |
 | `clock-skew` | Stamped more than `maxSkew` ahead of the server's clock; `now` is the server's time, `ts` the refused stamp | Adopts the server's time, re-stamps the pending ops, sends them again; no error reaches the app |
 
 ### Closed codes

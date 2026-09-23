@@ -45,7 +45,8 @@ test('an op touching more leaves than maxLeaves is refused with too-large; the c
 
 test('a replica past its rate limit is refused without losing anything: the client resends its outbox after retryAfter', async () => {
   const time = fakeTime(START);
-  const { store, net } = setup({ now: time, rateLimit: { burst: 3, perSecond: 10 } });
+  // Four tokens: the hello takes one, three ops the rest
+  const { store, net } = setup({ now: time, rateLimit: { burst: 4, perSecond: 10 } });
   const a = net.client({ replicaId: 'a', initial: INITIAL, now: fakeTime(START) });
   const b = net.client({ replicaId: 'b', initial: INITIAL, now: fakeTime(START) });
   await net.settle();
@@ -57,8 +58,8 @@ test('a replica past its rate limit is refused without losing anything: the clie
     await net.settle();
   }
   assert.deepEqual(Object.keys(store.snapshot().tasks), ['t1', 't2', 't3'], 'the bucket held three');
-  assert.deepEqual(errors, [['rate-limited', 'Too many ops; try again in 100 ms'], ['rate-limited', 'Too many ops; try again in 100 ms']]);
-  assert.equal(a.pending, 2, 'the refused ops stay in the outbox');
+  assert.deepEqual(errors, [['rate-limited', 'Too many ops; try again in 100 ms']], 'after a refusal nothing more goes live until the retry');
+  assert.equal(a.pending, 2, 'the refused op and the one held back stay in the outbox');
   assert.deepEqual(Object.keys(a.state.tasks), ['t1', 't2', 't3', 't4', 't5'], 'and in the local state');
   assert.equal(a.status, 'online');
 
@@ -70,7 +71,7 @@ test('a replica past its rate limit is refused without losing anything: the clie
   assert.equal(a.pending, 0);
   assert.deepEqual(Object.keys(store.snapshot().tasks).sort(), ['from-b', 't1', 't2', 't3', 't4', 't5']);
   assert.deepEqual(Object.keys(a.state.tasks).sort(), ['from-b', 't1', 't2', 't3', 't4', 't5']);
-  assert.equal(errors.length, 2, 'the hello that resent them was not throttled');
+  assert.equal(errors.length, 1, 'the hello that resent them was not throttled');
 });
 
 test('rateLimit: false turns the limit off; a bad rateLimit is refused up front', async () => {
@@ -86,7 +87,7 @@ test('rateLimit: false turns the limit off; a bad rateLimit is refused up front'
   assert.throws(() => createStore({ initial: INITIAL, rateLimit: { burst: 0, perSecond: 1 } }), /positive burst/);
 });
 
-test('a hello carries at most 1000 ops; the rest follow as ops once the answer lands, and every one is accepted', async () => {
+test('a hello carries at most 1000 ops; the rest follow in the next hello, and every one is accepted', async () => {
   const { store, net, received } = setup({ rateLimit: false });
   const link = net.link();
   const a = createClient({ transport: link.factory, reconnect: false, store: 'main', initial: INITIAL, replicaId: 'a' });
@@ -97,10 +98,63 @@ test('a hello carries at most 1000 ops; the rest follow as ops once the answer l
   assert.equal(a.pending, 1005);
   a.connect();
   await net.settle();
-  const hello = received.find(m => m.t === 'hello');
-  assert.equal(hello.ops.length, 1000);
-  assert.equal(received.filter(m => m.t === 'op').length, 5, 'the remaining five went as ops');
+  const hellos = received.filter(m => m.t === 'hello');
+  assert.deepEqual(hellos.map(h => h.ops.length), [1000, 5], 'the remaining five went in a second hello');
+  assert.equal(received.filter(m => m.t === 'op').length, 0, 'none live, where the rate limit would meet them');
   assert.equal(a.pending, 0);
   assert.equal(Object.keys(store.snapshot().tasks).length, 1005);
   assert.equal(a.status, 'online');
+});
+
+test('a rate-limited op is never overtaken: a later op waits for the retry hello, so the refused one is not lost as a duplicate', async () => {
+  const time = fakeTime(START);
+  const { store, net, received } = setup({ now: time, rateLimit: { burst: 2, perSecond: 10 } });
+  const a = net.client({ replicaId: 'a', initial: INITIAL, now: fakeTime(START) });
+  await net.settle();                        // the hello took a token
+  a.collection('tasks').add({ id: 't1' });   // the last token
+  a.collection('tasks').add({ id: 't2' });   // refused
+  await net.settle();
+  time.advance(500);                         // the bucket is full again
+  a.collection('tasks').add({ id: 't3' });   // would be accepted as seq 3, making seq 2 a duplicate
+  await net.settle();
+  assert.equal(received.filter(m => m.t === 'op').length, 2, 't3 was held back');
+  await sleep(150);                          // the retry hello
+  await net.settle();
+  assert.deepEqual(Object.keys(store.snapshot().tasks).sort(), ['t1', 't2', 't3']);
+  assert.equal(a.pending, 0);
+});
+
+test('the store refuses every live op after a rate-limit refusal until the next hello, whatever the bucket holds by then', () => {
+  const time = fakeTime(START);
+  const store = createStore({ initial: INITIAL, now: time, rateLimit: { burst: 2, perSecond: 10 } });
+  const sent = [];
+  const s = store.session({ send: m => sent.push(m) });
+  const op = (seq, id) => ({ t: 'op', op: { replicaId: 'r', seq, ts: [time(), 0, 'r'], diff: { tasks: { [id]: { id } } } } });
+  s.receive({ t: 'hello', replicaId: 'r', ops: [] });
+  s.receive(op(1, 'a'));
+  s.receive(op(2, 'b'));
+  assert.equal(sent.at(-1).code, 'rate-limited');
+  time.advance(10_000);
+  s.receive(op(3, 'c'));
+  assert.equal(sent.at(-1).code, 'rate-limited', 'held until the hello, though the bucket is full');
+  s.receive({ t: 'hello', replicaId: 'r', ops: [op(2, 'b').op, op(3, 'c').op] });
+  assert.deepEqual(Object.keys(store.snapshot().tasks).sort(), ['a', 'b', 'c']);
+  store.dispose();
+});
+
+test('the rate limit follows the user, not the replica id, and a hello carries at most 1000 ops', () => {
+  const time = fakeTime(START);
+  const store = createStore({ initial: INITIAL, now: time, rateLimit: { burst: 3, perSecond: 1 } });
+  const sent = [];
+  for (let i = 0; i < 4; i++) store.session({ send: m => sent.push(m), user: { id: 'mallory' } }).receive({ t: 'hello', replicaId: `fresh-${i}`, ops: [] });
+  assert.equal(sent.at(-1).code, 'rate-limited', 'minting replica ids does not refill the bucket');
+
+  const big = createStore({ initial: INITIAL, now: time, rateLimit: false });
+  const out = [];
+  const ops = Array.from({ length: 1200 }, (_, i) => ({ replicaId: 'r', seq: i + 1, ts: [time(), i, 'r'], diff: { tasks: { [`t${i}`]: { id: `t${i}` } } } }));
+  big.session({ send: m => out.push(m) }).receive({ t: 'hello', replicaId: 'r', ops });
+  assert.equal(out.at(-1).seq, 1000, 'the server merged the first 1000; the client sends the rest next');
+  assert.equal(Object.keys(big.snapshot().tasks).length, 1000);
+  store.dispose();
+  big.dispose();
 });

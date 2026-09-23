@@ -30,6 +30,27 @@ All notable changes to lazy-storage are documented here. The format follows Keep
   and the store's own writes lost to themselves until the wall clock
   caught up. `isTimestamp` now wants a counter below 2^32 (`MAX_COUNT`
   in core) and a non-negative millisecond
+- **The rate limit follows the user.** The token bucket was keyed on the
+  replica id the client chose, so a client could shed its limit by
+  minting ids; it is now keyed on the user (presence's `key`), or the
+  replica for a session without a user. A hello costs one token (its ops
+  still ride free), so hellos cannot be replayed in a loop, and the
+  server merges at most 1000 ops of one hello (`HELLO_OPS`), as the
+  client already sent
+
+### Fixed
+
+- **A rate-limited op could be lost.** After a refusal the client kept
+  sending new ops live; once the bucket refilled, a later op was
+  accepted, and the server then ignored the refused one as a duplicate
+  when the retry hello resent it, while the ack of the later op dropped
+  it from the outbox. The store now refuses every live op of a session
+  after a rate-limit refusal until its next hello, and the client sends
+  nothing live until that hello, which resends the outbox in order. A
+  long offline spell hit the same path, since the ops beyond the
+  hello's 1000 went live: they now follow in another hello, the store
+  saying `connecting` until it has them all. A hello refused for the
+  rate is retried after `retryAfter` too
 
 ## [0.12.1] - 2026-09-12
 

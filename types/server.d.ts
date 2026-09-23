@@ -154,7 +154,7 @@ export interface StoreOptions<S extends object = any> {
   deltaLog?: number;
   /** The most leaves one client op may touch; default 10 000 */
   maxLeaves?: number;
-  /** Live ops a replica may send; default `{ burst: 500, perSecond: 100 }`, false disables */
+  /** Live ops a user may send (per replica without a user), a hello costing one; default `{ burst: 500, perSecond: 100 }`, false disables */
   rateLimit?: RateLimit | false;
   storage?: ServerStorage;
   /**

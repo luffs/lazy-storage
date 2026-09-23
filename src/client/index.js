@@ -195,6 +195,8 @@ function build({
   let shared;             // what this client shares with them (undefined: nothing)
   let ended = null;       // { code, message } after the server closed this store for us
   let retryTimer = null;  // a hello scheduled after a rate-limit refusal
+  let throttled = false;  // refused for the rate: nothing goes live until that hello, which resends in order
+  let helloCut = false;   // the last hello left part of the outbox out: the next hello carries it
 
   const persistence = createPersistence({
     storage,
@@ -404,7 +406,7 @@ function build({
     outbox.push(op);
     persistence.op(op, superseded);
     persistence.batch(expanded, meta);
-    if (linked() && synced) link.send({ t: 'op', op });
+    if (linked() && synced && !throttled) link.send({ t: 'op', op });
     emit('sync');
     // The undo manager listens ahead of this, so the batch is in history by now
     if (undoManager) emit('history', history());
@@ -427,6 +429,8 @@ function build({
    */
   function hello({ full = false } = {}) {
     const message = { t: 'hello', replicaId, ops: outbox.slice(0, HELLO_LIMIT) };
+    helloCut = outbox.length > HELLO_LIMIT;
+    throttled = false;
     if (!full) Object.assign(message, { since: known.v, epoch: known.epoch });
     if (shared !== undefined) message.share = shared;
     if (!wantsPresence) message.presence = false;
@@ -459,11 +463,21 @@ function build({
     if (Number.isInteger(msg.v)) known = { epoch: typeof msg.epoch === 'string' ? msg.epoch : null, v: msg.v };
     acknowledge(msg.seq);
     applyServerState();
+    // What the hello left out goes in the next hello, not as live ops: a
+    // backlog sent live would run into the rate limit, and the store stays
+    // 'connecting' until it has everything (live sends wait on `synced`,
+    // so nothing overtakes the backlog)
+    const more = helloCut && outbox.length > 0;
     for (const op of outbox) {
       LazyWatch.patch(state, op.diff, REMOTE);
-      link.send({ t: 'op', op });
+      if (!more) link.send({ t: 'op', op });
     }
     persistence.version();
+    if (more) {
+      hello();
+      emit('sync');
+      return;
+    }
     synced = true;
     refreshStatus();
     emit('sync');
@@ -558,12 +572,15 @@ function build({
         if (msg.code) err.code = msg.code;
         emit('error', err);
         if (msg.code === 'rate-limited') {
-          // Nothing is dropped: the op stays in the outbox and a hello after
-          // the server's retryAfter resends everything still pending
+          // Nothing is dropped: the op stays in the outbox, nothing more goes
+          // live (the server refuses it anyway until the hello), and a hello
+          // after the server's retryAfter resends everything still pending,
+          // in order. A refused hello (no seq) is retried the same way
+          if (Number.isInteger(msg.seq)) throttled = true;
           if (retryTimer) return;
           retryTimer = setTimeout(() => {
             retryTimer = null;
-            if (synced) hello();
+            if (linked()) hello();
           }, Number.isInteger(msg.retryAfter) ? msg.retryAfter : 1000);
           if (typeof retryTimer?.unref === 'function') retryTimer.unref();
           return;
@@ -605,7 +622,7 @@ function build({
       restamped.set(op.seq, attempts);
       persistence.op(op);
     }
-    if (synced) for (const op of behind) link.send({ t: 'op', op });
+    if (synced && !throttled) for (const op of behind) link.send({ t: 'op', op });
     return true;
   }
 

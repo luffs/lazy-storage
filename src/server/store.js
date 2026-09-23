@@ -95,6 +95,9 @@ const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
 
+/** The most ops one hello carries; the client sends the rest once it is answered */
+export const HELLO_OPS = 1000;
+
 /** A client op the store would not merge; `code` travels to the client */
 /** The `presence` option as the store uses it: null when off, else its hooks and limits with the defaults filled in */
 function presenceOptions(presence) {
@@ -175,12 +178,14 @@ const defaultPresenceKey = user =>
  * @param {number} [options.maxLeaves=10000] - the most leaves one client op
  *   may touch; a larger one is refused with code 'too-large'
  * @param {{ burst: number, perSecond: number }|false} [options.rateLimit] -
- *   live ops a replica may send: a token bucket holding `burst` tokens,
- *   refilled at `perSecond` (default 500 and 100). An op beyond it is
+ *   live ops a user may send: a token bucket holding `burst` tokens,
+ *   refilled at `perSecond` (default 500 and 100), per user (by presence's
+ *   key), or per replica for a session without a user. An op beyond it is
  *   refused with code 'rate-limited' and a `retryAfter` in ms; the client
- *   keeps the op and resends its outbox in a hello after that. Ops in a
- *   hello are not counted (they are bounded by the payload limit). `false`
- *   disables
+ *   keeps the op and resends its outbox in a hello after that. A hello and
+ *   a share cost one token each; the ops inside a hello are not counted,
+ *   and a hello carries at most HELLO_OPS of them (the rest wait for the
+ *   next). `false` disables
  * @param {Object} [options.storage] - a storage adapter (default: memory)
  * @param {boolean|Object} [options.presence=false] - whether sessions
  *   learn of each other. Off, nothing is broadcast, `presence()` and
@@ -715,6 +720,13 @@ export function createStore({
     return null;
   }
 
+  /**
+   * The rate-limit bucket a session draws on: its user's, so a client
+   * cannot shed its limit by minting replica ids, or the replica's for a
+   * session without a user
+   */
+  const bucketOf = (s, replicaId) => (s.user === undefined ? `r:${replicaId}` : `u:${ownerKey(s.user)}`);
+
   /** What a replica's user is told apart by: presence's key when set, else the default */
   const ownerKey = user => (user === undefined ? undefined : (pres?.key ?? defaultPresenceKey)(user));
 
@@ -729,6 +741,7 @@ export function createStore({
       fetch: false,          // whether its hello said it can fetch a snapshot over HTTP
       replicaId: null,       // set by the hello: the replica presence knows it as
       speaksFor: null,       // the replica its ops must come from, fixed by its hello or its first op
+      heldUntil: null,       // after a rate-limit refusal: live ops are refused until the next hello
       shared: undefined,     // what this session shares with its peers, and its JSON
       sharedJson: undefined,
       presence: true,        // whether it wants to hear of its peers (its hello may say no)
@@ -739,7 +752,13 @@ export function createStore({
             if (typeof msg.replicaId !== 'string' || !msg.replicaId) return send({ t: 'error', message: 'hello requires a replicaId' });
             const claim = claimReplica(s, msg.replicaId);
             if (claim) return send({ t: 'error', ...claim });
+            // A hello costs a token: its ops ride free, so a reconnect after
+            // a long offline spell is not throttled, but a client cannot
+            // replay hellos in a loop
+            const wait = throttle(bucketOf(s, msg.replicaId));
+            if (wait > 0) return send({ t: 'error', code: 'rate-limited', message: `Too many hellos; try again in ${wait} ms`, retryAfter: wait });
             s.speaksFor = msg.replicaId;
+            s.heldUntil = null;
             const joined = !s.replicaId;
             s.replicaId = msg.replicaId;
             if (msg.presence === false) s.presence = false;
@@ -754,7 +773,8 @@ export function createStore({
             }
             let refused = false;
             const lost = [];
-            for (const op of Array.isArray(msg.ops) ? msg.ops : []) {
+            // The client sends its first HELLO_OPS and the rest once this is answered
+            for (const op of Array.isArray(msg.ops) ? msg.ops.slice(0, HELLO_OPS) : []) {
               try {
                 lost.push(...apply(op, s).rejected);
               } catch (err) {
@@ -784,7 +804,7 @@ export function createStore({
               // A share draws on the same bucket as an op, so a client
               // cannot flood the room through presence; the refused one is
               // not lost, since the client's next hello carries its latest
-              const wait = s.replicaId ? throttle(s.replicaId) : 0;
+              const wait = s.replicaId ? throttle(bucketOf(s, s.replicaId)) : 0;
               if (wait > 0) throw new RefusedError('rate-limited', `Too many shares; try again in ${wait} ms`, { retryAfter: wait });
               if (setShared(s, msg.data) && s.replicaId) noteChange(s, 'share');
             } catch (err) {
@@ -797,8 +817,16 @@ export function createStore({
           case 'op': {
             try {
               const replica = Utils.isPlainObject(msg.op) ? msg.op.replicaId : undefined;
-              const wait = typeof replica === 'string' ? throttle(replica) : 0;
+              // Once an op is refused for the rate, every later live op is
+              // too, until the hello that resends them in order: a later op
+              // accepted first would make the refused one a duplicate, lost
+              if (s.heldUntil !== null) {
+                const wait = Math.max(1, s.heldUntil - time());
+                throw new RefusedError('rate-limited', `Waiting for a hello after a refusal; try again in ${wait} ms`, { retryAfter: wait });
+              }
+              const wait = typeof replica === 'string' ? throttle(bucketOf(s, replica)) : 0;
               if (wait > 0) {
+                s.heldUntil = time() + wait;
                 throw new RefusedError('rate-limited', `Too many ops; try again in ${wait} ms`, { retryAfter: wait });
               }
               const result = apply(msg.op, s);
