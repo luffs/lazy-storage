@@ -2,7 +2,28 @@
 
 All notable changes to lazy-storage are documented here. The format follows Keep a Changelog; versions follow Semantic Versioning.
 
-## [Unreleased]
+## [0.14.0] - 2026-09-23
+
+A replica now belongs to the user who first said hello with it, so a
+teammate's replica id seen in presence can no longer be used to lock
+them out of a store (found by a new hostile-client fuzzer). The client
+got much faster where apps feel it: a remote move no longer freezes a
+large list view, a push or move on one no longer resyncs every record,
+React components can select what they read (`useClientSelector`), Vue
+components share one mirror, and the state cache and offline outbox stop
+rewriting everything. What an upgrade may need:
+
+- A browser where someone else signs in with the last user's storage
+  gets `replica-taken`: key client storage by user
+- The Vue mirror is read-only; write to `db.state` (a write to the mirror
+  only ever changed that component's copy)
+- `localStorageOutbox` keeps its outbox op by op; one written by an
+  earlier version is taken over on load, but a client of an earlier
+  version cannot read the new form, so pending edits wait for this
+  version after a downgrade
+- The state cache of a document adapter is written once changes settle
+  (`cacheDelay`, default a second), not 50 ms after every batch
+- Requires lazy-watch 6.4.0
 
 ### Changed
 
