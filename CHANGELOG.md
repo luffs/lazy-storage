@@ -16,6 +16,20 @@ All notable changes to lazy-storage are documented here. The format follows Keep
   the new `onReset` listeners, and the client writes its whole state and
   every pending op again, so a reload does not come back from half the
   rows or without the edits it had not sent
+- **A replica whose storage cannot be opened no longer strands every
+  tab.** When the leader's `storage(store)` failed to load (IndexedDB
+  refused, a quota), the store's entry was dropped with the hellos queued
+  on it, and every tab stayed `connecting` until the leader changed. The
+  replica now runs from memory instead, and every tab hears an `error`
+  with code `storage-unavailable`: edits sync, but do not outlive the
+  browser session. The relay also no longer loads a replica's storage
+  twice (an IndexedDB read of every row, twice, at each handover)
+- **A follower's edit is acknowledged once the replica has stored it.**
+  The leader acknowledged a follower tab's op the moment it arrived, and
+  the follower dropped it from its outbox; with storage that writes
+  asynchronously (IndexedDB), a leader tab killed before the write landed
+  took the only copy. The acknowledgement, and the answer to a hello
+  carrying ops, now wait for the replica's storage to settle
 
 ## [0.14.0] - 2026-09-23
 

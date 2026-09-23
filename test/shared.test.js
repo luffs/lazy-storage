@@ -497,3 +497,59 @@ test('the socket turned away reaches every tab once, and a tab that signs in aga
   assert.equal(a.db.closed, null);
   assert.equal(c.db.closed, null);
 });
+
+test('storage that cannot be opened leaves no tab stranded: the replica runs from memory and every tab is told', async t => {
+  const store = createStore({ initial: INITIAL });
+  const net = createNetwork(store);
+  const failures = [];
+  const broken = () => ({
+    load: () => Promise.reject(new Error('quota exceeded')),
+    commit() {}, replace() {}, saveOp() {}, removeOp() {}, dropOps() {}
+  });
+  const b = browser(net, { storage: broken, onError: err => failures.push(err.message) });
+  t.after(() => b.close());
+  const a = b.tab('a');
+  const c = b.tab('c');
+  const heard = { a: [], c: [] };
+  a.db.on('error', err => heard.a.push(err.code));
+  c.db.on('error', err => heard.c.push(err.code));
+  await b.until(() => a.db.status === 'online' && c.db.status === 'online', 'both tabs online, not stuck connecting');
+  assert.deepEqual(failures, ['quota exceeded']);
+  a.db.state.tasks.x = { id: 'x', title: 'kept in memory' };
+  await b.until(() => c.db.state.tasks.x && store.snapshot().tasks.x, 'edits still sync');
+  assert.ok(heard.a.includes('storage-unavailable') || heard.c.includes('storage-unavailable'), 'the tabs hear why');
+});
+
+test('a follower\'s op is acknowledged once the replica has stored it, not before', async t => {
+  const store = createStore({ initial: INITIAL });
+  const net = createNetwork(store);
+  let release;
+  let gate = Promise.resolve();
+  const slow = () => {
+    const inner = memoryOutbox();
+    return { ...inner, settled: () => gate };   // storage whose writes land when the gate opens
+  };
+  const posted = [];
+  const channel = name => {
+    const ch = new BroadcastChannel(name);
+    const post = ch.postMessage.bind(ch);
+    ch.postMessage = message => { posted.push(message); post(message); };
+    return ch;
+  };
+  const b = browser(net, { storage: slow, channel });
+  t.after(() => b.close());
+  const a = b.tab('a');
+  const c = b.tab('c');
+  await b.until(() => a.db.status === 'online' && c.db.status === 'online', 'both online');
+  const follower = a.connection.leader ? c : a;
+  const acks = () => posted.filter(m => m.kind === 'down' && m.to === follower.id && m.message?.t === 'ack').length;
+
+  gate = new Promise(resolve => { release = resolve; });
+  const before = acks();
+  follower.db.state.tasks.y = { id: 'y' };
+  await b.until(() => store.snapshot().tasks.y, 'the op reached the replica and the server');
+  await sleep(20);
+  assert.equal(acks(), before, 'no acknowledgement while the replica\'s write is in flight');
+  release();
+  await b.until(() => acks() === before + 1, 'acknowledged once it landed');
+});

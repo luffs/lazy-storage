@@ -417,10 +417,10 @@ function createRelay({ tabId, transport, storage, reconnect, keepalive, infos, l
     entries.set(store, entry);
     const adapter = storage(store);
     entry.adapter = adapter;
-    const options = { connection: socket, store, initial: structuredClone(info.initial), registers: info.registers, storage: adapter, undo: false };
-    const ready = (saved, client) => {
+    const options = { connection: socket, store, initial: structuredClone(info.initial), registers: info.registers, undo: false };
+    const ready = (saved, client, persisted = true) => {
       if (entries.get(store) !== entry) return void client.dispose();   // let go while it was opening
-      if (!saved) persistIdentity(adapter, client);
+      if (!saved && persisted) persistIdentity(adapter, client);
       entry.client = client;
       // Over a copy: a follower told may leave and come back from inside the event, which must not have it told again
       const all = message => { for (const s of [...entry.sessions.values()]) send(s.tab, { ...message, store }); };
@@ -439,17 +439,43 @@ function createRelay({ tabId, transport, storage, reconnect, keepalive, infos, l
       entry.queue = [];
       for (const [tab, message] of queued) relay.receive(tab, message);
     };
+    // Storage that cannot be opened (IndexedDB refused, a quota, a broken
+    // adapter) must not strand the tabs waiting on this store: the replica
+    // runs from memory instead, and every tab hears why its edits will not
+    // outlive the browser session
+    const inMemory = err => {
+      onError(err);
+      // Gone, or the client is up already (what threw came after it): nothing to stand in for
+      if (entries.get(store) !== entry || entry.client) return;
+      entry.adapter = null;
+      ready(null, createClient({ ...options, storage: memoryOutbox() }), false);
+      const warning = { t: 'error', store, code: 'storage-unavailable', message: `The browser's storage for "${store}" could not be opened (${err?.message ?? err}); edits are kept in memory only` };
+      for (const s of entry.sessions.values()) send(s.tab, warning);
+      entry.warning = warning;   // for a tab that says hello later
+    };
     // The leader's lock already makes it the one tab on this storage: a
     // lease a crashed leader left behind must not turn it away
     if (typeof adapter.takeOver === 'function') adapter.takeOver();
-    const loaded = adapter.load();
+    let loaded;
+    try {
+      loaded = adapter.load();
+    } catch (err) {
+      inMemory(err);
+      return entry;
+    }
+    // The client loads from what was just loaded rather than loading it all
+    // again (an IndexedDB read of every row): the adapter, with that load
+    const loadedOnce = Object.create(adapter);
+    loadedOnce.load = () => loaded;
+    options.storage = loadedOnce;
     if (loaded && typeof loaded.then === 'function') {
-      loaded.then(saved => openClient(options).then(client => ready(saved, client))).catch(err => {
-        onError(err);
-        entries.delete(store);
-      });
+      loaded.then(saved => openClient(options).then(client => ready(saved, client))).catch(inMemory);
     } else {
-      ready(loaded, createClient(options));
+      try {
+        ready(loaded, createClient(options));
+      } catch (err) {
+        inMemory(err);
+      }
     }
     return entry;
   }
@@ -475,6 +501,21 @@ function createRelay({ tabId, transport, storage, reconnect, keepalive, infos, l
     entry.client?.dispose();
     // An adapter holding a connection open (IndexedDB) lets it go with the store
     if (typeof entry.adapter?.close === 'function') entry.adapter.close();
+  }
+
+  /**
+   * Run `then` once what the replica has been handed so far is in its
+   * storage: its batch closed now (so the op exists and is written), and,
+   * with storage that writes asynchronously (IndexedDB), those writes
+   * settled. A follower drops an op when it is acknowledged, so the
+   * acknowledgement waits: a leader tab killed in between would otherwise
+   * take the only copy with it
+   */
+  function durable(entry, then) {
+    LazyWatch.flush(entry.client.wire);
+    const settled = typeof entry.adapter?.settled === 'function' ? entry.adapter.settled() : null;
+    if (settled && typeof settled.then === 'function') settled.then(then, then);
+    else then();
   }
 
   /** Apply a follower's op to the replica (once per seq): a register it writes is replaced, as the server would */
@@ -527,12 +568,20 @@ function createRelay({ tabId, transport, storage, reconnect, keepalive, infos, l
           if (client.closed) client.connect();
           for (const op of Array.isArray(message.ops) ? message.ops : []) apply(entry, session, op);
           if (message.share !== undefined) client.share(message.share);
-          send(tab, { t: 'snapshot', store, state: LazyWatch.snapshot(client.wire), ts: clock.now(), seq: session.lastSeq, registers: entry.registers, v: client.version, epoch: null });
-          if (session.presence) send(tab, { t: 'presence', store, peers: client.peers });
+          if (entry.warning) send(tab, entry.warning);
+          // The answer acknowledges the hello's ops: sent once they are stored
+          durable(entry, () => {
+            if (entry.sessions.get(tab) !== session) return;
+            send(tab, { t: 'snapshot', store, state: LazyWatch.snapshot(client.wire), ts: clock.now(), seq: session.lastSeq, registers: entry.registers, v: client.version, epoch: null });
+            if (session.presence) send(tab, { t: 'presence', store, peers: client.peers });
+          });
           return;
         case 'op':
           apply(entry, session, message.op);
-          if (Utils.isPlainObject(message.op)) send(tab, { t: 'ack', store, seq: message.op.seq, ts: clock.now(), correction: null });
+          if (Utils.isPlainObject(message.op)) {
+            const { seq } = message.op;
+            durable(entry, () => send(tab, { t: 'ack', store, seq, ts: clock.now(), correction: null }));
+          }
           return;
         case 'share':
           client.share(message.data ?? null);
