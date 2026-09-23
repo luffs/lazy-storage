@@ -40,12 +40,22 @@ export function registerSet(specs = []) {
   };
 }
 
-/** Set `value` at `path` inside a nested plain-object diff, creating levels */
+const UNSAFE_SEGMENTS = new Set(['__proto__', 'constructor', 'prototype']);
+
+/**
+ * Set `value` at `path` inside a nested plain-object diff, creating levels.
+ * Levels are walked by own property only, and a segment that names the
+ * prototype machinery throws: walking into it would write to Object.prototype
+ */
 export function setAt(target, path, value) {
+  if (path.some(seg => UNSAFE_SEGMENTS.has(seg))) {
+    throw new TypeError(`Refusing to write at ${JSON.stringify(path)}: a segment names the prototype machinery`);
+  }
   let node = target;
   for (let i = 0; i < path.length - 1; i++) {
     const seg = path[i];
-    if (node[seg] === null || typeof node[seg] !== 'object' || Array.isArray(node[seg])) node[seg] = {};
+    const next = Object.hasOwn(node, seg) ? node[seg] : undefined;
+    if (next === null || typeof next !== 'object' || Array.isArray(next)) node[seg] = {};
     node = node[seg];
   }
   node[path[path.length - 1]] = value;

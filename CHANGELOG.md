@@ -2,6 +2,19 @@
 
 All notable changes to lazy-storage are documented here. The format follows Keep a Changelog; versions follow Semantic Versioning.
 
+## [Unreleased]
+
+### Security
+
+- **A reserved name in an op is refused.** An op whose diff used
+  `__proto__` as a key was accepted, and rebuilding the accepted diff on
+  the server walked into `Object.prototype`: one client could add a
+  property to every object in the server process. `__proto__`,
+  `constructor`, `prototype`, `$splice` and `$length` are now refused as
+  keys anywhere in an op, register values included, with code `invalid`;
+  `setAt` and `rebuild` refuse such a segment too, so a row persisted
+  before this release cannot reach it on load
+
 ## [0.12.1] - 2026-09-12
 
 ### Fixed

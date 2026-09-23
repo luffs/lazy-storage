@@ -40,9 +40,28 @@ export const isPrimitiveArray = value =>
   Array.isArray(value) && value.every(item => item === null || (typeof item !== 'object' && typeof item !== 'function'));
 
 /**
+ * A name no path segment or key may take: `__proto__`, `constructor` and
+ * `prototype` collide with the prototype machinery (a diff parsed from JSON
+ * carries `__proto__` as an own key, and walking into it reaches
+ * Object.prototype), and `$splice`/`$length` are lazy-watch's wire format
+ */
+const isForbiddenKey = key => Utils.isUnsafeKey(key) || Utils.isReservedDiffKey(key);
+
+/** Throw a ModelError for a forbidden key anywhere inside a leaf value */
+function assertLeafKeys(value, path) {
+  if (value === null || typeof value !== 'object') return;
+  for (const key of Object.keys(value)) {
+    const p = [...path, key];
+    if (isForbiddenKey(key)) throw new ModelError(`"${p.join('/')}" uses the reserved name "${key}"`, p);
+    assertLeafKeys(value[key], p);
+  }
+}
+
+/**
  * Flatten a diff into leaves. Throws a ModelError for an array fragment
- * (arrays travel whole), or for an array holding objects outside a
- * register (a list of records belongs in a keyed map).
+ * (arrays travel whole), for an array holding objects outside a
+ * register (a list of records belongs in a keyed map), or for a reserved
+ * name as a key anywhere (see isForbiddenKey).
  * @param {Object} diff
  * @param {{ matches: (path: string[]) => boolean }} registers - from registerSet()
  * @param {string[]} [path]
@@ -56,6 +75,7 @@ export function leaves(diff, registers, path = [], out = []) {
   for (const key of Object.keys(diff)) {
     const value = diff[key];
     const p = [...path, key];
+    if (isForbiddenKey(key)) throw new ModelError(`"${p.join('/')}" uses the reserved name "${key}"`, p);
     if (Utils.isPlainObject(value) && Utils.hasArrayMarker(value)) {
       throw new ModelError(`The array at "${p.join('/')}" must be written as a whole value, not a fragment`, p);
     }
@@ -64,10 +84,12 @@ export function leaves(diff, registers, path = [], out = []) {
         throw new ModelError(
           `The array at "${p.join('/')}" holds objects: keep a list of records as an object keyed by id with positions (db.list), or declare the path a register to store the array as one value`, p);
       }
+      assertLeafKeys(value, p);
       out.push([p, value]);
       continue;
     }
     if (registers.matches(p)) {
+      assertLeafKeys(value, p);
       out.push([p, value]);
       continue;
     }
