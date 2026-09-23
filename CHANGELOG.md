@@ -95,6 +95,13 @@ All notable changes to lazy-storage are documented here. The format follows Keep
   now sends a hello for a delta from the last version held, and patches
   wait for its answer. A relay's patches (a `sharedConnection` tab),
   whose versions do not count one per patch, are exempt
+- **The Node adapter closes silent and stalled sockets.** A half-open
+  connection kept its sessions, and its place in presence, until the OS
+  gave up on it, and a client that stopped reading had every patch
+  buffered for it without limit. `idleTimeout` (default 120 s, as Bun's
+  own) closes a socket that has sent nothing for that long, and
+  `maxBuffered` (default 16 MB) closes one whose unsent output passes it
+  with code 1013; the client reconnects and catches up with a delta
 
 ## [0.12.1] - 2026-09-12
 

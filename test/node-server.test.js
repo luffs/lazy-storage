@@ -280,3 +280,22 @@ test('a large snapshot is fetched over HTTP: the route on the http server serves
     await server.shutdown();
   }
 });
+
+test('idleTimeout closes a socket that has gone quiet; a client that pings stays', async () => {
+  const stores = createStores(() => createStore({ initial: INITIAL, storage: memoryStorage() }));
+  const server = serve({ stores, port: 0, idleTimeout: 200 });
+  const port = await listening(server);
+  const quiet = new WebSocket(`ws://localhost:${port}/ws`);
+  const closedAt = new Promise(resolve => { quiet.onclose = () => resolve(Date.now()); });
+  await new Promise(resolve => { quiet.onopen = resolve; });
+  const opened = Date.now();
+  const chatty = createConnection({ transport: webSocketTransport(`ws://localhost:${port}/ws`), reconnect: false, keepalive: 50 });
+  const a = attach(chatty, 'main', 'a');
+  await until(() => a.status === 'online', 'online');
+  const elapsed = (await closedAt) - opened;
+  assert.ok(elapsed >= 150 && elapsed < 2000, `closed after ${elapsed} ms`);
+  await sleep(300);
+  assert.equal(a.status, 'online', 'pings count as being heard');
+  chatty.close();
+  await server.shutdown();
+});

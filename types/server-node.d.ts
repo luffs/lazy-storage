@@ -20,9 +20,16 @@ export interface NodeHandlers {
   readonly wss: any;
 }
 
-export function createHandlers(options: HandlerOptions): NodeHandlers;
+export interface NodeHandlerOptions extends HandlerOptions {
+  /** Close a socket that has sent nothing for this long (ms); default 120000, false keeps quiet sockets */
+  idleTimeout?: number | false;
+  /** Close a socket whose unsent output passes this many bytes; default 16 MB, false lets it grow */
+  maxBuffered?: number | false;
+}
 
-export interface NodeServeOptions extends HandlerOptions {
+export function createHandlers(options: NodeHandlerOptions): NodeHandlers;
+
+export interface NodeServeOptions extends NodeHandlerOptions {
   /** Default 3200 */
   port?: number;
   host?: string;

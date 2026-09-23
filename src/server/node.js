@@ -39,7 +39,16 @@ function refuse(socket, status, text) {
 }
 
 /**
- * @param {Object} options - as the Bun adapter's createHandlers
+ * @param {Object} options - as the Bun adapter's createHandlers, plus:
+ * @param {number|false} [options.idleTimeout=120000] - close a socket that
+ *   has sent nothing for this long (ms), as Bun's own idle timeout does: a
+ *   half-open connection would otherwise hold its sessions, and its place
+ *   in presence, until the OS gave up on it. A client pings every 30 s, so
+ *   a live one is never idle. false keeps sockets however quiet
+ * @param {number|false} [options.maxBuffered=16777216] - close a socket
+ *   whose unsent output passes this many bytes: a client that stopped
+ *   reading would otherwise hold every patch in memory. It reconnects and
+ *   catches up with a delta. false lets the buffer grow
  * @returns {{ upgrade: (req: import('node:http').IncomingMessage, socket: import('node:stream').Duplex, head: Buffer) => Promise<boolean>, request: (req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => Promise<boolean>, close: (options?: { reason?: string }) => Promise<void>, closing: boolean, wss: WebSocketServer }}
  *   `upgrade` resolves to false when the URL is not ours (answer it
  *   yourself), true when it took the socket; `request` likewise for a
@@ -53,6 +62,8 @@ export function createHandlers({
   maxPayload = 4 * 1024 * 1024,
   perMessageDeflate = true,
   httpSnapshots = true,
+  idleTimeout = 120_000,
+  maxBuffered = 16 * 1024 * 1024,
   onError = err => console.error('lazy-storage:', err)
 } = {}) {
   if (!stores) throw new TypeError('createHandlers requires stores (a registry or a resolver function)');
@@ -78,11 +89,22 @@ export function createHandlers({
   });
   const send = (ws, message) => {
     if (ws.readyState !== ws.OPEN) return;
+    if (maxBuffered && ws.bufferedAmount > maxBuffered) {
+      // 1013, try again later: the client reconnects and its hello asks for what it missed
+      ws.close(1013, 'Too far behind');
+      return;
+    }
     const json = toJSON(message);
     ws.send(json, { compress: deflate !== null && Buffer.byteLength(json) >= deflate.threshold });
   };
   const hubs = new Map();
+  const heard = new Map();   // socket -> when it last sent something, for idleTimeout
   let closing = false;
+  const sweeper = idleTimeout ? setInterval(() => {
+    const now = Date.now();
+    for (const [ws, at] of heard) if (now - at > idleTimeout) ws.terminate();
+  }, Math.max(100, Math.min(idleTimeout / 4, 30_000))) : null;
+  if (typeof sweeper?.unref === 'function') sweeper.unref();
 
   function open(ws, user) {
     // A broadcast is encoded once for every socket it reaches (see wire.js)
@@ -94,7 +116,9 @@ export function createHandlers({
       onError
     });
     hubs.set(ws, hub);
+    heard.set(ws, Date.now());
     ws.on('message', raw => {
+      heard.set(ws, Date.now());
       let msg;
       try {
         msg = JSON.parse(typeof raw === 'string' ? raw : raw.toString('utf8'));
@@ -113,6 +137,7 @@ export function createHandlers({
     ws.on('close', () => {
       hubs.get(ws)?.close();
       hubs.delete(ws);
+      heard.delete(ws);
     });
     // A socket error (a reset, a message over maxPayload) is the client's
     // affair and is followed by 'close'; the handler only keeps it from
@@ -170,6 +195,7 @@ export function createHandlers({
   /** Graceful shutdown, as the Bun adapter's: no new sockets, open ones told to go away, stores flushed */
   async function close({ reason = 'Server shutting down' } = {}) {
     closing = true;
+    clearInterval(sweeper);
     const sockets = [...hubs.keys()];
     const gone = Promise.all(sockets.map(ws => new Promise(resolve => {
       if (ws.readyState === ws.CLOSED) return resolve();

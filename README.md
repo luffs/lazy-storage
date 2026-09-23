@@ -748,7 +748,11 @@ for (const signal of ['SIGTERM', 'SIGINT']) {
 The server runs on Node too, through the `ws` package (an optional peer
 dependency: install it yourself). `lazy-storage/server/node` has the same
 `serve` and `createHandlers`, with the same hooks, limits, and graceful
-`close`; `authenticate` receives a Web `Request` built from the incoming
+`close`, plus two ceilings Bun keeps on its own: `idleTimeout` (default
+120 s) closes a socket that has sent nothing for that long (a client
+pings every 30 s), and `maxBuffered` (default 16 MB) closes one whose
+unsent output grows past it, a client that stopped reading, which then
+reconnects and catches up with a delta; `authenticate` receives a Web `Request` built from the incoming
 Node request, so one function serves both runtimes. Storage comes from
 `lazy-storage/server/sqlite-node`, the same adapter on `node:sqlite`.
 
@@ -833,7 +837,7 @@ hub listens at `path` and the snapshot route under it; the returned server gains
 `createHandlers({ stores, path, authenticate, authorize, maxPayload, perMessageDeflate, httpSnapshots, onError })` →
 `{ upgrade(req, server), websocket, close({ reason }), closing }` for mounting inside your own `Bun.serve`.
 
-**Node adapter** (`lazy-storage/server/node`, needs `ws`): `serve({ stores, port, host, request, path, authenticate, authorize, maxPayload, perMessageDeflate, httpSnapshots, onError })` →
+**Node adapter** (`lazy-storage/server/node`, needs `ws`): `serve({ stores, port, host, request, path, authenticate, authorize, maxPayload, perMessageDeflate, httpSnapshots, idleTimeout, maxBuffered, onError })` →
 an `http.Server` with `shutdown({ reason })`; `createHandlers(options)` → `{ upgrade(req, socket, head), request(req, res), close({ reason }), closing, wss }`;
 `toRequest(req)` — the Web `Request` `authenticate` sees. **node:sqlite** (`lazy-storage/server/sqlite-node`): `sqliteStorage(file, { wal })`, as the Bun one.
 
