@@ -1,7 +1,7 @@
 // Type declarations for `lazy-storage/client` (createClient, openClient)
 // and the client-side shapes the main entry builds on. Hand-written.
 import type { ChangeListener, ListenerOptions, Unsubscribe } from 'lazy-watch';
-import type { ClosedCode, ErrorCode, Op, Peer, RegisterSpec, Row, ServerMessage } from './core.js';
+import type { ClosedCode, Diff, ErrorCode, Op, Peer, RegisterSpec, Row, ServerMessage } from './core.js';
 
 /** The socket's: `online` once it is open */
 export type ConnectionStatus = 'offline' | 'connecting' | 'online';
@@ -341,6 +341,22 @@ export interface ClientEvents {
   closed: Closed;
   /** What undo and redo can do changed: after a local batch, an undo, a redo, or clearHistory() */
   history: { canUndo: boolean; canRedo: boolean };
+  /** An op of this client's lost leaves to newer writes (or a deletion): per path, what it wrote and what won (null: nothing there) */
+  conflict: Conflict;
+  /** An op the server refused (or a batch the model refused locally, seq null): dropped, the state back in line */
+  rejected: Rejected;
+}
+
+export interface Conflict {
+  seq: number;
+  lost: Array<{ path: string[]; mine: unknown; theirs: unknown }>;
+}
+
+export interface Rejected {
+  seq: number | null;
+  code: string;
+  message: string;
+  diff: Diff;
 }
 
 export interface Client<S extends object = any> {
@@ -378,6 +394,8 @@ export interface Client<S extends object = any> {
   /** Detach this store; an owned connection closes, a shared one stays up for the others */
   disconnect(): void;
   collection<T extends { id?: string } = any>(name: string): Collection<T>;
+  /** Whether an unacknowledged edit writes at, under, or over `path` ('tasks/x/title' or segments; a list's records by id) */
+  isPending(path: string | string[]): boolean;
   /** An ordered list of records under `path` ('tasks', 'tasks/x/subtasks', or segments) */
   list<T extends { id?: string } = any>(path: string | string[], options?: ListOptions): List<T>;
   /** Subscribe to state changes; `meta?.origin === 'remote'` marks the server's */

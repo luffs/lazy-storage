@@ -553,3 +553,19 @@ test('a follower\'s op is acknowledged once the replica has stored it, not befor
   release();
   await b.until(() => acks() === before + 1, 'acknowledged once it landed');
 });
+
+test('what the browser\'s replica had refused, or lost, reaches every tab', async t => {
+  const store = createStore({ initial: INITIAL, readOnly: ['tasks/*/locked'] });
+  const net = createNetwork(store);
+  const b = browser(net);
+  t.after(() => b.close());
+  const a = b.tab('a');
+  const c = b.tab('c');
+  await b.until(() => a.db.status === 'online' && c.db.status === 'online', 'both online');
+  const heard = { a: [], c: [] };
+  a.db.on('rejected', r => heard.a.push(r.code));
+  c.db.on('rejected', r => heard.c.push(r.code));
+  a.db.state.tasks.x = { id: 'x', locked: true };
+  await b.until(() => heard.a.length && heard.c.length, 'both tabs heard the refusal');
+  assert.deepEqual([heard.a, heard.c], [['forbidden'], ['forbidden']]);
+});

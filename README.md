@@ -229,6 +229,32 @@ falls back in line. The server is the only merge point, which is what
 keeps this small: clients never merge with each other, and old tombstones
 can be forgotten on a schedule (see [Persistence](#persistence)).
 
+### What happened to my edit
+
+The state always shows what won, so an app that only renders needs
+nothing more. One that wants to tell its user hears it:
+
+```js
+db.on('conflict', ({ seq, lost }) => {
+  // lost: [{ path: ['tasks', 'x', 'title'], mine: 'Buy milk', theirs: 'Buy oat milk' }]
+  // theirs is null where the record was deleted under the edit
+});
+db.on('rejected', ({ seq, code, message, diff }) => {
+  // the server refused the op (forbidden, expired, invalid, too-large), or
+  // the model refused the batch locally (seq null): dropped, the state back in line
+});
+db.isPending('tasks/x/title');   // an edit not yet acknowledged writes at, under, or over the path
+```
+
+A conflict is reported when the op's acknowledgement arrives, or, for an
+op made offline, when the reconnect is answered. Paths are the synced
+state's: under a list declared as an array, a record is addressed by its
+id (`['tasks', id, 'title']`). `isPending` changes when the outbox does,
+which the `sync` event announces (and `useClientSelector` follows). Under
+a `sharedConnection`, a tab's own edits are acknowledged once the
+browser's replica holds them, and every tab hears the replica's
+conflicts and refusals.
+
 Clocks are hybrid logical clocks, so a replica whose wall clock runs slow
 is pulled forward by whatever it receives. A clock that runs *fast* would
 win every conflict and drag the server's clock with it, so the server
@@ -859,10 +885,11 @@ runs on the synced state and shows in the array view like any other change.
 - `db.store`, `db.connection` — the store id and the connection
 - `db.presence` — users with a live session on this store; `db.peers` — every live session as `{ replicaId, user, data }`, this client's own included; `db.share(data)` — what this client shares with them (JSON, `null` clears), read back as `db.shared`; `db.closed` — `{ code, message }` after the server ended this store for us, else null
 - `db.collection(name)` — `add(record) → id`, `update(id, fields)`, `remove(id)`, `get(id)`, `has(id)`, `ids()`, `all()`
+- `db.isPending(path)` — whether an edit not yet acknowledged writes at, under, or over `path`
 - `db.list(path, { position })` — an ordered list of records: `all()`, `ids()`, `get(id)`, `has(id)`, `add(record, where) → id`, `move(id, where)`, `remove(id)`, `reconcile(ids) → written`, `keyFor(where)`; `where` is `{ before }`, `{ after }`, `{ at }`, or nothing for the end
 - `db.connect()`, `db.disconnect()`, `db.status` (`'offline' | 'connecting' | 'online'` — `online` the moment a snapshot or delta is applied, with `db.state` already current; the batch carrying it to `watch` listeners follows on the microtask, and a snapshot equal to what the client had produces none, so "the store is current" is the status event, not the first `watch`), `db.pending`
 - `db.watch(listener)` — state changes; `meta?.origin === 'remote'` marks the server's
-- `db.on('status' | 'error' | 'sync' | 'presence' | 'peers' | 'closed' | 'history', fn)` — lifecycle events; a refused op is an error with a `code` (`forbidden`, `expired`, `invalid`, `too-large` drop the op; `rate-limited` keeps it and retries; `clock-skew` is handled without one), and so is a snapshot that could not be fetched (`snapshot-fetch`, after which the client asks for it inline); `history` carries `{ canUndo, canRedo }` after a local batch, an undo, a redo, or `clearHistory()`
+- `db.on('status' | 'error' | 'sync' | 'presence' | 'peers' | 'closed' | 'history' | 'conflict' | 'rejected', fn)` — lifecycle events; `conflict` carries `{ seq, lost: [{ path, mine, theirs }] }` for an op whose leaves lost, `rejected` `{ seq, code, message, diff }` for one refused (see [What happened to my edit](#what-happened-to-my-edit)); a refused op is an error with a `code` (`forbidden`, `expired`, `invalid`, `too-large` drop the op; `rate-limited` keeps it and retries; `clock-skew` is handled without one), and so is a snapshot that could not be fetched (`snapshot-fetch`, after which the client asks for it inline); `history` carries `{ canUndo, canRedo }` after a local batch, an undo, a redo, or `clearHistory()`
 - `db.undo()`, `db.redo()`, `db.canUndo`, `db.canRedo`, `db.checkpoint()`, `db.group(fn)`, `db.clearHistory()`
 - `webSocketTransport(url, { WebSocket, fetch })` — `fetch` fetches a large snapshot from the socket's server (the global fetch by default, on the route resolved against the socket URL with its query; your own to add headers; false to keep every snapshot on the socket); `memoryOutbox()`, `localStorageOutbox(key, { onError })` — document adapters (`onError` hears a write that failed, a full quota say, after which offline edits no longer survive a reload): `{ load(), save(outbox), saveState(cache) }`, the built-in ones also `clear()` — forget the store's outbox and cache
 - `indexedDBStorage(name, { onError })` → also `settled()`, `close()`, `destroy()` — a row adapter: `{ load(), commit({ puts, deletes, meta }), replace({ rows, meta }), saveOp(op, meta), removeOp(seq, meta), dropOps(seq, meta) }`, where a delete removes the path and everything under it, `saveOp` also rewrites an op a newer one pruned, `removeOp` takes out one a newer op emptied, and `meta` is `{ replicaId, seq, version, epoch }`
@@ -959,10 +986,10 @@ primitives anywhere, of anything at a register path).
 
 | Message | Fields | Meaning |
 |---|---|---|
-| `snapshot` | `state` or `fetch`, `ts`, `seq`, `registers`, `v`, `epoch` | The whole state, to overwrite with. For a client that can fetch, when the state is `httpSnapshots.threshold` bytes or more: `fetch` names the route to fetch `{ v, epoch, state }` from instead, and `v` is only where the store stood at the hello; the fetched document says where it is |
-| `delta` | `patches`, `ts`, `seq`, `registers`, `v`, `epoch` | The accepted diffs since the client's `since`, in order, followed by corrections for what the hello's own ops lost; applied as patches |
+| `snapshot` | `state` or `fetch`, `ts`, `seq`, `registers`, `v`, `epoch`, `lost?` | The whole state, to overwrite with. For a client that can fetch, when the state is `httpSnapshots.threshold` bytes or more: `fetch` names the route to fetch `{ v, epoch, state }` from instead, and `v` is only where the store stood at the hello; the fetched document says where it is |
+| `delta` | `patches`, `ts`, `seq`, `registers`, `v`, `epoch`, `lost?` | The accepted diffs since the client's `since`, in order, followed by corrections for what the hello's own ops lost; applied as patches. On either answer, `lost` is `[{ seq, paths }]`: which leaves of which of the hello's ops lost |
 | `patch` | `diff`, `ts`, `v` | An accepted diff from any replica, and the version it made |
-| `ack` | `seq`, `ts`, `correction` | The op was merged; `correction` is a diff with the server's values at the leaves it lost, or null |
+| `ack` | `seq`, `ts`, `correction`, `lost?` | The op was merged; `correction` is a diff with the server's values at the leaves it lost, or null, and `lost` the paths of those leaves |
 | `error` | `seq?`, `code?`, `message`, `now?`, `ts?`, `retryAfter?` | With `seq`: that op was refused, for the reason in `code` (below). Without: the message itself was bad (not JSON, an unknown type, a hello without a replica id) |
 | `presence` | `peers`, or `left?`, `joined?`, `shared?` | With `peers`: every session as `{ replicaId, user, key, data }`, `key` being what presence groups users by and `data` what the session shares; sent right after the hello is answered. Otherwise a delta, applied in the order `left` (replica ids), `joined` (peers), `shared` (`{ replicaId, data }`), batched per `presence.every`. Only with the store's presence on, and never to a session whose hello opted out |
 | `closed` | `code`, `message` | Final for this store on this socket; the client goes offline for it and does not reconnect on its own. Without a `store`: final for the socket, which the server then closes with code 4401; the connection stops reconnecting and every client on it reports the reason |

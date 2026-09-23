@@ -472,7 +472,9 @@ export function createStore({
    * empty shell.
    */
   function correction(paths) {
-    const raw = LazyWatch.snapshot(state);
+    // Read where the paths lead, and copy only that: a copy of the whole
+    // state per op that lost a leaf cost the state's size per conflict
+    const raw = LazyWatch.resolveIfProxy(state);
     const entries = new Map();
     for (const path of paths) {
       let corrected = false;
@@ -656,11 +658,12 @@ export function createStore({
    * the state; `state` is decoded lazily for a consumer that reads the
    * object (a test, an in-process transport)
    */
-  function snapshotMessage(replicaId, session) {
+  function snapshotMessage(replicaId, session, lost = []) {
     const json = encodedState();
     const ts = clock.peek();
     const seq = replicas.get(replicaId)?.seq ?? 0;
     const message = { t: 'snapshot', ts, seq, registers: registerPatterns, v: version, epoch };
+    if (lost.length) message.lost = lost;
     // A client that can fetch, on a transport that serves snapshots, is
     // pointed at the route when the state is large: gzipped once there
     // rather than compressed and buffered per socket here (see snapshot.js)
@@ -669,7 +672,7 @@ export function createStore({
     let decoded;
     Object.defineProperty(message, 'state', { enumerable: true, configurable: true, get: () => (decoded ??= JSON.parse(json)) });
     return presetJSON(message,
-      `{"t":"snapshot","state":${json},"ts":${JSON.stringify(ts)},"seq":${seq},"registers":${JSON.stringify(registerPatterns)},"v":${version},"epoch":${JSON.stringify(epoch)}}`);
+      `{"t":"snapshot","state":${json},"ts":${JSON.stringify(ts)},"seq":${seq},"registers":${JSON.stringify(registerPatterns)},"v":${version},"epoch":${JSON.stringify(epoch)}${lost.length ? `,"lost":${JSON.stringify(lost)}` : ''}}`);
   }
 
   /**
@@ -689,10 +692,12 @@ export function createStore({
    * every op it sent was merged (accepted or rejected leaf by leaf, both
    * of which the delta and the corrections express), else a snapshot.
    */
-  function catchUp(session, since, sinceEpoch, refused, corrections) {
+  function catchUp(session, since, sinceEpoch, refused, corrections, lost = []) {
     const patches = refused || sinceEpoch !== epoch ? null : deltaSince(since);
-    if (patches === null) return snapshotMessage(session.replicaId, session);
-    return { t: 'delta', patches: [...patches, ...corrections], ts: clock.peek(), seq: replicas.get(session.replicaId)?.seq ?? 0, registers: registerPatterns, v: version, epoch };
+    if (patches === null) return snapshotMessage(session.replicaId, session, lost);
+    const message = { t: 'delta', patches: [...patches, ...corrections], ts: clock.peek(), seq: replicas.get(session.replicaId)?.seq ?? 0, registers: registerPatterns, v: version, epoch };
+    if (lost.length) message.lost = lost;
+    return message;
   }
 
   /** The error message for an op the store did not merge */
@@ -829,10 +834,13 @@ export function createStore({
             }
             let refused = false;
             const lost = [];
+            const lostByOp = [];   // { seq, paths }: what each of the hello's ops lost, for the client to tell its app
             // The client sends its first HELLO_OPS and the rest once this is answered
             for (const op of Array.isArray(msg.ops) ? msg.ops.slice(0, HELLO_OPS) : []) {
               try {
-                lost.push(...apply(op, s).rejected);
+                const { rejected } = apply(op, s);
+                lost.push(...rejected);
+                if (rejected.length) lostByOp.push({ seq: op.seq, paths: rejected });
               } catch (err) {
                 // Unloaded under us: the client resends everything to the next store
                 if (disposed) return;
@@ -845,7 +853,7 @@ export function createStore({
             // overtaken by a later op of the same hello, and the client
             // applies corrections last
             const corrections = lost.length ? [correction(lost)] : [];
-            send(catchUp(s, msg.since, msg.epoch, refused, corrections));
+            send(catchUp(s, msg.since, msg.epoch, refused, corrections, lostByOp));
             // The newcomer gets the whole picture now; everyone else hears
             // of it with the next flush. A re-hello on the same session
             // changes nothing unless it shares anew
@@ -888,7 +896,10 @@ export function createStore({
                 throw new RefusedError('rate-limited', `Too many ops; try again in ${wait} ms`, { retryAfter: wait });
               }
               const result = apply(msg.op, s);
-              return send({ t: 'ack', seq: msg.op.seq, ts: clock.peek(), correction: result.correction });
+              const ack = { t: 'ack', seq: msg.op.seq, ts: clock.peek(), correction: result.correction };
+              // Which of the op's leaves lost (to a newer write, a tombstone, or the validator), so the client can say so
+              if (result.rejected.length) ack.lost = result.rejected;
+              return send(ack);
             } catch (err) {
               // Unloaded under us (see commit): the op stays pending on the client, which says hello again
               if (disposed) return;

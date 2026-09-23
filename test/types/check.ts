@@ -69,6 +69,11 @@ owned.disconnect();
 
 // --- Framework entries -------------------------------------------------------
 
+db.on('conflict', ({ seq, lost }) => { const first: string[] = lost[0].path; void seq; void first; });
+db.on('rejected', ({ seq, code, diff }) => { const maybe: number | null = seq; void maybe; void code; void diff; });
+const saving: boolean = db.isPending('tasks/a/title') || db.isPending(['tasks', 'a']);
+void saving;
+
 const view = useClientVue(db);
 const mirrored: string | undefined = view.state.tasks.a?.title;
 const online: boolean = view.status.value === 'online';

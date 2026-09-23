@@ -169,13 +169,19 @@ export type ClientMessage =
   | { t: 'ping' }
   | { t: 'leave' };
 
+/** What one op of a hello lost: the paths of its leaves that did not win */
+export interface LostOp {
+  seq: number;
+  paths: string[][];
+}
+
 export type ServerMessage =
-  | { t: 'snapshot'; state: object; fetch?: undefined; ts: Timestamp; seq: number; registers: string[]; v: number; epoch: string }
+  | { t: 'snapshot'; state: object; fetch?: undefined; ts: Timestamp; seq: number; registers: string[]; v: number; epoch: string; lost?: LostOp[] }
   /** A large snapshot for a client that said it can fetch: where to fetch it (the server's snapshot route) in place of the state */
-  | { t: 'snapshot'; fetch: string; state?: undefined; ts: Timestamp; seq: number; registers: string[]; v: number; epoch: string }
-  | { t: 'delta'; patches: Diff[]; ts: Timestamp; seq: number; registers: string[]; v: number; epoch: string }
+  | { t: 'snapshot'; fetch: string; state?: undefined; ts: Timestamp; seq: number; registers: string[]; v: number; epoch: string; lost?: LostOp[] }
+  | { t: 'delta'; patches: Diff[]; ts: Timestamp; seq: number; registers: string[]; v: number; epoch: string; lost?: LostOp[] }
   | { t: 'patch'; diff: Diff; ts: Timestamp; v: number }
-  | { t: 'ack'; seq: number; ts: Timestamp; correction: Diff | null }
+  | { t: 'ack'; seq: number; ts: Timestamp; correction: Diff | null; lost?: string[][] }
   | { t: 'presence'; peers: Peer[] }
   | { t: 'presence'; peers?: undefined; left?: string[]; joined?: Peer[]; shared?: PeerShare[] }
   | { t: 'closed'; code: ClosedCode; message: string }

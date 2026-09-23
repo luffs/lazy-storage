@@ -2,6 +2,33 @@
 
 All notable changes to lazy-storage are documented here. The format follows Keep a Changelog; versions follow Semantic Versioning.
 
+## [Unreleased]
+
+### Added
+
+- **`conflict` and `rejected` events: what happened to an edit.** The
+  state always showed what won, but an app could not tell its user that
+  an edit had lost or been refused: a lost write arrived as an ordinary
+  remote patch, a refusal as a bare `error`. `db.on('conflict', ({ seq,
+  lost }) => ...)` now reports, per leaf that lost, the path, what this
+  client wrote (`mine`) and what won (`theirs`, null where the record
+  was deleted), when the op's ack arrives or, for an op made offline,
+  when the reconnect is answered. `db.on('rejected', ({ seq, code,
+  message, diff }) => ...)` reports an op the server refused, with the
+  edit itself, and a batch the model refused locally (`seq` null). The
+  `error` event still comes too. Under a `sharedConnection` every tab
+  hears the browser replica's. The server says which leaves lost: `lost`
+  on an `ack`, and `lost: [{ seq, paths }]` on the answer to a hello
+- **`db.isPending(path)`**: whether an edit not yet acknowledged writes
+  at, under, or over a path, for a "saving…" mark on a field or record;
+  it changes with the outbox, as the `sync` event announces
+
+### Changed
+
+- **A lost write no longer costs the server a copy of the state.**
+  `correction()` snapshotted the whole state for every op that lost a
+  leaf; it now reads the paths it corrects
+
 ## [0.14.1] - 2026-09-23
 
 Four ways to lose data or the server, fixed: IndexedDB storage stopped

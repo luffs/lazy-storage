@@ -38,7 +38,7 @@
 // either way.
 import { LazyWatch } from 'lazy-watch';
 import { createClock, compareTs } from '../core/hlc.js';
-import { registerSet } from '../core/paths.js';
+import { registerSet, valueAt } from '../core/paths.js';
 import { leaves, expandRegisters, rebuild } from '../core/model.js';
 import { randomId } from '../core/ids.js';
 import { memoryOutbox } from './storage.js';
@@ -52,7 +52,7 @@ const REMOTE = { origin: 'remote' };
 const SNAPSHOT = { origin: 'remote', snapshot: true };
 const RESTORE = { origin: 'restore' };
 const HISTORY = new Set(['undo', 'redo']);
-const EVENTS = ['status', 'error', 'sync', 'closed', 'presence', 'peers', 'history'];
+const EVENTS = ['status', 'error', 'sync', 'closed', 'presence', 'peers', 'history', 'conflict', 'rejected'];
 // A hello carries at most this many ops, so it stays under any payload
 // limit after a long offline spell; the rest go as ops once the answer
 // lands, the way edits made during the hello do
@@ -405,6 +405,7 @@ function build({
     } catch (err) {
       if (inverse) LazyWatch.patch(state, inverse, { origin: 'rejected', error: err });
       emit('error', err);
+      emit('rejected', { seq: null, code: err.code ?? 'invalid', message: err.message, diff: LazyWatch.Utils.deepClone(diff) });
       return;
     }
     const op = { replicaId, seq: ++seq, ts: clock.now(), diff: expanded };
@@ -468,8 +469,11 @@ function build({
     // is stamped with the version the state is about to reflect
     if (Number.isInteger(msg.v)) known = { epoch: typeof msg.epoch === 'string' ? msg.epoch : null, v: msg.v };
     gapped = false;
+    const lost = lostOps(msg.lost);
     acknowledge(msg.seq);
     applyServerState();
+    // Read what won before the ops still pending are laid back on top
+    const conflicts = lost.map(conflictOf);
     // What the hello left out goes in the next hello, not as live ops: a
     // backlog sent live would run into the rate limit, and the store stays
     // 'connecting' until it has everything (live sends wait on `synced`,
@@ -483,11 +487,61 @@ function build({
     if (more) {
       hello();
       emit('sync');
+      for (const conflict of conflicts) emit('conflict', conflict);
       return;
     }
     synced = true;
     refreshStatus();
     emit('sync');
+    for (const conflict of conflicts) emit('conflict', conflict);
+  }
+
+  /**
+   * The ops a server says lost leaves, as [op, paths]: `list` is
+   * [{ seq, paths }], read before the ops leave the outbox
+   */
+  function lostOps(list) {
+    const found = [];
+    for (const entry of Array.isArray(list) ? list : []) {
+      if (!Utils.isPlainObject(entry) || !Array.isArray(entry.paths)) continue;
+      const op = outbox.find(o => o.seq === entry.seq);
+      const paths = entry.paths.filter(path => Array.isArray(path) && path.every(seg => typeof seg === 'string'));
+      if (op && paths.length) found.push([op, paths]);
+    }
+    return found;
+  }
+
+  /** A lost op as the app hears it: per path, what this client wrote and what won (null: gone) */
+  function conflictOf([op, paths]) {
+    const plainAt = (root, path) => {
+      const value = valueAt(root, path);
+      if (value === undefined) return null;
+      return LazyWatch.isProxy(value) ? LazyWatch.snapshot(value) : LazyWatch.Utils.deepClone(value);
+    };
+    return { seq: op.seq, lost: paths.map(path => ({ path, mine: plainAt(op.diff, path), theirs: plainAt(state, path) })) };
+  }
+
+  function reportLost(lost) {
+    for (const entry of lost) emit('conflict', conflictOf(entry));
+  }
+
+  /**
+   * Whether an edit of this client's not yet acknowledged writes at
+   * `path`, under it, or over it (a record deleted or replaced whole
+   * counts for each of its fields). Paths are the synced state's: under a
+   * list declared as an array, a record is addressed by its id
+   */
+  function isPending(path) {
+    const segments = Array.isArray(path) ? path.map(String) : String(path).split('/').filter(Boolean);
+    return outbox.some(op => {
+      let node = op.diff;
+      for (const segment of segments) {
+        if (!Utils.isPlainObject(node)) return true;     // written whole above the path
+        if (!Object.hasOwn(node, segment)) return false;
+        node = node[segment];
+      }
+      return true;
+    });
   }
 
   /**
@@ -561,12 +615,22 @@ function build({
         if (Number.isInteger(msg.v)) known.v = msg.v;
         LazyWatch.patch(state, msg.diff, REMOTE);
         return;
-      case 'ack':
+      case 'ack': {
         clock.receive(msg.ts);
+        const lost = lostOps([{ seq: msg.seq, paths: msg.lost }]);
         acknowledge(msg.seq);
         if (msg.correction) LazyWatch.patch(state, msg.correction, REMOTE);
+        reportLost(lost);
         emit('sync');
         return;
+      }
+      case 'conflict':
+      case 'rejected': {
+        // A relay passing on the browser replica's (see shared.js); a server sends neither
+        const { t, store: _store, ...payload } = msg;
+        emit(t, payload);
+        return;
+      }
       case 'presence':
         applyPresence(msg);
         return;
@@ -628,6 +692,8 @@ function build({
         // resync from a snapshot so this replica falls back in line (when a
         // hello is in flight its snapshot is already on the way)
         if (Number.isInteger(msg.seq)) {
+          const refused = outbox.find(op => op.seq === msg.seq);
+          if (refused) emit('rejected', { seq: msg.seq, code: msg.code ?? 'invalid', message: msg.message, diff: LazyWatch.Utils.deepClone(refused.diff) });
           acknowledge(msg.seq);
           // Ask for a snapshot, not a delta: the delta would leave the
           // refused edit in place
@@ -787,6 +853,7 @@ function build({
     connect,
     disconnect,
     collection,
+    isPending,
     /** An ordered list of records under `path` on the wire: a keyed map with a position on each record (see list.js) */
     list: (path, options) => createList(state, path, { position, ...options }),
     /** Subscribe to changes of `state` (a LazyWatch listener; meta.origin tells remote from local) */

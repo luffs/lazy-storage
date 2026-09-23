@@ -432,6 +432,9 @@ function createRelay({ tabId, transport, storage, reconnect, keepalive, infos, l
         // but reaches the followers once, as the socket's (above), after every hidden client has heard
         client.on('closed', c => { if (!socket.closed) all({ t: 'closed', code: c.code, message: c.message }); }),
         client.on('error', err => all({ t: 'error', code: err.code, message: err.message })),
+        // What the replica's ops lost or had refused: the browser's, so every tab hears it
+        client.on('conflict', conflict => all({ t: 'conflict', ...conflict })),
+        client.on('rejected', rejected => all({ t: 'rejected', ...rejected })),
         client.on('sync', () => onPending(store, client.pending))
       ];
       client.connect();
