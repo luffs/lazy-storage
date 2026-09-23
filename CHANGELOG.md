@@ -106,6 +106,16 @@ All notable changes to lazy-storage are documented here. The format follows Keep
   swallowed, so an app could not tell its user that edits made offline
   no longer survived a reload. `localStorageOutbox(key, { onError })`
   hears it, as `indexedDBStorage` already did
+- **A commit that fails no longer leaves memory ahead of disk.** The
+  state, version and delta log changed before `commit`; one that threw
+  (a full disk, `SQLITE_BUSY` while a backup held the lock) left a change
+  in memory that was never saved nor broadcast, and the sender was told
+  `invalid` and dropped its op. The store now unloads itself: the error
+  goes to `onError`, sessions hear `unavailable` and resend their
+  pending ops to a store a registry loads afresh from disk
+  (`stores.get` replaces a disposed store rather than handing it out).
+  The SQLite adapters set `busy_timeout` to five seconds, and a store's
+  `dispose` still tells its sessions when the final flush throws
 
 ## [0.12.1] - 2026-09-12
 

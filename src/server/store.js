@@ -318,9 +318,22 @@ export function createStore({
     }
   }
 
-  /** Every commit carries the version and epoch alongside its rows */
+  /**
+   * Every commit carries the version and epoch alongside its rows. A
+   * commit that fails (a full disk, a database locked past its timeout)
+   * leaves memory ahead of disk, with the change never broadcast: the
+   * store unloads itself rather than serve a state it cannot keep. Its
+   * sessions hear `unavailable` and say hello again, their unacknowledged
+   * ops with them, to a store a registry loads afresh from what is on disk
+   */
   function commit(change) {
-    storage.commit({ ...change, version, epoch });
+    try {
+      storage.commit({ ...change, version, epoch });
+    } catch (err) {
+      onError(err);
+      self.dispose();
+      throw new RefusedError('unavailable', 'The store could not save the change and was unloaded');
+    }
   }
 
   // A session counts from its hello: that is when it has a replica id to
@@ -787,6 +800,8 @@ export function createStore({
               try {
                 lost.push(...apply(op, s).rejected);
               } catch (err) {
+                // Unloaded under us: the client resends everything to the next store
+                if (disposed) return;
                 refused = true;
                 send(refusal(op, err, s));
               }
@@ -841,6 +856,8 @@ export function createStore({
               const result = apply(msg.op, s);
               return send({ t: 'ack', seq: msg.op.seq, ts: clock.peek(), correction: result.correction });
             } catch (err) {
+              // Unloaded under us (see commit): the op stays pending on the client, which says hello again
+              if (disposed) return;
               return send(refusal(msg.op, err, s));
             }
           }
@@ -977,7 +994,12 @@ export function createStore({
     dispose() {
       if (disposed) return;
       disposed = true;
-      storage.flush();
+      try {
+        storage.flush();
+      } catch (err) {
+        // The sessions below are still told
+        onError(err);
+      }
       // Sessions still open are told the store went away but is not gone
       // for good: the client says hello again, and a registry loads the
       // store afresh, where an op sent to this one would be refused and lost

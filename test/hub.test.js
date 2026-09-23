@@ -253,3 +253,37 @@ test('a store released under live sessions tells them; the clients say hello aga
   assert.deepEqual(Object.keys(stores.get('main').state.tasks).sort(), ['before', 'during']);
   assert.deepEqual(errors, []);
 });
+
+test('a commit that fails unloads the store; the client keeps its op and lands it on the store loaded afresh', async () => {
+  const disk = memoryStorage();
+  let failNext = false;
+  const flaky = {
+    load: () => disk.load(),
+    flush: () => disk.flush(),
+    commit(change) {
+      if (failNext) { failNext = false; throw new Error('disk full'); }
+      disk.commit(change);
+    }
+  };
+  const faults = [];
+  const { stores, net, connect, attach } = setup(() => createStore({ initial: INITIAL, storage: flaky, onError: err => faults.push(err.message) }));
+  const a = attach(connect(), 'main', 'a');
+  await net.settle();
+  const first = stores.get('main');
+  const errors = [];
+  a.on('error', err => errors.push(err.code));
+
+  failNext = true;
+  a.collection('tasks').add({ id: 'kept' });
+  await net.settle();
+  assert.deepEqual(faults, ['disk full']);
+  assert.equal(first.disposed, true, 'the store unloaded itself');
+  assert.equal(a.pending, 1, 'the op was not refused');
+  await new Promise(resolve => setTimeout(resolve, 1100));
+  await net.settle();
+  assert.notEqual(stores.get('main'), first, 'loaded afresh from disk');
+  assert.equal(stores.get('main').state.tasks.kept.id, 'kept');
+  assert.equal(a.pending, 0);
+  assert.deepEqual(errors, []);
+  assert.equal(createStore({ initial: INITIAL, storage: disk }).state.tasks.kept.id, 'kept', 'and it is on disk');
+});

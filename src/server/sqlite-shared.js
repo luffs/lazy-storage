@@ -60,6 +60,9 @@ const SCHEMA = `
 export function sqliteStorageOn({ exec, prepare, transaction, close, db }, { file, wal }) {
   if (wal && file !== ':memory:') exec('PRAGMA journal_mode = WAL;');
   exec('PRAGMA synchronous = NORMAL;');
+  // Wait out another connection's lock (a backup, an admin script) rather
+  // than fail the commit at once with SQLITE_BUSY
+  exec('PRAGMA busy_timeout = 5000;');
   exec(SCHEMA);
 
   const q = {

@@ -313,7 +313,12 @@ A custom adapter implements `load()`, `commit(change)`, and `flush()`;
 `change` carries the rows an op won and dropped, the replica's progress,
 the version and epoch, and optionally the accepted diff as a `log` entry
 with the `logFloor` below which the store no longer needs entries. See
-the header of `src/server/storage.js` for the exact shapes.
+the header of `src/server/storage.js` for the exact shapes. A `commit`
+that throws unloads the store (the error goes to `onError`): memory
+would otherwise be ahead of disk. Its sessions are told `unavailable`
+and say hello again with their unacknowledged ops, and a registry loads
+the store afresh from what is on disk. The SQLite adapters wait up to
+five seconds for another connection's lock before a commit fails.
 
 Two things would otherwise grow without bound: tombstones, and the
 progress kept per replica (every browser tab that ever connected). A store

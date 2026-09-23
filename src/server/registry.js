@@ -50,7 +50,8 @@ export function createStores(factory, { idle = Infinity, sweepEvery = 60_000, no
       if (!isStoreId(id)) return null;
       idleSince.delete(id);
       let store = live.get(id);
-      if (store) return store;
+      // A store that unloaded itself (a commit it could not save) is loaded afresh
+      if (store && !store.disposed) return store;
       store = factory(id);
       if (!store) return null;
       live.set(id, store);
