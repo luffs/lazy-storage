@@ -44,3 +44,47 @@ test('leaves, setAt and rebuild refuse the prototype machinery as a path segment
   assert.throws(() => rebuild({}, [['["__proto__","polluted"]', 'yes']]), TypeError);
   assert.equal(({}).polluted, undefined);
 });
+
+test('a session speaks for one replica: another id, the server\'s, or a live user\'s is refused', () => {
+  const store = createStore({ initial: { tasks: {} }, readOnly: ['locked'] });
+  const { session, last } = rawSession(store, 'mine');
+  const ts = id => [Date.now(), 0, id];
+
+  session.receive({ t: 'op', op: { replicaId: 'server', seq: 1e12, ts: ts('server'), diff: {} } });
+  assert.equal(last().code, 'forbidden', 'the server\'s id is not the session\'s');
+  assert.equal(store.patch({ tasks: { a: { id: 'a' } } }).duplicate, false, 'the server still writes');
+  assert.deepEqual(store.state, { tasks: { a: { id: 'a' } } });
+
+  session.receive({ t: 'op', op: { replicaId: 'other', seq: 1, ts: ts('other'), diff: { tasks: { b: { id: 'b' } } } } });
+  assert.equal(last().code, 'forbidden');
+  session.receive({ t: 'op', op: { replicaId: 'mine', seq: 1, ts: ts('someone-else'), diff: { tasks: { b: { id: 'b' } } } } });
+  assert.equal(last().code, 'invalid', 'the stamp names the op\'s own replica');
+  session.receive({ t: 'hello', replicaId: 'other', ops: [] });
+  assert.equal(last().code, 'forbidden', 'a session keeps the replica it first spoke for');
+
+  // A victim's replica id, as presence shows it, cannot be borrowed while the victim is on
+  const victim = rawSession(store, 'victim', { id: 'ann' });
+  const thief = rawSession(store, 'victim', { id: 'mallory' });
+  assert.equal(thief.last().code, 'forbidden');
+  thief.session.receive({ t: 'op', op: { replicaId: 'victim', seq: 1e12, ts: ts('victim'), diff: {} } });
+  assert.equal(thief.last().code, 'forbidden');
+  victim.session.receive({ t: 'op', op: { replicaId: 'victim', seq: 1, ts: ts('victim'), diff: { tasks: { v: { id: 'v' } } } } });
+  assert.equal(victim.last().t, 'ack');
+  assert.equal(store.state.tasks.v.id, 'v');
+
+  // The same user on a second device, or a hello with no session yet, is fine
+  const again = rawSession(store, 'victim', { id: 'ann' });
+  assert.equal(again.last().t, 'snapshot');
+  assert.equal(rawSession(store, 'server').last().code, 'forbidden', 'nobody says hello as the server');
+  store.dispose();
+});
+
+test('a timestamp counter near 2^53 is refused and cannot freeze the server clock', () => {
+  const store = createStore({ initial: { tasks: {} } });
+  const { session, last } = rawSession(store, 'r1');
+  session.receive({ t: 'op', op: { replicaId: 'r1', seq: 1, ts: [Date.now() + 1000, Number.MAX_SAFE_INTEGER, 'r1'], diff: { n: 1 } } });
+  assert.equal(last().code, 'invalid');
+  store.patch({ n: 1 });
+  assert.equal(store.patch({ n: 2 }).accepted?.n, 2, 'the server\'s own writes keep landing');
+  store.dispose();
+});

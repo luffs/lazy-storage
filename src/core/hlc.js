@@ -92,9 +92,19 @@ export function createClock(replicaId, now = Date.now) {
   };
 }
 
+/**
+ * The counter's ceiling. It counts events within one millisecond (and runs
+ * on while a clock is ahead of the wall), so real counts stay far below it;
+ * near 2^53 `count + 1` stops changing, and a clock that received such a
+ * count would stamp every later event alike
+ */
+export const MAX_COUNT = 2 ** 32;
+
 export function isTimestamp(ts) {
   return Array.isArray(ts) && ts.length === 3 &&
-    Number.isInteger(ts[0]) && Number.isInteger(ts[1]) && typeof ts[2] === 'string';
+    Number.isSafeInteger(ts[0]) && ts[0] >= 0 &&
+    Number.isInteger(ts[1]) && ts[1] >= 0 && ts[1] < MAX_COUNT &&
+    typeof ts[2] === 'string';
 }
 
 /**

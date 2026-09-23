@@ -14,6 +14,22 @@ All notable changes to lazy-storage are documented here. The format follows Keep
   keys anywhere in an op, register values included, with code `invalid`;
   `setAt` and `rebuild` refuse such a segment too, so a row persisted
   before this release cannot reach it on load
+- **A session speaks for one replica.** The store took an op's
+  `replicaId` on trust, so a client could send an op as `server` with a
+  seq far ahead, after which every `store.patch` was ignored as a
+  duplicate (read-only stores included), or as a teammate's replica,
+  whose later edits were then acknowledged and dropped. A session is now
+  bound to the replica its hello names (or its first op, for a session
+  driven without one): an op under another id is refused with
+  `forbidden`, as is a hello naming `server`, a second replica on the
+  same session, or a replica a live session of another user holds. An
+  op's timestamp must carry its own replica id (`invalid` otherwise)
+- **A timestamp's counter is bounded.** An op stamped
+  `[ms, 2^53 - 1, id]` pushed the server's clock to a counter where
+  `count + 1` no longer changes it, so every server stamp came out alike
+  and the store's own writes lost to themselves until the wall clock
+  caught up. `isTimestamp` now wants a counter below 2^32 (`MAX_COUNT`
+  in core) and a non-negative millisecond
 
 ## [0.12.1] - 2026-09-12
 

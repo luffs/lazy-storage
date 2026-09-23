@@ -539,6 +539,15 @@ export function createStore({
    */
   function apply(op, session, { authority = false } = {}) {
     assertOp(op);
+    if (session) {
+      // A session speaks for the replica its hello named and no other: an
+      // op under another id could claim a seq far ahead and turn that
+      // replica's (or the server's own) later writes into duplicates
+      const claim = claimReplica(session, op.replicaId);
+      if (claim) throw new RefusedError(claim.code, claim.message);
+      session.speaksFor = op.replicaId;
+      if (op.ts[2] !== op.replicaId) throw new RefusedError('invalid', 'op.ts must carry the op\'s own replica id');
+    }
     maybeCompact();
     const last = replicas.get(op.replicaId)?.seq ?? 0;
     if (op.seq <= last) return { duplicate: true, accepted: null, rejected: [], correction: null };
@@ -683,6 +692,32 @@ export function createStore({
    * that says in its hello it can fetch is then pointed at `url` in place
    * of a snapshot of `threshold` bytes or more.
    */
+  /**
+   * Whether a session may speak for `replicaId`: null when it may, else the
+   * error to send. The server's own id is reserved; a session keeps the id
+   * it first spoke for (its hello's, or its first op's); and an id a live
+   * session of another user holds is refused, so a replica id seen in
+   * presence cannot be borrowed. (An id no session holds is free: a browser
+   * that signs in as someone else keeps its replica.)
+   */
+  function claimReplica(s, replicaId) {
+    if (replicaId === 'server') return { code: 'forbidden', message: 'The replica id "server" is reserved for the store' };
+    if (s.speaksFor) {
+      return s.speaksFor === replicaId ? null
+        : { code: 'forbidden', message: `This session speaks for replica "${s.speaksFor}", not "${replicaId}"` };
+    }
+    const key = ownerKey(s.user);
+    for (const other of sessions) {
+      if (other !== s && other.speaksFor === replicaId && ownerKey(other.user) !== key) {
+        return { code: 'forbidden', message: 'Another user holds that replica id' };
+      }
+    }
+    return null;
+  }
+
+  /** What a replica's user is told apart by: presence's key when set, else the default */
+  const ownerKey = user => (user === undefined ? undefined : (pres?.key ?? defaultPresenceKey)(user));
+
   function session({ send, user, onEvict, broadcast: publish, httpSnapshot } = {}) {
     if (typeof send !== 'function') throw new TypeError('A session needs a send function');
     const s = {
@@ -692,7 +727,8 @@ export function createStore({
       publish: typeof publish === 'function' ? publish : null,   // hears broadcasts through the transport's fan-out
       httpSnapshot: typeof httpSnapshot?.url === 'string' ? { url: httpSnapshot.url, threshold: httpSnapshot.threshold ?? SNAPSHOT_THRESHOLD } : null,
       fetch: false,          // whether its hello said it can fetch a snapshot over HTTP
-      replicaId: null,
+      replicaId: null,       // set by the hello: the replica presence knows it as
+      speaksFor: null,       // the replica its ops must come from, fixed by its hello or its first op
       shared: undefined,     // what this session shares with its peers, and its JSON
       sharedJson: undefined,
       presence: true,        // whether it wants to hear of its peers (its hello may say no)
@@ -701,6 +737,9 @@ export function createStore({
         switch (msg.t) {
           case 'hello': {
             if (typeof msg.replicaId !== 'string' || !msg.replicaId) return send({ t: 'error', message: 'hello requires a replicaId' });
+            const claim = claimReplica(s, msg.replicaId);
+            if (claim) return send({ t: 'error', ...claim });
+            s.speaksFor = msg.replicaId;
             const joined = !s.replicaId;
             s.replicaId = msg.replicaId;
             if (msg.presence === false) s.presence = false;

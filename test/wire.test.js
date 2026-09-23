@@ -68,9 +68,8 @@ test('a snapshot is encoded from the cached state, spliced into the message, and
     const store = createStore({ initial: { tasks: {} } });
     store.patch({ tasks: { a: { id: 'a', title: 'one' } } });
     const sent = [];
-    const session = store.session({ send: m => sent.push(m) });
-    session.receive({ t: 'hello', replicaId: 'r1', ops: [] });
-    session.receive({ t: 'hello', replicaId: 'r2', ops: [] });
+    store.session({ send: m => sent.push(m) }).receive({ t: 'hello', replicaId: 'r1', ops: [] });
+    store.session({ send: m => sent.push(m) }).receive({ t: 'hello', replicaId: 'r2', ops: [] });
     const snapshots = sent.filter(m => m.t === 'snapshot');
     assert.equal(snapshots.length, 2);
     assert.equal(encodings, 1, 'two hellos on a quiet store: the state was encoded once');
@@ -84,7 +83,7 @@ test('a snapshot is encoded from the cached state, spliced into the message, and
     assert.equal(Object.getOwnPropertyDescriptor(tagged, 'state').get !== undefined, true, 'tagStore kept the getter');
 
     store.patch({ tasks: { a: { title: 'two' } } });
-    session.receive({ t: 'hello', replicaId: 'r3', ops: [] });
+    store.session({ send: m => sent.push(m) }).receive({ t: 'hello', replicaId: 'r3', ops: [] });
     assert.equal(encodings, 2, 'an op drops the cache; the next hello encodes again');
     assert.equal(sent.at(-1).state.tasks.a.title, 'two');
     assert.deepEqual(snapshots[1].state.tasks.a.title, 'one', 'an earlier message keeps the state it carried');
