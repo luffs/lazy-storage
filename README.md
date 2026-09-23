@@ -374,6 +374,23 @@ Adapters:
   first reconnects with snapshots). Fine for small single-store deployments.
 - `memoryStorage()` — nothing survives the process; for tests.
 
+One process serves a store at a time. Two processes on one SQLite file,
+a deploy whose old and new process overlap or a server started twice,
+would each load the same store, commit versions that collide, and keep
+their clients in states that never meet again. So the SQLite adapters
+take a **lease** on a store when it loads: a row in the file, renewed
+with every commit and on a timer, given up when the store is disposed
+(a registry's release, a graceful shutdown) or the file is closed. A
+process that finds a store leased elsewhere cannot load it (code
+`store-locked`); a hub tells the client `unavailable`, and the client
+says hello again a moment later, so during a deploy's overlap clients
+land on whichever process holds the store. A commit that finds its lease
+gone is refused, so a process that stalled cannot write over the one
+that took over. A crashed process's lease runs out after `lease.ttl`
+(default 30 s), or at once when that process was on the same machine.
+Stores are leased one by one: processes may share a file on purpose by
+serving different stores. `lease: false` turns it off.
+
 A custom adapter implements `load()`, `commit(change)`, and `flush()`;
 `change` carries the rows an op won and dropped, the replica's progress,
 the version and epoch, and optionally the accepted diff as a `log` entry
@@ -920,8 +937,8 @@ runs on the synced state and shows in the array view like any other change.
 - `createHub(resolveStore, { send, user, authorizeId, authorize, channel, httpSnapshots, onError })` → `{ receive(message), close(), stores, user }` — the server side of a multiplexed connection, session-shaped; `channel` is a transport's topic fan-out, `httpSnapshots` `{ url(id), threshold }` its snapshot route
 - `toJSON(message)` — a message's JSON, encoded once however many sockets it goes to; use it in a transport of your own so a broadcast is not re-encoded per socket (`tagStore(message, id)` is what a hub does)
 
-**SQLite** (`lazy-storage/server/sqlite`, Bun): `sqliteStorage(file, { wal })` →
-`store(id)`, `ids()`, `remove(id)`, `db`, `close()`.
+**SQLite** (`lazy-storage/server/sqlite`, Bun): `sqliteStorage(file, { wal, lease: { ttl } | false })` →
+`store(id)` (whose load takes the store's lease, and `close()` gives it up), `ids()`, `remove(id)`, `db`, `close()` (gives up every lease).
 
 **Bun adapter** (`lazy-storage/server/bun`): `serve({ stores, port, path, fetch, authenticate, authorizeId, authorize, maxPayload, perMessageDeflate, httpSnapshots, onError })` —
 `stores` is a registry or `id => store|null` (for one store, `() => store`); the
@@ -1034,9 +1051,11 @@ alphabet, or a message without one) each end one store. `unauthorized`
 did not make it. `replica-taken` ends one store: the hello named a
 replica another user owns (see [Authentication](#authentication-presence-and-eviction)).
 `unavailable` is the one that is not final: the store was
-disposed under an open session (a registry released it), and the client
-says hello again after a moment, which loads it afresh; nothing pending
-is lost and the app hears no `closed`.
+disposed under an open session (a registry released it), or another
+process serves it for now (see the lease under
+[Persistence](#persistence)), and the client says hello again after a
+moment, which loads it afresh; nothing pending is lost and the app hears
+no `closed`.
 
 ## Scope
 

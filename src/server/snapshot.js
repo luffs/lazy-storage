@@ -165,6 +165,8 @@ export async function serveSnapshot(request, id, { resolveStore, authenticate, a
   try {
     store = resolveStore(id);
   } catch (err) {
+    // Served by another process for now: try again in a moment
+    if (err?.code === 'store-locked') return new Response('Store served elsewhere for now', { status: 503, headers: { 'retry-after': '1' } });
     onError?.(err);
     return new Response('Not found', { status: 404 });
   }

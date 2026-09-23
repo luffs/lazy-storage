@@ -82,3 +82,48 @@ test('a file from before replicas had owners gains the column, and an owner surv
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('one process serves a store: a second is refused until the first lets it go, and one that lost its lease cannot write', { skip: !sqliteStorage }, async () => {
+  const { createHub } = await import('../src/server/index.js');
+  const { hostname } = await import('node:os');
+  const dir = mkdtempSync(join(tmpdir(), 'lazy-storage-node-sqlite-'));
+  const file = join(dir, 'leased.sqlite');
+  try {
+    const first = sqliteStorage(file);     // two handles on one file: two processes, as far as the file can tell
+    const second = sqliteStorage(file);
+    const one = createStore({ initial: INITIAL, storage: first.store('team-1') });
+    one.patch({ tasks: { a: { id: 'a' } } });
+    assert.throws(() => createStore({ initial: INITIAL, storage: second.store('team-1') }), err => err.code === 'store-locked');
+    const faults = [];
+    const other = createStore({ initial: INITIAL, storage: second.store('team-2'), onError: err => faults.push(err.code) });
+    other.patch({ tasks: { b: { id: 'b' } } });   // another store in the same file is served there
+
+    // Through a hub, a client of the second process hears 'unavailable', not a final refusal
+    const sent = [];
+    const hub = createHub(id => createStore({ initial: INITIAL, storage: second.store(id) }), { send: m => sent.push(m), onError: err => assert.fail(err.message) });
+    hub.receive({ t: 'hello', store: 'team-1', replicaId: 'r', ops: [] });
+    assert.deepEqual([sent[0].t, sent[0].code], ['closed', 'unavailable']);
+
+    one.dispose();                          // the first lets it go (a registry's release, a shutdown)
+    const taken = createStore({ initial: INITIAL, storage: second.store('team-1') });
+    assert.deepEqual(taken.state.tasks, { a: { id: 'a' } }, 'and the second serves it, from the rows the first wrote');
+
+    // A lease left by a process on this machine that is gone is taken at once
+    first.db.prepare('UPDATE leases SET holder = ?, host = ?, pid = ?, until = ? WHERE store = ?').run('dead', hostname(), 2 ** 22 + 12345, Date.now() + 60_000, 'team-2');
+    const revived = createStore({ initial: INITIAL, storage: first.store('team-2') });
+    assert.deepEqual(revived.state.tasks, { b: { id: 'b' } });
+    // ...and the process it was taken from can no longer write: its store unloads instead
+    assert.throws(() => other.patch({ tasks: { late: { id: 'late' } } }), err => err.code === 'unavailable');
+    assert.equal(other.disposed, true);
+    assert.deepEqual(faults, ['lease-lost'], 'reported as the fault it is');
+    assert.equal(revived.state.tasks.late, undefined);
+
+    taken.dispose();
+    revived.dispose();
+    hub.close();
+    first.close();
+    second.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

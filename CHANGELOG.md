@@ -2,6 +2,28 @@
 
 All notable changes to lazy-storage are documented here. The format follows Keep a Changelog; versions follow Semantic Versioning.
 
+## [Unreleased]
+
+### Added
+
+- **One process serves a store: SQLite leases.** Two processes on one
+  SQLite file (a deploy whose old and new process overlap, a server
+  started twice) each loaded the same store, committed versions that
+  collided, overwrote each other's delta log, and kept their clients in
+  states that never met again. The SQLite adapters now take a lease on a
+  store when it loads, renewed with every commit and on a timer, given
+  up when the store is disposed or the file closed. A process that finds
+  a store leased elsewhere is refused with code `store-locked`, which a
+  hub tells its client as `unavailable` (the client says hello again a
+  moment later) and the snapshot route as a 503; a commit that finds its
+  lease gone is refused (`lease-lost`), so the store unloads rather than
+  write over the process that took it. A lease left by a process that
+  died runs out after `lease.ttl` (default 30 s), or at once when that
+  process was on this machine. Stores are leased one by one, so
+  processes may still share a file by serving different stores.
+  `lease: false` on `sqliteStorage` turns it off. A store now calls its
+  storage's optional `close()` when disposed
+
 ## [0.15.0] - 2026-09-23
 
 An app can now tell its user what happened to an edit: `conflict` says

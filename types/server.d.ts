@@ -54,6 +54,8 @@ export interface ServerStorage {
   commit(change: StorageCommit): void;
   /** Write out anything buffered; called on dispose */
   flush(): void;
+  /** Optional: the store let go of this storage (on dispose); a SQLite adapter gives up its lease */
+  close?(): void;
 }
 
 /** Keeps the document in memory only (delta log included); for tests */

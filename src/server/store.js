@@ -1045,6 +1045,12 @@ export function createStore({
         // The sessions below are still told
         onError(err);
       }
+      // Storage that holds the store for this process (a SQLite lease) lets it go
+      try {
+        storage.close?.();
+      } catch (err) {
+        onError(err);
+      }
       // Sessions still open are told the store went away but is not gone
       // for good: the client says hello again, and a registry loads the
       // store afresh, where an op sent to this one would be refused and lost

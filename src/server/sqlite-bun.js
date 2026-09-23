@@ -10,10 +10,11 @@ import { sqliteStorageOn } from './sqlite-shared.js';
 
 /**
  * @param {string} [file=':memory:'] - database file (created if missing)
- * @param {{ wal?: boolean }} [options] - write-ahead logging (default on for
- *   files; readers never block a commit)
+ * @param {{ wal?: boolean, lease?: { ttl?: number } | false }} [options] -
+ *   write-ahead logging (default on for files; readers never block a
+ *   commit); `lease` as in sqlite-shared.js (one process per store)
  */
-export function sqliteStorage(file = ':memory:', { wal = true } = {}) {
+export function sqliteStorage(file = ':memory:', { wal = true, lease } = {}) {
   const db = new Database(file, { create: true });
   return sqliteStorageOn({
     db,
@@ -21,5 +22,5 @@ export function sqliteStorage(file = ':memory:', { wal = true } = {}) {
     prepare: sql => db.prepare(sql),
     transaction: fn => db.transaction(fn),
     close: () => db.close()
-  }, { file, wal });
+  }, { file, wal, lease });
 }

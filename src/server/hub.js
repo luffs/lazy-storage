@@ -116,8 +116,11 @@ export function createHub(resolveStore, { send, user, authorizeId, authorize, ch
       try {
         store = resolveStore(id);
       } catch (err) {
-        onError(err);
         pending.delete(id);
+        // Served by another process for now (a deploy's overlap): not a
+        // fault, and not final; the client says hello again in a moment
+        if (err?.code === 'store-locked') return refuse(id, 'unavailable', err.message);
+        onError(err);
         return refuse(id, 'unknown-store', `Store "${id}" could not be opened: ${err?.message ?? err}`);
       }
       if (!store) {
