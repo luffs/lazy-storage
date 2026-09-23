@@ -69,7 +69,8 @@
     "fuzz": "node test/fuzz/run.js",
     "fuzz:hostile": "node test/fuzz/run.js --mode hostile",
     "test:types": "tsc -p test/types/tsconfig.json",
-    "bench": "node bench/run.js"
+    "bench": "node bench/run.js",
+    "bench:client": "node bench/client.js"
   },
   "keywords": [
     "sync",

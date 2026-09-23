@@ -1002,6 +1002,14 @@ versus a delta, and a snapshot compressed per socket versus served by the
 HTTP route. It reports the median of several rounds; compare
 runs on the same machine.
 
+`npm run bench:client` times what an app feels in the browser, in a DOM
+from happy-dom: React and Vue components on `useClient` as the store
+changes (with how many of them re-render), the array view of a
+5k-record list under local and remote edits and moves, the
+`localStorageOutbox` under sustained remote traffic and a long offline
+spell (with how much it serializes), and lazy-watch's cost for an object
+write against a field write.
+
 ## Testing
 
 ```bash
