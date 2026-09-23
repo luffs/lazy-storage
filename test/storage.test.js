@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createStore, memoryStorage, jsonFileStorage } from '../src/server/index.js';
@@ -164,4 +164,25 @@ test('an empty object over a record ensures the container and keeps its fields, 
   assert.deepEqual(regs.state.meta, {});
   again.dispose();
   regs.dispose();
+});
+
+test('a JSON file write that fails in the background is reported, not thrown, and tried again', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'lazy-storage-json-'));
+  const blocker = join(dir, 'not-a-dir');
+  writeFileSync(blocker, 'a file where the directory should be');
+  const errors = [];
+  try {
+    const storage = jsonFileStorage(join(blocker, 'store.json'), { debounce: 5, onError: err => errors.push(err.code) });
+    const store = createStore({ initial: INITIAL, storage });
+    store.patch({ tasks: { a: { id: 'a' } } });
+    await new Promise(resolve => setTimeout(resolve, 50));
+    assert.equal(errors.length, 1, 'reported through onError, and the process is still here');
+    rmSync(blocker);                                   // the disk is writable again
+    await new Promise(resolve => setTimeout(resolve, 1200));
+    assert.equal(JSON.parse(readFileSync(join(blocker, 'store.json'), 'utf8')).rows.length > 0, true, 'the retry wrote it');
+    assert.equal(errors.length, 1);
+    store.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

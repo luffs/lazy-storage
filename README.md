@@ -885,7 +885,7 @@ runs on the synced state and shows in the array view like any other change.
 - `store.patch(diff)` — a server-side change, timestamped and broadcast, never held back by a tombstone; `store.patchFrom(diff, state)` — a lazy-watch batch from state kept elsewhere, its array fragments replaced with the whole arrays read from `state` (see [Serving state the server owns](#serving-state-the-server-owns)); `store.apply(op)` — a trusted op, gates skipped
 - `store.on(listener)`, `store.snapshot()`, `store.state`, `store.version`, `store.replicas`
 - `store.compact()` → `{ tombstones, replicas }` removed; `store.flush()`, `store.dispose()`
-- `memoryStorage()`, `jsonFileStorage(path, { debounce })`
+- `memoryStorage()`, `jsonFileStorage(path, { debounce, onError })` — `onError` hears a debounced write that failed, which is tried again a second later
 - `createStores(factory, { idle, sweepEvery, now })` → `get(id)`, `has(id)`, `ids()`, `stats()` — the live stores' stats rolled up: `{ stores, idle, sessions, replicas, rows, tombstones, log }` — `release(id)`, `sweep()`, `dispose()`; `isStoreId(id)`
 - `createHub(resolveStore, { send, user, authorizeId, authorize, channel, httpSnapshots, onError })` → `{ receive(message), close(), stores, user }` — the server side of a multiplexed connection, session-shaped; `channel` is a transport's topic fan-out, `httpSnapshots` `{ url(id), threshold }` its snapshot route
 - `toJSON(message)` — a message's JSON, encoded once however many sockets it goes to; use it in a transport of your own so a broadcast is not re-encoded per socket (`tagStore(message, id)` is what a hub does)

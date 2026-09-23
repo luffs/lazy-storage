@@ -59,7 +59,7 @@ export interface ServerStorage {
 /** Keeps the document in memory only (delta log included); for tests */
 export function memoryStorage(): ServerStorage;
 /** One JSON document per store, written atomically and debounced, without the delta log */
-export function jsonFileStorage(file: string, options?: { debounce?: number }): ServerStorage;
+export function jsonFileStorage(file: string, options?: { debounce?: number; onError?(error: unknown): void }): ServerStorage;
 
 // --- Stores -----------------------------------------------------------------------
 

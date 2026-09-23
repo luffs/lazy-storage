@@ -30,6 +30,12 @@ All notable changes to lazy-storage are documented here. The format follows Keep
   asynchronously (IndexedDB), a leader tab killed before the write landed
   took the only copy. The acknowledgement, and the answer to a hello
   carrying ops, now wait for the replica's storage to settle
+- **A failed `jsonFileStorage` write no longer crashes the server.** Its
+  debounced write ran in a timer, so a full disk or a permission error
+  was an uncaught exception that took the process down. It now goes to
+  a new `onError` option (default console), the changes stay pending, and
+  the write is tried again a second later; `flush()` still throws to its
+  caller
 
 ## [0.14.0] - 2026-09-23
 

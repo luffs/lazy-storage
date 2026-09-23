@@ -85,10 +85,14 @@ export function memoryStorage() {
 /**
  * One JSON file per store, written atomically (temp file + rename) and
  * debounced so a burst of ops costs one write. Call `flush()` before exit.
+ * A debounced write that fails (a full disk, a permission) runs in a timer,
+ * where a throw would take the process down: it goes to `onError`
+ * instead, the changes stay pending, and the write is tried again a
+ * second later. `flush()` throws to its caller
  * @param {string} file - path of the JSON file
- * @param {{ debounce?: number }} [options]
+ * @param {{ debounce?: number, onError?: (error: any) => void }} [options]
  */
-export function jsonFileStorage(file, { debounce = 200 } = {}) {
+export function jsonFileStorage(file, { debounce = 200, onError = err => console.error('lazy-storage:', err) } = {}) {
   const path = resolve(file);
   const doc = document(existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : null);
   let dirty = false;
@@ -103,16 +107,31 @@ export function jsonFileStorage(file, { debounce = 200 } = {}) {
     dirty = false;
   };
 
+  const later = ms => {
+    clearTimeout(timer);
+    timer = setTimeout(background, ms);
+    if (typeof timer?.unref === 'function') timer.unref();
+  };
+  function background() {
+    timer = null;
+    try {
+      write();
+    } catch (err) {
+      onError(err);
+      later(Math.max(debounce, 1000));
+    }
+  }
+
   return {
     load: doc.load,
     commit(change) {
       doc.commit(change);
       dirty = true;
-      clearTimeout(timer);
-      timer = setTimeout(write, debounce);
+      later(debounce);
     },
     flush() {
       clearTimeout(timer);
+      timer = null;
       write();
     }
   };
