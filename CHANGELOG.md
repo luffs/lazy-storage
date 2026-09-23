@@ -50,6 +50,26 @@ All notable changes to lazy-storage are documented here. The format follows Keep
   when the last lets go (mounting ~9 ms, an edit ~0.12 ms). The mirror
   is read-only: a write to it went nowhere but that component's copy,
   and Vue now warns instead; writes go to `db.state`
+- **The state cache is no longer rewritten dozens of times a second.** A
+  document adapter's state was written at most 50 ms after any batch, so
+  steady remote traffic serialized the whole state some 50 times a
+  second (38 MB/s for 10k tasks). It is now written once changes have
+  settled for `cacheDelay` (a new client option, default 1000 ms), at
+  least every ten delays under traffic that never settles, at once when
+  the page is hidden or goes away (`visibilitychange`, `pagehide`), and on
+  `dispose`. A cache that lags is safe: it carries the version it
+  reflects, a restore replays the outbox over it, and the reconnect asks
+  for what came since
+- **An offline outbox no longer grows quadratically in writes.** The
+  outbox was one document rewritten with every op: 1000 ops offline wrote
+  58 MB, the last ones ten times slower than the first. A document
+  adapter may now take the outbox op by op (`saveOp`, `removeOp`,
+  `dropOps`, the row adapters' calls; `save` stays for a whole outbox),
+  and `localStorageOutbox` does: `key` holds `{ replicaId, seq, first }`
+  and `key:op:<seq>` each op, so the same 1000 ops write 0.2 MB. A
+  document written by an earlier version is taken over on load; a client
+  of an earlier version cannot read the new form, so pending edits wait
+  for this version again after a downgrade
 - **A list removed from the wire is removed from the view.** Undoing the
   creation of a nested list (`task.subtasks = []`, then undo) left an
   empty array in the view where the wire had nothing

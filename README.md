@@ -258,11 +258,15 @@ own that keeps nothing across a reload, and its `onError` hears
 has, use `sharedConnection` (below).
 
 There are two kinds of storage adapter. A **document** adapter
-(`localStorageOutbox`, `memoryOutbox`) keeps the outbox as one small
-document written with every op, and the state as another, written
-debounced since it costs a serialization of everything; a restore replays
-the outbox over the cached state, so a state a few ops behind still comes
-up current. Fine for states up to a megabyte or so. A **row** adapter
+(`localStorageOutbox`, `memoryOutbox`) keeps the outbox, written with
+every op (`localStorageOutbox` keeps it op by op, so an op writes itself
+and not every op pending), and the state as one document. The state
+costs a serialization of everything, so it is written once changes have
+settled for `cacheDelay` (default a second), at least every ten of those
+under traffic that never settles, and at once when the page is hidden or
+goes away. It may lag safely: it is saved with the store version it
+reflects, a restore replays the outbox over it, and the reconnect asks
+for what came since. Fine for states up to a megabyte or so. A **row** adapter
 keeps one row per leaf and one per pending op, so a batch costs the
 leaves it touched and only a snapshot touches everything:
 `indexedDBStorage(name)` for browsers (a far larger quota than
@@ -846,7 +850,7 @@ runs on the synced state and shows in the array view like any other change.
 
 **Client** (`lazy-storage`)
 
-- `createClient({ store, connection | transport, initial, registers, lists, position, replicaId, storage, mirror, cache, undo, undoLimit, reconnect, presence, now })` — `mirror: true` is a follower's defaults: `cache`, `undo` and `presence` off, each still settable; `db.restored` — started from the cached state; `db.version` — the store version this client has seen everything up to; `db.wire` — the synced state under a lists view
+- `createClient({ store, connection | transport, initial, registers, lists, position, replicaId, storage, mirror, cache, cacheDelay, undo, undoLimit, reconnect, presence, now })` — `mirror: true` is a follower's defaults: `cache`, `undo` and `presence` off, each still settable; `db.restored` — started from the cached state; `db.version` — the store version this client has seen everything up to; `db.wire` — the synced state under a lists view
 - `openClient(options)` → `Promise<db>` — the same, for a storage adapter whose `load()` returns a promise
 - `createConnection({ transport, reconnect, keepalive })` → `connect()`, `close()`, `status` (`'offline' | 'connecting' | 'online'` — the socket's; a client says `online` only once its store is synced as well), `attached`, `closed` — why the server turned the socket away, or null — `fetch(path)` when the transport can — `on('status' | 'closed', fn)` — a socket shared by clients
 - `sharedConnection({ name, transport, storage, reconnect, keepalive, channel, locks, tabId, linger, sweepEvery, onError })` → the same, plus `leader`, `tabId`, `upstream` — the socket's status — `pending(store)` — the replica's unsent ops — `on('sync', fn)`, `follow(port, stores)` — a page on a MessagePort following the replica for those stores, ended by what it returns — `dispose()` — one socket and one replica per browser, the tabs electing a leader (see [One socket per browser](#one-socket-per-browser))

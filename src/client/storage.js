@@ -14,6 +14,17 @@
 //   clear()            -> void   forget both, for a store that is gone for good
 //   close()            -> void   optional: this client is done with it
 //
+// An adapter may also take the outbox op by op, as a row adapter does,
+// and is then handed each change instead of the whole outbox (a long
+// offline spell otherwise rewrites every pending op with every new one):
+//
+//   saveOp(op, meta)     an op new, or rewritten after a newer one pruned it
+//   removeOp(seq, meta)  an op a newer one emptied
+//   dropOps(seq, meta)   the ops up to an acknowledged seq
+//
+// where meta is { replicaId, seq, version, epoch }. `save` is still
+// called, for a whole outbox at once.
+//
 // Nothing is deleted on its own: a store closed for us, a team left, a
 // replica retired all leave their data where it is until the app says
 // clear() (or destroy(), for IndexedDB). The same closed codes can come
@@ -114,6 +125,31 @@ export function localStorageOutbox(key = 'lazy-storage', { onError = () => {} } 
       onError(err);
     }
   };
+  // The outbox is kept op by op, so an op costs a write of that op and
+  // not of every op pending: `key` holds { replicaId, seq, first } (first:
+  // the oldest pending seq), and `key:op:<seq>` each op. What a client of
+  // an earlier version wrote, the outbox as one document, is taken over on
+  // load
+  const opKey = seq => `${key}:op:${seq}`;
+  const remove = k => {
+    try {
+      globalThis.localStorage?.removeItem(k);
+    } catch { /* unavailable: nothing was stored */ }
+  };
+  const pending = new Set();   // seqs with an op key
+  let first = null;            // the smallest of them, null when none
+  const lowest = () => (pending.size ? Math.min(...pending) : null);
+  const writeMeta = meta => write(key, { replicaId: meta.replicaId, seq: meta.seq, first });
+  function putOp(op) {
+    write(opKey(op.seq), op);
+    pending.add(op.seq);
+    if (first === null || op.seq < first) first = op.seq;
+  }
+  function takeOp(seq, settle = true) {
+    remove(opKey(seq));
+    if (pending.delete(seq) && seq === first && settle) first = lowest();
+  }
+
   return {
     load() {
       if (yielded) return null;
@@ -126,12 +162,57 @@ export function localStorageOutbox(key = 'lazy-storage', { onError = () => {} } 
         if (typeof renewal?.unref === 'function') renewal.unref();
         globalThis.addEventListener?.('pagehide', onPageHide);
       }
-      const outbox = read(key);
-      if (!outbox) return null;
+      const doc = read(key);
+      if (!doc) return null;
+      pending.clear();
+      first = null;
+      let ops = [];
+      if (Array.isArray(doc.ops)) {
+        // One document, as an earlier version wrote it: taken apart once
+        for (const op of doc.ops) putOp(op);
+        ops = doc.ops;
+        writeMeta(doc);
+      } else if (Number.isInteger(doc.first) && Number.isInteger(doc.seq)) {
+        for (let s = doc.first; s <= doc.seq; s++) {
+          const op = read(opKey(s));
+          if (op) {
+            ops.push(op);
+            pending.add(s);
+          }
+        }
+        first = lowest();
+      }
+      const outbox = { replicaId: doc.replicaId, seq: doc.seq, ops };
       const cache = read(stateKey);
       return cache && typeof cache === 'object' ? { ...outbox, ...cache } : outbox;
     },
-    save: outbox => { if (!yielded) write(key, outbox); },
+    /** The whole outbox at once (what an adapter without the calls below is handed) */
+    save(outbox) {
+      if (yielded) return;
+      const keep = new Set(outbox.ops.map(op => op.seq));
+      for (const seq of [...pending]) if (!keep.has(seq)) takeOp(seq);
+      for (const op of outbox.ops) putOp(op);
+      writeMeta(outbox);
+    },
+    /** An op new or rewritten */
+    saveOp(op, meta) {
+      if (yielded) return;
+      putOp(op);
+      writeMeta(meta);
+    },
+    /** An op a newer one emptied */
+    removeOp(seq, meta) {
+      if (yielded) return;
+      takeOp(seq);
+      writeMeta(meta);
+    },
+    /** The ops up to an acknowledged seq */
+    dropOps(seq, meta) {
+      if (yielded) return;
+      for (const s of [...pending]) if (s <= seq) takeOp(s, false);
+      first = lowest();
+      writeMeta(meta);
+    },
     saveState: cache => { if (!yielded) write(stateKey, cache); },
     /** This client is done with the key: another tab may have it */
     close: release,
@@ -142,14 +223,15 @@ export function localStorageOutbox(key = 'lazy-storage', { onError = () => {} } 
         globalThis.localStorage?.setItem(leaseKey, JSON.stringify({ tab, at: Date.now() }));
       } catch { /* unavailable: nothing to guard */ }
     },
-    /** Remove both keys: for a store that is gone for good */
+    /** Remove the outbox, its ops, and the state: for a store that is gone for good */
     clear() {
-      try {
-        globalThis.localStorage?.removeItem(key);
-        globalThis.localStorage?.removeItem(stateKey);
-      } catch {
-        /* unavailable: nothing was stored */
-      }
+      const doc = read(key);
+      if (doc && Number.isInteger(doc.first) && Number.isInteger(doc.seq)) for (let s = doc.first; s <= doc.seq; s++) remove(opKey(s));
+      for (const seq of [...pending]) remove(opKey(seq));
+      pending.clear();
+      first = null;
+      remove(key);
+      remove(stateKey);
     }
   };
 }

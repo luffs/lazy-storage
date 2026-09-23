@@ -191,6 +191,12 @@ export interface DocumentStorage {
   saveState(cache: StateCache): void;
   /** Forget the outbox and the cache, for a store that is gone for good; the built-in adapters have it */
   clear?(): void;
+  /** Take the outbox op by op instead of whole (localStorageOutbox does): an op new or rewritten */
+  saveOp?(op: Op, meta: ClientMeta): void;
+  /** An op a newer one emptied */
+  removeOp?(seq: number, meta: ClientMeta): void;
+  /** The ops up to an acknowledged seq */
+  dropOps?(seq: number, meta: ClientMeta): void;
 }
 
 export interface RowDocument extends OutboxDocument {
@@ -252,6 +258,8 @@ export interface ClientOptionsBase<S extends object = any> {
   mirror?: boolean;
   /** Persist the state and start from it on the next load (default true; false under `mirror`) */
   cache?: boolean;
+  /** With a document adapter: write the state once changes have settled this long (ms, default 1000), at least every ten of these, and when the page is hidden */
+  cacheDelay?: number;
   /** Attach an undo manager (default true) */
   undo?: boolean;
   undoLimit?: number;

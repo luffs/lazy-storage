@@ -8,6 +8,7 @@ import { createNetwork } from './helpers.js';
 
 const INITIAL = { tasks: {} };
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+const tick = () => new Promise(resolve => setImmediate(resolve));
 
 /** An adapter that records every call */
 function recording() {
@@ -24,7 +25,7 @@ test('a local op writes the outbox at once and the state a moment later, once, w
   const { adapter, calls } = recording();
   const store = createStore({ initial: INITIAL });
   const net = createNetwork(store);
-  const a = createClient({ transport: net.link().factory, reconnect: false, store: 'main', initial: INITIAL, storage: adapter, replicaId: 'a' });
+  const a = createClient({ transport: net.link().factory, reconnect: false, store: 'main', initial: INITIAL, storage: adapter, replicaId: 'a', cacheDelay: 50 });
   a.connect();
   await net.settle();
   calls.length = 0;
@@ -168,6 +169,109 @@ test('takeOver() holds the key whatever lease a crashed tab left behind', () => 
     leader.takeOver();
     assert.equal(leader.load().replicaId, 'r1');
     leader.close();
+  } finally {
+    if (previous === undefined) delete globalThis.localStorage;
+    else globalThis.localStorage = previous;
+  }
+});
+
+test('the state is written once changes settle, at least every ten delays under steady traffic, and at once when the page is hidden', async () => {
+  const handlers = new Map();
+  const had = globalThis.addEventListener;
+  globalThis.addEventListener = (type, fn) => handlers.set(type, fn);
+  globalThis.removeEventListener = (type, fn) => { if (handlers.get(type) === fn) handlers.delete(type); };
+  try {
+    const { adapter, calls } = recording();
+    const store = createStore({ initial: INITIAL });
+    const net = createNetwork(store);
+    const a = createClient({ transport: net.link().factory, reconnect: false, store: 'main', initial: INITIAL, storage: adapter, replicaId: 'a', cacheDelay: 20 });
+    a.connect();
+    await net.settle();
+    await sleep(40);
+    calls.length = 0;
+    const states = () => calls.filter(([kind]) => kind === 'saveState').length;
+
+    // Remote traffic every 5 ms for 300 ms never settles: the ceiling (200 ms) writes once
+    const started = Date.now();
+    for (let i = 0; Date.now() - started < 300; i++) {
+      store.patch({ tasks: { [`r${i % 20}`]: { id: `r${i % 20}`, n: i } } });
+      await net.settle();
+      await sleep(5);
+    }
+    assert.equal(states(), 1, 'one write in 300 ms of traffic, not one per 50 ms');
+    await sleep(40);
+    assert.equal(states(), 2, 'and one once it settled');
+
+    store.patch({ tasks: { late: { id: 'late' } } });
+    await net.settle();
+    assert.equal(states(), 2);
+    handlers.get('pagehide')({ type: 'pagehide' });
+    assert.equal(states(), 3, 'a page going away writes what is pending at once');
+    assert.equal(calls.at(-1)[1].state.tasks.late.id, 'late');
+    a.dispose();
+    assert.equal(handlers.has('pagehide'), false, 'dispose lets go of the page');
+  } finally {
+    if (had === undefined) { delete globalThis.addEventListener; delete globalThis.removeEventListener; }
+    else globalThis.addEventListener = had;
+  }
+});
+
+test('localStorageOutbox keeps the outbox op by op: an op writes itself, not every op pending, and an earlier version\'s document is taken over', async () => {
+  const backing = new Map();
+  let written = 0;
+  const previous = globalThis.localStorage;
+  globalThis.localStorage = {
+    getItem: k => (backing.has(k) ? backing.get(k) : null),
+    setItem: (k, v) => { written += String(v).length; backing.set(k, String(v)); },
+    removeItem: k => backing.delete(k)
+  };
+  try {
+    const store = createStore({ initial: INITIAL });
+    const net = createNetwork(store);
+    const link = net.link();
+    const storage = localStorageOutbox('app');
+    const a = createClient({ transport: link.factory, reconnect: false, store: 'main', initial: INITIAL, storage, replicaId: 'a', cache: false });
+    a.connect();
+    await net.settle();
+    link.goOffline();
+    await net.settle();
+    const perOp = [];
+    for (let i = 0; i < 300; i++) {
+      const before = written;
+      a.state.tasks[`t${i}`] = { id: `t${i}`, title: `offline ${i}` };   // each op its own record: none makes another moot
+      await tick();
+      perOp.push(written - before);
+    }
+    assert.ok(perOp.at(-1) < perOp[0] * 2, `the 300th op wrote ${perOp.at(-1)} bytes, the first ${perOp[0]}: no growth with the outbox`);
+    assert.equal([...backing.keys()].filter(k => k.startsWith('app:op:')).length, 300);
+    a.dispose();
+    storage.close();
+
+    // Reloaded offline: every op comes back, in order, and goes out when online
+    const again = localStorageOutbox('app');
+    const b = createClient({ transport: link.factory, reconnect: false, store: 'main', initial: INITIAL, storage: again, cache: false });
+    assert.equal(b.replicaId, 'a');
+    assert.equal(b.pending, 300);
+    link.goOnline();
+    b.connect();
+    await net.settle();
+    assert.equal(b.pending, 0);
+    assert.equal(Object.keys(store.snapshot().tasks).length, 300);
+    assert.equal([...backing.keys()].filter(k => k.startsWith('app:op:')).length, 0, 'acknowledged ops leave storage');
+    b.dispose();
+    again.close();
+
+    // A document as 0.13 and earlier wrote it
+    backing.clear();
+    const op = { replicaId: 'old', seq: 2, ts: [1, 0, 'old'], diff: { tasks: { x: { id: 'x' } } } };
+    backing.set('legacy', JSON.stringify({ replicaId: 'old', seq: 2, ops: [op] }));
+    const legacy = localStorageOutbox('legacy');
+    assert.deepEqual(legacy.load().ops, [op]);
+    assert.deepEqual(JSON.parse(backing.get('legacy')), { replicaId: 'old', seq: 2, first: 2 }, 'taken apart into the new form');
+    assert.deepEqual(JSON.parse(backing.get('legacy:op:2')), op);
+    legacy.clear();
+    assert.deepEqual([...backing.keys()].filter(k => !k.endsWith(':lease')), [], 'clear() removes the ops too');
+    legacy.close();
   } finally {
     if (previous === undefined) delete globalThis.localStorage;
     else globalThis.localStorage = previous;

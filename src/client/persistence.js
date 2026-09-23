@@ -3,9 +3,15 @@
 // Two kinds of adapter, told apart by whether `commit` exists:
 //
 // A DOCUMENT adapter ({ load, save, saveState }) keeps the outbox as one
-// document, written whenever it changes (it is small), and the state as
-// another, written debounced because it costs a serialization of
-// everything.
+// document, written whenever it changes, and the state as another. One
+// that also takes the outbox op by op (saveOp, removeOp, dropOps, as
+// localStorageOutbox does) is handed each change instead, so an op costs
+// its own write rather than a rewrite of every op pending. The state costs
+// a serialization of everything, so it is written once changes have
+// settled for `cacheDelay` (and at least every ten of those under traffic
+// that never settles), when the page is hidden or goes away, and on
+// dispose. It may lag: it is saved with the version it reflects, a restore
+// replays the outbox over it, and the reconnect asks for what came since.
 //
 // A ROW adapter ({ load, commit, replace, saveOp, removeOp, dropOps })
 // keeps one row per leaf and one per pending op, so a batch costs the
@@ -49,8 +55,10 @@ export const stateRows = (state, regs) => leaves(state, regs).map(([path, value]
  * @param {() => {replicaId: string, seq: number, version: number, epoch: string|null}} deps.meta
  * @param {() => Object[]} deps.ops - the outbox
  * @param {(error: any) => void} deps.onError - a batch that could not be persisted
+ * @param {number} [deps.cacheDelay=1000] - a document adapter's state is
+ *   written once changes have settled for this long (ms)
  */
-export function createPersistence({ storage, cache, regs, state, meta, ops, onError }) {
+export function createPersistence({ storage, cache, regs, state, meta, ops, onError, cacheDelay = 1000 }) {
   if (isRowAdapter(storage)) {
     return {
       rows: true,
@@ -81,11 +89,18 @@ export function createPersistence({ storage, cache, regs, state, meta, ops, onEr
       },
       /** The version moved without the state changing: the next drop or op carries it */
       version() {},
-      flush() {}
+      flush() {},
+      dispose() {}
     };
   }
 
+  const incremental = typeof storage.saveOp === 'function';
+  // The first outbox write of a life goes whole, so an adapter still
+  // holding another replica's ops (a client started with an id of its
+  // own) is brought in line; op by op after that
+  let whole = true;
   let timer = null;
+  let dirtySince = null;   // when the state changed first since it was last written
   function writeOutbox() {
     const { replicaId, seq } = meta();
     storage.save({ replicaId, seq, ops: ops() });
@@ -93,23 +108,54 @@ export function createPersistence({ storage, cache, regs, state, meta, ops, onEr
   function writeState() {
     clearTimeout(timer);
     timer = null;
+    dirtySince = null;
     if (!cache) return;
     const { version, epoch } = meta();
     storage.saveState({ state: LazyWatch.snapshot(state()), version, epoch });
   }
+  /** Write the state once changes settle, and no later than ten delays after the first */
   function stateSoon() {
-    if (!cache || timer) return;
-    timer = setTimeout(writeState, 50);
+    if (!cache) return;
+    const now = Date.now();
+    if (dirtySince === null) dirtySince = now;
+    clearTimeout(timer);
+    timer = setTimeout(writeState, Math.max(0, Math.min(cacheDelay, dirtySince + 10 * cacheDelay - now)));
     if (typeof timer?.unref === 'function') timer.unref();
+  }
+  const flush = () => { if (timer) writeState(); };
+  // A page being hidden may be the last chance it gets: what is pending goes now
+  const onHide = event => {
+    if (event?.type === 'pagehide' || globalThis.document?.visibilityState === 'hidden') flush();
+  };
+  if (cache) {
+    globalThis.addEventListener?.('pagehide', onHide);
+    globalThis.document?.addEventListener?.('visibilitychange', onHide);
   }
   return {
     rows: false,
-    op: () => writeOutbox(),
-    drop: () => writeOutbox(),
+    op(op, superseded) {
+      if (!incremental || whole) {
+        whole = false;
+        return writeOutbox();
+      }
+      const m = meta();
+      for (const seq of superseded?.removed ?? []) storage.removeOp(seq, m);
+      for (const older of superseded?.changed ?? []) storage.saveOp(older, m);
+      storage.saveOp(op, m);
+    },
+    drop(seq) {
+      if (!incremental || whole) {
+        whole = false;
+        return writeOutbox();
+      }
+      storage.dropOps(seq, meta());
+    },
     batch: () => stateSoon(),
     version: () => stateSoon(),
-    flush() {
-      if (timer) writeState();
+    flush,
+    dispose() {
+      globalThis.removeEventListener?.('pagehide', onHide);
+      globalThis.document?.removeEventListener?.('visibilitychange', onHide);
     }
   };
 }

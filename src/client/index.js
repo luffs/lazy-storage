@@ -85,6 +85,9 @@ const HELLO_LIMIT = 1000;
  *   to false, each still settable on its own
  * @param {boolean} [options.cache=true] - persist the state with the
  *   outbox and start from it on the next load; false keeps only the outbox
+ * @param {number} [options.cacheDelay=1000] - with a document adapter, the
+ *   state is written once changes have settled this long (ms), at least
+ *   every ten of these under steady traffic, and when the page is hidden
  * @param {boolean} [options.undo=true] - attach an undo manager
  * @param {number} [options.undoLimit=100]
  * @param {{min: number, max: number}|false} [options.reconnect] - retry
@@ -128,6 +131,7 @@ function build({
   // presence. Each of the three can still be set on its own
   mirror = false,
   cache = !mirror,
+  cacheDelay = 1000,
   undo = !mirror,
   undoLimit = 100,
   reconnect = { min: 500, max: 10_000 },
@@ -206,7 +210,8 @@ function build({
     state: () => state,
     ops: () => outbox,
     meta: () => ({ replicaId, seq, version: known.v, epoch: known.epoch }),
-    onError: err => emit('error', err)
+    onError: err => emit('error', err),
+    cacheDelay
   });
 
   // Own batches (meta undefined) and undo/redo replays are history; remote
@@ -812,6 +817,7 @@ function build({
       disconnect();
       clearTimeout(retryTimer);
       persistence.flush();
+      persistence.dispose();
       stopStatus();
       stopSync();
       facade?.dispose();
