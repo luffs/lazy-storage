@@ -51,6 +51,14 @@ All notable changes to lazy-storage are documented here. The format follows Keep
   hello's 1000 went live: they now follow in another hello, the store
   saying `connecting` until it has them all. A hello refused for the
   rate is retried after `retryAfter` too
+- **An empty object no longer empties a record on disk.** An op writing
+  `{}` where a record stood (lazy-watch emits one for a container created
+  empty: `settings ??= {}` on a replica that had not heard of it yet) was
+  merged into the state, which kept the record's fields, but dropped
+  their rows, so after a restart the record came back empty. An empty
+  object outside a register now ensures the container and keeps what is
+  under it, in the rows and on load alike (`rebuild` takes the register
+  matcher to tell); in a register it is still the whole new value
 
 ## [0.12.1] - 2026-09-12
 

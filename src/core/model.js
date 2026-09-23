@@ -170,6 +170,11 @@ export function expandRegisters(diff, registers, state) {
   return walk(diff, []);
 }
 
+/** An empty object row where a container already stands, outside a register: nothing to do */
+const ensures = (state, path, value, registers) =>
+  Utils.isPlainObject(value) && Object.keys(value).length === 0 &&
+  !registers?.matches(path) && Utils.isPlainObject(valueAt(state, path));
+
 /** Rebuild a nested diff from accepted leaves */
 export function fromLeaves(entries) {
   const diff = {};
@@ -182,15 +187,19 @@ export function fromLeaves(entries) {
  * container's row lands before its children's and a leaf that later
  * became a container is overridden by the deeper rows. A row is
  * [pathKey, value]; a `null` value deletes the path (a tombstone on the
- * server). Values are cloned, so the rows may be kept.
+ * server). An empty object outside a register ensures a container and
+ * keeps what is there, as the merge and a patch treat it. Values are
+ * cloned, so the rows may be kept.
  * @param {Object} initial
  * @param {Array<[string, any]>} rows
+ * @param {{ matches: (path: string[]) => boolean }} [registers] - from registerSet()
  */
-export function rebuild(initial, rows) {
+export function rebuild(initial, rows, registers = null) {
   const state = structuredClone(initial);
   const ordered = rows.map(([key, value]) => [parsePathKey(key), value]).sort((a, b) => a[0].length - b[0].length);
   for (const [path, value] of ordered) {
     if (value === null) deleteAt(state, path);
+    else if (ensures(state, path, value, registers)) continue;
     else setAt(state, path, structuredClone(value));
   }
   return state;

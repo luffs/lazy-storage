@@ -142,3 +142,26 @@ test('the JSON file adapter round-trips through disk, atomically and debounced',
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('an empty object over a record ensures the container and keeps its fields, in memory and after a reload alike', () => {
+  const storage = memoryStorage();
+  const store = createStore({ initial: INITIAL, storage });
+  store.patch({ tasks: { x: { id: 'x', title: 'keep me', done: false } } });
+  // An offline replica ran `tasks.x ??= {}` before it had heard of x
+  store.apply({ replicaId: 'r', seq: 1, ts: T(Date.now() + 10, 'r'), diff: { tasks: { x: {} }, settings: {} } });
+  const expected = { id: 'x', title: 'keep me', done: false };
+  assert.deepEqual(store.state.tasks.x, expected);
+  assert.deepEqual(store.state.settings, { theme: 'light' });
+  store.dispose();
+  const again = createStore({ initial: INITIAL, storage });
+  assert.deepEqual(again.state.tasks.x, expected, 'the rows under x survived');
+  assert.deepEqual(again.state.settings, { theme: 'light' });
+
+  // A register's empty object is its whole value, and replaces
+  const regs = createStore({ initial: { meta: {} }, registers: ['meta'], storage: memoryStorage() });
+  regs.patch({ meta: { a: 1 } });
+  regs.patch({ meta: {} });
+  assert.deepEqual(regs.state.meta, {});
+  again.dispose();
+  regs.dispose();
+});

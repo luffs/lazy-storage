@@ -17,7 +17,8 @@
 // - A deletion at P wins if nothing at or below P is newer; it then drops
 //   every descendant entry and leaves a tombstone at P.
 // - A write that changes a container into a leaf (or a register) drops the
-//   descendant entries the container had.
+//   descendant entries the container had. An empty object is the one
+//   exception: it ensures a container and keeps what is under it.
 //
 // Besides the accepted diff, the merge reports exactly which entries it
 // set and dropped, so a storage adapter can persist the op as row upserts
@@ -62,7 +63,7 @@ export function mergeOp(clocks, ts, diff, registers, { authority = false } = {})
   for (const [path, value] of entries) {
     const ok = value === null
       ? acceptDelete(clocks, path, ts, dropped)
-      : acceptWrite(clocks, path, ts, dropped);
+      : acceptWrite(clocks, path, ts, dropped, isEnsure(value, path, registers));
     if (ok) {
       won.push([path, value]);
       dropped.delete(pathKey(path));
@@ -94,7 +95,17 @@ function liftTombstones(node, clocks, ts, path, dropped, authority) {
   }
 }
 
-function acceptWrite(clocks, path, ts, dropped) {
+/**
+ * An empty object outside a register says "a container is here" (lazy-watch
+ * emits one for a container created empty, `settings ??= {}`), not "empty
+ * it": a container replaced by an empty one arrives with its keys as
+ * nulls. It lands without dropping what is under the path, as a patch
+ * merges it into the state, so the rows persisted match the state held
+ */
+const isEnsure = (value, path, registers) =>
+  Utils.isPlainObject(value) && Object.keys(value).length === 0 && !registers.matches(path);
+
+function acceptWrite(clocks, path, ts, dropped, ensure = false) {
   for (let i = 1; i < path.length; i++) {
     const ancestor = clocks.get(pathKey(path.slice(0, i)));
     if (ancestor && ancestor.deleted) return false;
@@ -102,7 +113,7 @@ function acceptWrite(clocks, path, ts, dropped) {
   const key = pathKey(path);
   const own = clocks.get(key);
   if (own && compareTs(own.ts, ts) >= 0) return false;
-  dropDescendants(clocks, path, dropped);
+  if (!ensure) dropDescendants(clocks, path, dropped);
   clocks.set(key, { ts });
   return true;
 }

@@ -167,7 +167,7 @@ function build({
   const restored = cache && continuing && (rows ? Array.isArray(saved.rows) : Utils.isPlainObject(saved.state));
   const state = new LazyWatch(
     restored
-      ? (rows ? rebuild(initial, saved.rows) : { ...structuredClone(initial), ...structuredClone(saved.state) })
+      ? (rows ? rebuild(initial, saved.rows, regs) : { ...structuredClone(initial), ...structuredClone(saved.state) })
       : structuredClone(initial),
     { inverse: true }
   );

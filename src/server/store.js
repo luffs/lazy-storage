@@ -234,7 +234,7 @@ export function createStore({
   const regs = registerSet(registers);
   const locked = readOnly === true ? null : registerSet(readOnly);   // null: the whole store is read-only
   const saved = storage.load();
-  const state = new LazyWatch(rebuild(initial, saved ? saved.rows.map(([key, row]) => [key, row.deleted ? null : row.value]) : []));
+  const state = new LazyWatch(rebuild(initial, saved ? saved.rows.map(([key, row]) => [key, row.deleted ? null : row.value]) : [], regs));
   const clocks = new ClockMap(saved ? saved.rows.map(([key, row]) => [key, row.deleted ? { ts: row.ts, deleted: true } : { ts: row.ts }]) : []);
   const replicas = loadReplicas(saved);
   let version = saved ? saved.version : 0;
