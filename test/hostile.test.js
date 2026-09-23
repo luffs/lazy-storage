@@ -88,3 +88,19 @@ test('a timestamp counter near 2^53 is refused and cannot freeze the server cloc
   assert.equal(store.patch({ n: 2 }).accepted?.n, 2, 'the server\'s own writes keep landing');
   store.dispose();
 });
+
+test('a client cannot delete a top-level container of initial; the server can, and clearing it is fine', () => {
+  const store = createStore({ initial: { tasks: {}, order: [] } });
+  store.patch({ tasks: { a: { id: 'a' } } });
+  const { session, last } = rawSession(store, 'r1');
+  const op = (seq, diff) => session.receive({ t: 'op', op: { replicaId: 'r1', seq, ts: [Date.now(), seq, 'r1'], diff } });
+  op(1, { tasks: null });
+  assert.equal(last().code, 'forbidden');
+  op(2, { tasks: { b: { id: 'b' } } });
+  assert.equal(last().t, 'ack', 'writes under it still land');
+  op(3, { tasks: { a: null, b: null } });
+  assert.deepEqual(store.state.tasks, {}, 'emptied, not deleted');
+  op(4, { order: null });
+  assert.equal(last().t, 'ack', 'an array of initial is a leaf, and may go');
+  store.dispose();
+});

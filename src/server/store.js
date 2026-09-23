@@ -508,6 +508,13 @@ export function createStore({
       throw new RefusedError('clock-skew',
         `The op is stamped ${Math.round((op.ts[0] - wall) / 1000)} s ahead of the server's clock`, { now: wall, ts: op.ts });
     }
+    // A top-level container of `initial` is the skeleton every client
+    // expects: deleted, its tombstone would refuse every write under it
+    // (none of them a record write that lifts it) for the whole retention
+    const skeleton = entries.find(([path, value]) => value === null && path.length === 1 && Object.hasOwn(initial, path[0]) && Utils.isPlainObject(initial[path[0]]));
+    if (skeleton) {
+      throw new RefusedError('forbidden', `"${skeleton[0][0]}" is one of the store's top-level containers: clear what is in it rather than delete it`);
+    }
     const lockedLeaf = entries.find(([path]) => underReadOnly(path));
     if (lockedLeaf) throw new RefusedError('forbidden', locked ? `"${lockedLeaf[0].join('/')}" is read-only` : 'The store is read-only');
     const admitted = validated(op, session, entries);

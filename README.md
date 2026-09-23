@@ -289,7 +289,10 @@ dropped, inside one transaction, so the write cost of an edit is a few
 rows rather than the state. On load the state is `initial` with the rows
 applied on top: `initial` is the skeleton an app expects to exist (its
 top-level containers), the rows carry the data, and a container added to
-`initial` later simply appears.
+`initial` later simply appears. A client may empty one of those
+containers but not delete it (refused with `forbidden`), since its
+tombstone would refuse every write under it for the retention window;
+the server's own `patch` may.
 
 Adapters:
 
@@ -911,7 +914,7 @@ without help from the app, which only hears an `error` event:
 | Code | Why | What the client does |
 |---|---|---|
 | `invalid` | The op breaks the model: an array of objects outside a register, an array fragment, a malformed op | Drops the op and resyncs from a snapshot |
-| `forbidden` | A leaf under a read-only path, or `validate` refused | Same |
+| `forbidden` | A leaf under a read-only path, `validate` refused, or a deletion of a top-level container of `initial` | Same |
 | `expired` | Stamped before the retention window | Same |
 | `too-large` | More leaves than `maxLeaves` | Same |
 | `rate-limited` | Beyond the user's token bucket, or after such a refusal and before the next hello; `retryAfter` says how long in ms | Keeps the op, sends nothing more live, and resends its outbox in a hello after `retryAfter` |

@@ -59,6 +59,12 @@ All notable changes to lazy-storage are documented here. The format follows Keep
   object outside a register now ensures the container and keeps what is
   under it, in the rows and on load alike (`rebuild` takes the register
   matcher to tell); in a register it is still the whole new value
+- **A client can no longer delete a top-level container of `initial`.**
+  `{ tasks: null }` from any client left a tombstone at `tasks`, and every
+  later write under it was refused (none being a record write that lifts
+  it) until compaction, a month by default. Such a deletion is now
+  refused with `forbidden`; emptying the container still works, and the
+  server's own `patch` may still delete it
 
 ## [0.12.1] - 2026-09-12
 
