@@ -42,12 +42,30 @@ All notable changes to lazy-storage are documented here. The format follows Keep
   list's positions are read past the proxy; `reconcile` skips its sort
   when given every record (a push ~7 ms, a move ~22 ms, the rest of it
   lazy-watch's splice)
+- **Vue components on one client share one mirror.** Every `useClient`
+  call deep-copied the whole state and patched its own copy on every
+  batch: mounting 200 rows on a 1k-task state made 200 copies (~150 ms),
+  and every edit patched 200 mirrors (~1.3 ms). Calls on a client now
+  share one mirror and one set of refs, made by the first and stopped
+  when the last lets go (mounting ~9 ms, an edit ~0.12 ms). The mirror
+  is read-only: a write to it went nowhere but that component's copy,
+  and Vue now warns instead; writes go to `db.state`
 - **A list removed from the wire is removed from the view.** Undoing the
   creation of a nested list (`task.subtasks = []`, then undo) left an
   empty array in the view where the wire had nothing
 
 ### Added
 
+- **`useClientSelector(db, select, isEqual)` in `lazy-storage/react`**
+  re-renders a component only when what it selects changes. `useClient`
+  re-renders every component on it for every batch, share and status
+  event, and the state's records keep their identity as they change, so
+  `memo` could not help: 500 list rows re-rendered for an edit to one
+  (7 ms) and for a peer's cursor (4.9 ms). With the selector one row
+  renders for the edit (0.5 ms) and none for the cursor (0.2 ms). The
+  selection is copied out as plain data, compared deeply unless `isEqual`
+  says otherwise, and kept as the same object until it changes; it rides
+  on the client's one subscription. `trackClient` gains `version`
 - **`npm run bench:client`**, a benchmark of what an app feels on the
   client: React and Vue components on `useClient` as the store changes
   (counting re-renders and state copies), the array view of a large list

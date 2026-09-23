@@ -136,3 +136,44 @@ for (const [api, List] of Object.entries(components)) {
     assert.equal(captured.state.tasks.length, 2, 'unmounted: the mirror no longer follows');
   });
 }
+
+test('useClient shares one read-only mirror per client among its callers, and stops following with the last', async () => {
+  const store = createStore({ initial: INITIAL });
+  const net = createNetwork(store);
+  const a = net.client({ replicaId: 'a', initial: INITIAL });
+  await net.settle();
+  let watchers = 0;
+  const watch = a.watch;
+  a.watch = fn => { watchers++; const off = watch(fn); return () => { watchers--; off(); }; };
+
+  const one = effectScope();
+  const two = effectScope();
+  const first = one.run(() => useClient(a));
+  const second = two.run(() => useClient(a));
+  assert.equal(first.state, second.state, 'one mirror for both');
+  assert.equal(first.status, second.status, 'and one set of refs');
+  assert.equal(watchers, 1, 'following the client once');
+
+  const warn = console.warn;
+  console.warn = () => {};
+  try {
+    first.state.tasks.y = { id: 'y' };   // a write to the mirror goes nowhere
+  } finally {
+    console.warn = warn;
+  }
+  assert.equal(first.state.tasks.y, undefined, 'the mirror is read-only');
+
+  one.stop();
+  a.state.tasks.x = { id: 'x', title: 'after one stopped' };
+  await tick();
+  assert.equal(second.state.tasks.x.title, 'after one stopped', 'the other caller still follows');
+  assert.equal(watchers, 1);
+  two.stop();
+  assert.equal(watchers, 0, 'the last caller stopping stops following');
+  const third = useClient(a);
+  assert.notEqual(third.state, second.state, 'a later call starts a fresh mirror');
+  assert.equal(third.state.tasks.x.title, 'after one stopped');
+  third.stop();
+  third.stop();   // idempotent
+  assert.equal(watchers, 0);
+});

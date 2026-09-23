@@ -150,8 +150,12 @@ db.state.tasks.push({ title: 'Ship it' });                    // writes go to th
 ```
 
 In the Options API the same call fills `data()`
-(`data() { return { ...useClient(this.db), title: '' } }`). Either way
-the listeners stop with the component.
+(`data() { return { ...useClient(this.db), title: '' } }`). There is one
+mirror per client, however many components call `useClient`: the first
+makes it, the rest share it (a list of two hundred rows holds one copy
+of the state and patches it once per batch), and it stops following the
+client when the last of them unmounts. The mirror is read-only; writes
+go to `db.state`.
 
 `lazy-storage/react` needs no mirror: `useClient(db)` subscribes through
 `useSyncExternalStore`, so a component reads `db.state` directly and
@@ -166,6 +170,28 @@ function List({ db }) {
   return <ul>{state.tasks.map(task => <li key={task.id}>{task.title}</li>)}</ul>;
 }
 ```
+
+A component that reads a little of the state (a row of a long list, a
+badge) picks it with `useClientSelector(db, select, isEqual)` and
+re-renders only when that changes, not on every batch, share, or status
+event. The selection comes out as plain data (the state's own records
+keep their identity as they change, so they could never compare
+unequal), compared deeply unless `isEqual` says otherwise, and stays the
+same object until it changes, so it is safe in a dependency list:
+
+```jsx
+import { useClientSelector } from 'lazy-storage/react';
+
+function Row({ db, id }) {
+  const task = useClientSelector(db, state => state.tasks.find(t => t.id === id));
+  return <li>{task?.title}</li>;
+}
+const status = useClientSelector(db, (state, db) => db.status);
+```
+
+Five hundred rows on `useClient` all re-render for an edit to one of
+them, or a peer moving a cursor; on `useClientSelector` one row does,
+and none for the cursor (`npm run bench:client`).
 
 An app that keeps its own arrays instead, as a Vue store or a
 drag-and-drop list does, overwrites the view's arrays with them after a
@@ -839,9 +865,9 @@ runs on the synced state and shows in the array view like any other change.
 
 **Bun client** (`lazy-storage/client/sqlite`): `sqliteClientStorage(file, { wal })` → a row adapter on bun:sqlite, plus `db` and `close()`.
 
-**Vue** (`lazy-storage/vue`): `useClient(db)` → `{ state, status, presence, pending, closed, canUndo, canRedo, restored, stop }` — `state` a reactive mirror patched on every batch, the rest shallow refs; stops with the current effect scope (a component's), else by `stop()`.
+**Vue** (`lazy-storage/vue`): `useClient(db)` → `{ state, status, presence, pending, closed, canUndo, canRedo, restored, stop }` — `state` a read-only reactive mirror patched on every batch, the rest shallow refs, all one per client and shared by every caller; each call lets go with the current effect scope (a component's), else by `stop()`, and the last to let go stops the mirror.
 
-**React** (`lazy-storage/react`): `useClient(db)` → `{ state, status, presence, pending, closed, canUndo, canRedo, restored }`, a new object per change, through `useSyncExternalStore`; `trackClient(db)` → the `{ subscribe, getSnapshot }` pair underneath, one per client.
+**React** (`lazy-storage/react`): `useClient(db)` → `{ state, status, presence, pending, closed, canUndo, canRedo, restored }`, a new object per change, through `useSyncExternalStore`; `useClientSelector(db, select(state, db), isEqual?)` → what `select` picks, as plain data, re-rendering only when it changes (deep equality by default); `trackClient(db)` → the `{ subscribe, getSnapshot, version }` underneath, one per client.
 
 **Testing** (`lazy-storage/testing`): `createNetwork(store | { session })` → `client(options, { user })`, `link({ user })` → `{ factory, goOffline(), goOnline() }`, `settle()`, `pending` — clients and a store linked in memory, see [Testing](#testing); `fakeTime(start)` → a clock with `advance(ms)` and `set(ms)`.
 

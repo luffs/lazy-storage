@@ -22,7 +22,7 @@ const React = (await import('react')).default;
 const { act } = await import('react');
 const { createRoot } = await import('react-dom/client');
 const Vue = await import('vue');
-const { useClient: useReactClient } = await import('../src/react/index.js');
+const { useClient: useReactClient, useClientSelector } = await import('../src/react/index.js');
 const { useClient: useVueClient } = await import('../src/vue/index.js');
 
 const argv = process.argv.slice(2);
@@ -83,14 +83,20 @@ async function linked(n, clientOptions = {}, storeOptions = {}) {
 
 const h = React.createElement;
 
-async function reactTree(rows) {
+async function reactTree(rows, { selector = false } = {}) {
   const c = await linked(1000, {}, { presence: true });
   c.renders = 0;
-  const Row = ({ db, id }) => {
-    const { state } = useReactClient(db);
-    c.renders++;
-    return h('li', null, state.tasks[id]?.title);
-  };
+  const Row = selector
+    ? ({ db, id }) => {
+      const title = useClientSelector(db, state => state.tasks[id]?.title);
+      c.renders++;
+      return h('li', null, title);
+    }
+    : ({ db, id }) => {
+      const { state } = useReactClient(db);
+      c.renders++;
+      return h('li', null, state.tasks[id]?.title);
+    };
   const List = ({ db, rowIds }) => h('ul', null, rowIds.map(id => h(Row, { key: id, db, id })));
   c.el = document.createElement('div');
   c.root = createRoot(c.el);
@@ -124,6 +130,46 @@ await bench('react: a peer shares a cursor, 500 rows that never read peers', {
   unit: 'share',
   setup: async () => {
     const c = await reactTree(500);
+    c.peer = c.net.client({ replicaId: 'peer', initial: { tasks: {} } }, { user: { id: 'peer' } });
+    await act(async () => { await c.net.settle(); });
+    c.renders = 0;
+    const dispose = c.dispose;
+    c.dispose = async () => { c.peer.dispose(); await dispose(); };
+    return c;
+  },
+  iterations: 40,
+  run: async (c, n) => {
+    for (let i = 0; i < n; i++) {
+      await act(async () => {
+        c.peer.share({ cursor: i });
+        await c.net.settle();
+      });
+    }
+    return { renders: c.renders };
+  },
+  note: ({ renders }, n) => `${Math.round(renders / n)} row renders per share`
+});
+
+await bench('react: remote edit of one task, 500 rows each on useClientSelector', {
+  unit: 'batch',
+  setup: () => reactTree(500, { selector: true }),
+  iterations: 40,
+  run: async (c, n) => {
+    for (let i = 0; i < n; i++) {
+      await act(async () => {
+        c.store.patch({ tasks: { [c.ids[i % 500]]: { title: `edit ${i}` } } });
+        await c.net.settle();
+      });
+    }
+    return { renders: c.renders };
+  },
+  note: ({ renders }, n) => `${Math.round(renders / n)} row renders per batch`
+});
+
+await bench('react: a peer shares a cursor, 500 rows on useClientSelector', {
+  unit: 'share',
+  setup: async () => {
+    const c = await reactTree(500, { selector: true });
     c.peer = c.net.client({ replicaId: 'peer', initial: { tasks: {} } }, { user: { id: 'peer' } });
     await act(async () => { await c.net.settle(); });
     c.renders = 0;

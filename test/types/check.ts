@@ -16,7 +16,7 @@ import { createHandlers, serve } from 'lazy-storage/server/bun';
 import { sqliteStorage } from 'lazy-storage/server/sqlite';
 import { mergeOp } from 'lazy-storage/core';
 import { useClient as useClientVue } from 'lazy-storage/vue';
-import { useClient as useClientReact, trackClient } from 'lazy-storage/react';
+import { useClient as useClientReact, useClientSelector, trackClient } from 'lazy-storage/react';
 import { createNetwork, fakeTime } from 'lazy-storage/testing';
 
 interface Task { id: string; title: string; done: boolean }
@@ -76,6 +76,8 @@ const undoable: boolean = view.canUndo.value;
 view.stop();
 // @ts-expect-error the mirror's status is a ref
 const notARef: string = view.status;
+// @ts-expect-error the mirror is read-only: write to db.state
+view.state.tasks.a = { title: 'no' };
 
 const snap = useClientReact(db);
 const same: State = snap.state;
@@ -86,6 +88,10 @@ const unsubscribe: () => void = tracker.subscribe(() => {});
 unsubscribe();
 // @ts-expect-error a snapshot is read-only
 snap.pending = 0;
+const title: string | undefined = useClientSelector(db, state => state.tasks.a?.title);
+const statusSelected: string = useClientSelector(db, (state, client) => client.status, (a, b) => a === b);
+const trackerVersion: number = tracker.version;
+void title; void statusSelected; void trackerVersion;
 void mirrored; void online; void undoable; void same; void queued; void reason;
 
 // --- Testing entry -----------------------------------------------------------

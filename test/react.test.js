@@ -3,9 +3,10 @@ import './dom.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import React, { act } from 'react';
+import { LazyWatch } from 'lazy-watch';
 import { createRoot } from 'react-dom/client';
 import { createStore } from '../src/server/index.js';
-import { useClient, trackClient } from '../src/react/index.js';
+import { useClient, useClientSelector, trackClient } from '../src/react/index.js';
 import { createNetwork } from './helpers.js';
 
 const h = React.createElement;
@@ -98,4 +99,48 @@ test('trackClient hands React one snapshot per change, and re-reads the facts fo
   assert.equal(third.pending, 1);
   assert.equal(third.state, a.state, 'the state is the same proxy every time');
   off();
+});
+
+test('useClientSelector re-renders a component only when what it selects changes, and hands out plain, stable data', async () => {
+  const store = createStore({ initial: { tasks: {} }, presence: true });
+  const net = createNetwork(store);
+  const a = net.client({ replicaId: 'a', initial: { tasks: [] }, lists: ['tasks'] }, { user: { id: 'u1' } });
+  const b = net.client({ replicaId: 'b', initial: { tasks: [] }, lists: ['tasks'] }, { user: { id: 'u2' } });
+  a.state.tasks.push({ id: 'x', title: 'one' }, { id: 'y', title: 'two' });
+  await net.settle();
+
+  const renders = { x: 0, y: 0, status: 0 };
+  const seen = [];
+  function Row({ id }) {
+    const task = useClientSelector(a, state => state.tasks.find(t => t.id === id));
+    renders[id]++;
+    if (id === 'x') seen.push(task);
+    return h('li', null, task?.title);
+  }
+  function Status() {
+    const status = useClientSelector(a, (state, db) => db.status);
+    renders.status++;
+    return h('p', null, status);
+  }
+  const el = document.createElement('div');
+  const root = createRoot(el);
+  await act(async () => { root.render(h('div', null, h(Row, { id: 'x' }), h(Row, { id: 'y' }), h(Status))); });
+  assert.equal(el.textContent, 'onetwoonline');
+  const before = { ...renders };
+
+  await act(async () => { b.state.tasks[0].title = 'ONE'; await net.settle(); });
+  assert.equal(el.textContent, 'ONEtwoonline');
+  assert.equal(renders.x - before.x, 1, 'the row whose task changed renders once');
+  assert.equal(renders.y, before.y, 'the other row does not');
+  assert.equal(renders.status, before.status, 'nor a component selecting the status');
+
+  const quiet = { ...renders };
+  await act(async () => { b.share({ cursor: 3 }); await net.settle(); });
+  assert.deepEqual(renders, quiet, 'a peer sharing re-renders nobody that does not select peers');
+
+  assert.equal(LazyWatch.isProxy(seen.at(-1)), false, 'a selection is plain data');
+  assert.deepEqual(seen.at(-1), { id: 'x', title: 'ONE' });
+  await act(async () => { root.render(h('div', null, h(Row, { id: 'x' }), h(Row, { id: 'y' }), h(Status), h('span'))); });
+  assert.equal(seen.at(-1), seen.at(-2), 'the same object until it changes');
+  await act(async () => { root.unmount(); });
 });

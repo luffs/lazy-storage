@@ -25,6 +25,8 @@ export interface ClientSnapshot<S extends object = any> {
 export interface ClientTracker<S extends object = any> {
   subscribe(listener: () => void): () => void;
   getSnapshot(): ClientSnapshot<S>;
+  /** Bumped by every change while subscribed, and when the subscription opens */
+  readonly version: number;
 }
 
 export function trackClient<S extends object = any>(db: Client<S>): ClientTracker<S>;
@@ -34,3 +36,15 @@ export function trackClient<S extends object = any>(db: Client<S>): ClientTracke
  * batch, outbox change, and event, through useSyncExternalStore
  */
 export function useClient<S extends object = any>(db: Client<S>): ClientSnapshot<S>;
+
+/**
+ * What `select` picks from the client, re-rendering the component only
+ * when that changes (by `isEqual`, deep by default). The selection comes
+ * out of the client's state as plain data, the same object until it
+ * changes. One subscription per client serves every hook on it
+ */
+export function useClientSelector<S extends object = any, T = unknown>(
+  db: Client<S>,
+  select: (state: S, db: Client<S>) => T,
+  isEqual?: (previous: T, next: T) => boolean
+): T;
