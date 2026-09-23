@@ -4,6 +4,16 @@ All notable changes to lazy-storage are documented here. The format follows Keep
 
 ## [Unreleased]
 
+### Changed
+
+- **Requires lazy-watch 6.4.0**, whose `splice` and `shift` return what
+  they removed. On a list view, the usual move (`const [m] =
+  db.state.tasks.splice(i, 1); db.state.tasks.splice(j, 0, m)`) inserted
+  a second copy of the record after the one moved and lost the moved
+  one, and the loss synced to everyone; it now moves the record. Its
+  faster splice also halves a move on a large list view (~20 ms to ~8 ms
+  on 5k records)
+
 ### Security
 
 - **A replica belongs to its user, connected or away.** 0.13.0 refused a

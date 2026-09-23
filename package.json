@@ -85,7 +85,7 @@
     "react"
   ],
   "dependencies": {
-    "lazy-watch": "^6.3.0"
+    "lazy-watch": "^6.4.0"
   },
   "publishConfig": {
     "provenance": true,
