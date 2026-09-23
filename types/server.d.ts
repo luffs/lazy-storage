@@ -37,6 +37,12 @@ export interface StorageDocument {
   log?: LogEntry[];
 }
 
+/** What `store.export()` gives: a storage document, JSON all through, that any adapter's `replace` takes */
+export interface StoreDocument extends StorageDocument {
+  format: 'lazy-storage/store';
+  schema: number;
+}
+
 export interface StorageCommit {
   upserts: Array<[key: string, row: StoredRow]>;
   deletes: string[];
@@ -60,12 +66,19 @@ export interface ServerStorage {
   flush(): void;
   /** Optional: the store let go of this storage (on dispose); a SQLite adapter gives up its lease */
   close?(): void;
+  /**
+   * Optional: take a document (`store.export()`, or another adapter's
+   * `load()`) as the store's whole storage, for a restore or a move,
+   * under a new epoch (clients that were connected get a snapshot) and
+   * without a delta log. Never under a live store
+   */
+  replace?(doc: StorageDocument): void;
 }
 
 /** Keeps the document in memory only (delta log included); for tests */
-export function memoryStorage(): ServerStorage;
+export function memoryStorage(): ServerStorage & { replace(doc: StorageDocument): void };
 /** One JSON document per store, written atomically and debounced, without the delta log */
-export function jsonFileStorage(file: string, options?: { debounce?: number; onError?(error: unknown): void }): ServerStorage;
+export function jsonFileStorage(file: string, options?: { debounce?: number; onError?(error: unknown): void }): ServerStorage & { replace(doc: StorageDocument): void };
 
 // --- Stores -----------------------------------------------------------------------
 
@@ -265,6 +278,13 @@ export interface Store<S extends object = any> {
   stats(): StoreStats;
   /** Forget what the retention window no longer needs */
   compact(): { tombstones: number; replicas: number };
+  /**
+   * The store as a document: every row with the timestamp that won it
+   * (tombstones included), each replica's progress and owner, the version,
+   * epoch and schema. An adapter's `replace` makes a store of it that
+   * refuses what this one would
+   */
+  export(): StoreDocument;
   flush(): void;
   dispose(): void;
   /** True once dispose() ran (a registry's idle sweep does): patch, apply and session throw from then on */

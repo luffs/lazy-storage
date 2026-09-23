@@ -10,7 +10,7 @@ import { createClient as createClientAgain } from 'lazy-storage/client';
 import { sqliteClientStorage } from 'lazy-storage/client/sqlite';
 import {
   createStore, createStores, createHub, memoryStorage, jsonFileStorage, isStoreId, toJSON, tagStore,
-  type Store, type ServerStorage, type StorageCommit, type OpEvent
+  type Store, type ServerStorage, type StorageCommit, type OpEvent, type StoreDocument
 } from 'lazy-storage/server';
 import { createHandlers, serve } from 'lazy-storage/server/bun';
 import { sqliteStorage } from 'lazy-storage/server/sqlite';
@@ -188,6 +188,12 @@ const evicted: number = store.closeSessions(s => (s.user as { id: string }).id =
 const stats = store.stats();
 const version2: number = stats.version;
 const compacted: { tombstones: number; replicas: number } = store.compact();
+const exported: StoreDocument = store.export();
+const exportedSchema: number = exported.schema;
+memoryStorage().replace(exported);
+jsonFileStorage('restore.json').replace(JSON.parse(JSON.stringify(exported)));
+// @ts-expect-error a document has a version
+memoryStorage().replace({ rows: [] });
 
 const stores = createStores(id => (isStoreId(id) ? createStore<State>({ storage: memoryStorage() }) : null), { idle: 60_000 });
 const got: Store<State> | null = stores.get('team-1');
@@ -223,7 +229,9 @@ async function bun() {
 }
 const sqlite = sqliteStorage('data/state.sqlite');
 const adapter: ServerStorage = sqlite.store('team-1');
-void [evicted, version2, compacted, got, released, storeName, bun, adapter];
+sqlite.store('team-2').replace(exported);
+sqlite.backup('backups/state.sqlite');
+void [evicted, version2, compacted, exportedSchema, got, released, storeName, bun, adapter];
 
 // --- Node -----------------------------------------------------------------------------
 import { serve as serveNode, createHandlers as createNodeHandlers, toRequest } from 'lazy-storage/server/node';

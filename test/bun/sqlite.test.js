@@ -106,6 +106,30 @@ test('an in-memory database works for tests and throwaway servers', () => {
   sqlite.close();
 });
 
+test('an exported store is taken in whole, and a backup of a live file serves at once', () => {
+  const original = createStore({ initial: INITIAL });
+  original.patch({ tasks: { a: { id: 'a', title: 'Milk' }, b: { id: 'b' } } });
+  original.patch({ tasks: { b: null } });
+  const sqlite = sqliteStorage(join(dir, 'export.sqlite'));
+  sqlite.store('copy').replace(original.export());
+  const loaded = createStore({ initial: INITIAL, storage: sqlite.store('copy') });
+  assert.deepEqual(loaded.snapshot(), original.snapshot());
+  assert.equal(loaded.version, original.version);
+  assert.equal(loaded.apply({ replicaId: 'late', seq: 1, ts: T(1, 'late'), diff: { tasks: { b: { id: 'b' } } } }).accepted, null, 'the tombstone came along');
+  assert.throws(() => sqlite.store('copy').replace(original.export()), err => err.code === 'store-open');
+
+  loaded.patch({ tasks: { c: { id: 'c' } } });
+  sqlite.backup(join(dir, 'export-backup.sqlite'));
+  const restored = sqliteStorage(join(dir, 'export-backup.sqlite'));
+  const fromBackup = createStore({ initial: INITIAL, storage: restored.store('copy') });
+  assert.deepEqual(fromBackup.snapshot(), loaded.snapshot());
+  fromBackup.dispose();
+  restored.close();
+  loaded.dispose();
+  sqlite.close();
+  original.dispose();
+});
+
 afterAll(async () => {
   // Windows can hold SQLite's WAL side files briefly after close; the temp
   // dir is disposable either way

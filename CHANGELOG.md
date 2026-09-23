@@ -37,6 +37,18 @@ All notable changes to lazy-storage are documented here. The format follows Keep
   that has run more than the list holds (a rollback after a newer version
   migrated it) is refused with code `schema-ahead`; a migration that
   throws stops the load, naming it. `store.stats()` gains `schema`
+- **Backups, restores, and moving a store.** `store.export()` gives a
+  store as a JSON document (rows with their timestamps, tombstones,
+  replicas' progress and owners, version and schema), and every adapter
+  takes one, or another adapter's `load()`, with `replace(doc)`: from a
+  JSON file to SQLite, from one server to another, or back from a copy.
+  `sqlite.backup(file)` copies a whole SQLite file with `VACUUM INTO`
+  while the server runs, without its leases. A replaced store, and every
+  store in a backup, starts a new epoch, so a client that saw more than
+  the copy holds is sent a snapshot rather than a delta from a history it
+  never had. The SQLite adapter refuses to replace a store this process
+  has loaded (`store-open`) or another serves (`store-locked`), and
+  writes the document in one transaction
 
 ## [0.15.0] - 2026-09-23
 

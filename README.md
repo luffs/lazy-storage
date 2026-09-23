@@ -391,7 +391,8 @@ that took over. A crashed process's lease runs out after `lease.ttl`
 Stores are leased one by one: processes may share a file on purpose by
 serving different stores. `lease: false` turns it off.
 
-A custom adapter implements `load()`, `commit(change)`, and `flush()`;
+A custom adapter implements `load()`, `commit(change)`, and `flush()`,
+and optionally `close()` (the store let go of it) and `replace(doc)`;
 `change` carries the rows an op won and dropped, the replica's progress,
 the version and epoch, and optionally the accepted diff as a `log` entry
 with the `logFloor` below which the store no longer needs entries. See
@@ -457,6 +458,40 @@ then `stores.get(id)`). Edits a client made offline in the old shape are
 applied as written when it returns, so a migration that renames is best
 paired with a `validate` that translates or refuses the old name for a
 while.
+
+### Backups, restores, and moving a store
+
+`store.export()` gives a store as a JSON document: every row with the
+timestamp that won it (tombstones included), each replica's progress and
+owner, and the version and schema. Every adapter takes one with
+`replace(doc)` as a store's whole storage, as it does another adapter's
+`load()`. A store loaded from it refuses what the original would (a stale
+write, a write under a tombstone, another user's replica):
+
+```js
+// From a JSON file to SQLite
+sqlite.store('team-1').replace(jsonFileStorage('data/team-1.json').load());
+
+// A live store, saved for later or to look at
+writeFileSync('team-1.json', JSON.stringify(stores.get('team-1').export()));
+```
+
+For a whole SQLite file, `sqlite.backup(file)` copies it with `VACUUM
+INTO` while the server runs: consistent, compacted, and without the
+leases, so a server started on the copy serves its stores at once.
+
+A copy is older than what clients have seen by the time it is restored.
+So a replaced store, and every store in a backup, starts a new
+**epoch**: a client that was connected gets a snapshot when it comes back
+rather than a delta, which would come from a history it never had. The
+cost of a move is one snapshot per client. Edits acknowledged after the
+copy was made are lost with the restore; edits still waiting in a
+client's outbox are sent again and applied.
+
+`replace` is never done under a live store: the SQLite adapter refuses a
+store this process has loaded (code `store-open`; `stores.release(id)`
+first) and one another process serves (`store-locked`), and writes the
+document in one transaction.
 
 ## Multiple stores
 
@@ -970,14 +1005,14 @@ runs on the synced state and shows in the array view like any other change.
 - `store.closeSessions(predicate, message)` — evict sessions; `store.presence()` — distinct users with a live session; `store.peers()` — every live session as `{ replicaId, user, data }`
 - `store.patch(diff)` — a server-side change, timestamped and broadcast, never held back by a tombstone; `store.patchFrom(diff, state)` — a lazy-watch batch from state kept elsewhere, its array fragments replaced with the whole arrays read from `state` (see [Serving state the server owns](#serving-state-the-server-owns)); `store.apply(op)` — a trusted op, gates skipped
 - `store.on(listener)`, `store.snapshot()`, `store.state`, `store.version`, `store.replicas`
-- `store.compact()` → `{ tombstones, replicas }` removed; `store.flush()`, `store.dispose()`
+- `store.compact()` → `{ tombstones, replicas }` removed; `store.export()` → the store as a JSON document (see [Backups](#backups-restores-and-moving-a-store)); `store.flush()`, `store.dispose()`
 - `memoryStorage()`, `jsonFileStorage(path, { debounce, onError })` — `onError` hears a debounced write that failed, which is tried again a second later
 - `createStores(factory, { idle, sweepEvery, now })` → `get(id)`, `has(id)`, `ids()`, `stats()` — the live stores' stats rolled up: `{ stores, idle, sessions, replicas, rows, tombstones, log }` — `release(id)`, `sweep()`, `dispose()`; `isStoreId(id)`
 - `createHub(resolveStore, { send, user, authorizeId, authorize, channel, httpSnapshots, onError })` → `{ receive(message), close(), stores, user }` — the server side of a multiplexed connection, session-shaped; `channel` is a transport's topic fan-out, `httpSnapshots` `{ url(id), threshold }` its snapshot route
 - `toJSON(message)` — a message's JSON, encoded once however many sockets it goes to; use it in a transport of your own so a broadcast is not re-encoded per socket (`tagStore(message, id)` is what a hub does)
 
 **SQLite** (`lazy-storage/server/sqlite`, Bun): `sqliteStorage(file, { wal, lease: { ttl } | false })` →
-`store(id)` (whose load takes the store's lease, and `close()` gives it up), `ids()`, `remove(id)`, `db`, `close()` (gives up every lease).
+`store(id)` (whose load takes the store's lease, `close()` gives it up, and `replace(doc)` takes a document), `ids()`, `remove(id)`, `backup(file)`, `db`, `close()` (gives up every lease). `memoryStorage()` and `jsonFileStorage(file)` take a document with `replace(doc)` too.
 
 **Bun adapter** (`lazy-storage/server/bun`): `serve({ stores, port, path, fetch, authenticate, authorizeId, authorize, maxPayload, perMessageDeflate, httpSnapshots, onError })` —
 `stores` is a registry or `id => store|null` (for one store, `() => store`); the

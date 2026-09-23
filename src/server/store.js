@@ -982,6 +982,31 @@ export function createStore({
    * a tombstone on its way is lifted, so what it writes at a deleted path
    * re-adds it, id or not.
    */
+  function exportDocument() {
+    const raw = LazyWatch.resolveIfProxy(state);
+    const rows = [];
+    for (const [key, entry] of clocks) {
+      if (entry.deleted) {
+        rows.push([key, { ts: entry.ts, deleted: true }]);
+        continue;
+      }
+      const path = parsePathKey(key);
+      const value = valueAt(raw, path);
+      // A container written as a leaf (an empty object) keeps its fields as
+      // rows of their own: the row is the container, not what fills it
+      const leaf = Utils.isPlainObject(value) && !regs.matches(path) ? {} : structuredClone(value);
+      rows.push([key, { value: leaf, ts: entry.ts }]);
+    }
+    return {
+      format: 'lazy-storage/store',
+      rows,
+      replicas: Object.fromEntries([...replicas].map(([id, progress]) => [id, { ...progress }])),
+      version,
+      epoch,
+      schema
+    };
+  }
+
   function patch(diff) {
     alive('patch');
     return apply({ replicaId: 'server', seq: ++serverSeq, ts: clock.now(), diff }, undefined, { authority: true });
@@ -1056,6 +1081,16 @@ export function createStore({
     },
     /** Forget what the retention window no longer needs; returns { tombstones, replicas } removed */
     compact,
+    /**
+     * The store as a storage document, JSON all through: every row with the
+     * timestamp that won it (tombstones included), each replica's progress
+     * and owner, and the version, epoch and schema. An adapter's
+     * `replace(doc)` makes a store of it that refuses what this one would:
+     * a stale write, a write under a tombstone, another user's replica.
+     * For backups, moving a store between adapters or servers, and looking
+     * at one
+     */
+    export: exportDocument,
     flush: () => storage.flush(),
     dispose() {
       if (disposed) return;

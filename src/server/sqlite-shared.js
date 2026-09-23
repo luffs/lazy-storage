@@ -34,6 +34,7 @@
 
 import { hostname } from 'node:os';
 import { randomId } from '../core/ids.js';
+import { assertDocument, newEpoch } from './storage.js';
 
 const SCHEMA = `
   CREATE TABLE IF NOT EXISTS leaves (
@@ -199,6 +200,17 @@ export function sqliteStorageOn({ exec, prepare, transaction, close, db }, { fil
     q.setVersion.run(id, change.version, change.epoch, Number.isInteger(change.schema) ? change.schema : null);
   });
 
+  const replace = transaction((id, doc) => {
+    q.dropLeaves.run(id);
+    q.dropReplicas.run(id);
+    q.dropLog.run(id);
+    for (const [key, row] of doc.rows) {
+      q.upsert.run(id, key, row.deleted ? null : JSON.stringify(row.value), row.ts[0], row.ts[1], row.ts[2], row.deleted ? 1 : 0);
+    }
+    for (const [replica, r] of Object.entries(doc.replicas ?? {})) q.setReplica.run(id, replica, r.seq, r.seen ?? null, r.owner ?? null);
+    q.setVersion.run(id, doc.version, newEpoch(), Number.isInteger(doc.schema) ? doc.schema : null);
+  });
+
   const remove = transaction(id => {
     q.dropLeaves.run(id);
     q.dropReplicas.run(id);
@@ -234,6 +246,28 @@ export function sqliteStorageOn({ exec, prepare, transaction, close, db }, { fil
           commit(id, change);
         },
         flush() {},
+        /**
+         * Take a document (store.export(), or another adapter's load()) as
+         * this store's whole storage, in one transaction, under a new epoch
+         * and without a delta log (see newEpoch in storage.js). Never under a live
+         * store: one this process has loaded is refused with code
+         * 'store-open' (release it first), one another process serves with
+         * 'store-locked'
+         */
+        replace(doc) {
+          assertDocument(doc);
+          if (held.has(id)) {
+            const err = new Error(`Store "${id}" is loaded here: release it (stores.release(id), or dispose it) before replacing its storage`);
+            err.code = 'store-open';
+            throw err;
+          }
+          acquire(id);
+          try {
+            replace(id, doc);
+          } finally {
+            this.close();
+          }
+        },
         /** The store is let go of: another process may serve it now */
         close() {
           if (!leasing || !held.delete(id)) return;
@@ -249,6 +283,24 @@ export function sqliteStorageOn({ exec, prepare, transaction, close, db }, { fil
     remove(id) {
       assertId(id);
       remove(id);
+    },
+    /**
+     * Copy the whole file to `file` (which must not exist yet) as it
+     * stands, with VACUUM INTO: consistent while the server runs, and
+     * compact. The copy holds no leases, so a server opened on it serves
+     * its stores at once, and gives every store a new epoch: by the time
+     * it is restored, clients have seen more than it holds (see newEpoch
+     * in storage.js)
+     */
+    backup(file) {
+      if (typeof file !== 'string' || !file || file === ':memory:') throw new TypeError('backup needs a file path');
+      prepare('VACUUM INTO ?').run(file);
+      prepare("ATTACH DATABASE ? AS lazy_backup").run(file);
+      try {
+        exec('DELETE FROM lazy_backup.leases; UPDATE lazy_backup.stores SET epoch = lower(hex(randomblob(8)));');
+      } finally {
+        exec('DETACH DATABASE lazy_backup;');
+      }
     },
     /** The underlying database object, for backups or ad-hoc queries */
     db,

@@ -21,6 +21,11 @@
 //            replica?: { id, seq, seen, owner? }, forgetReplicas?: replicaId[], version, epoch, schema,
 //            log?: { v, diff }, logFloor?: number })
 //   flush() -> void   (write out anything buffered; called on dispose)
+//   replace(doc) -> void   optional: take a document as load() gives it
+//                          (or store.export() makes it) as the store's
+//                          whole storage, for a restore or a move; never
+//                          under a live store. It starts a new epoch (see
+//                          newEpoch below) and no delta log
 //
 // `seen` is the store's clock (ms) when the replica's op arrived; a
 // `seen` of null means unknown (a document from before it was recorded).
@@ -42,12 +47,31 @@
 // in-memory copy and write the whole document.
 import { existsSync, readFileSync, mkdirSync, writeFileSync, renameSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
+import { randomId } from '../core/ids.js';
+
+/**
+ * The epoch a replaced store starts. A document may be older than what
+ * clients have seen (a backup restored after the store moved on); with the
+ * epoch it was taken under, a client that was ahead would, once the store
+ * passes its version again, be sent a delta from a history it never had.
+ * A new epoch sends every client that was connected a snapshot instead
+ */
+export function newEpoch() {
+  return randomId();
+}
+
+/** A document replace() may take: rows, a version, and the rest optional */
+export function assertDocument(doc) {
+  if (!doc || !Array.isArray(doc.rows) || !Number.isInteger(doc.version)) {
+    throw new TypeError('A store document has rows and a version (see store.export())');
+  }
+}
 
 /** The in-memory document shared by the memory and JSON-file adapters */
 function document(initial = null, { keepLog = false } = {}) {
-  const rows = new Map(initial ? initial.rows : []);
+  let rows = new Map(initial ? initial.rows : []);
   let log = keepLog && Array.isArray(initial?.log) ? initial.log.map(e => structuredClone(e)) : [];
-  const replicas = initial ? structuredClone(initial.replicas ?? {}) : {};
+  let replicas = initial ? structuredClone(initial.replicas ?? {}) : {};
   let version = initial ? initial.version : 0;
   let epoch = initial?.epoch ?? null;
   let schema = Number.isInteger(initial?.schema) ? initial.schema : undefined;
@@ -73,7 +97,17 @@ function document(initial = null, { keepLog = false } = {}) {
         if (Number.isInteger(change.logFloor)) log = log.filter(e => e.v >= change.logFloor);
       }
     },
-    serialize: () => ({ rows: [...rows], replicas, version, epoch, ...(schema === undefined ? {} : { schema }), ...(keepLog ? { log } : {}) })
+    serialize: () => ({ rows: [...rows], replicas, version, epoch, ...(schema === undefined ? {} : { schema }), ...(keepLog ? { log } : {}) }),
+    replace(doc) {
+      assertDocument(doc);
+      rows = new Map(doc.rows.map(([k, r]) => [k, structuredClone(r)]));
+      replicas = structuredClone(doc.replicas ?? {});
+      version = doc.version;
+      epoch = newEpoch();
+      schema = Number.isInteger(doc.schema) ? doc.schema : undefined;
+      log = [];
+      seen = true;
+    }
   };
 }
 
@@ -83,7 +117,8 @@ export function memoryStorage() {
   return {
     load: doc.load,
     commit: doc.commit,
-    flush: () => {}
+    flush: () => {},
+    replace: doc.replace
   };
 }
 
@@ -138,6 +173,11 @@ export function jsonFileStorage(file, { debounce = 200, onError = err => console
       clearTimeout(timer);
       timer = null;
       write();
+    },
+    replace(document) {
+      doc.replace(document);
+      dirty = true;
+      this.flush();
     }
   };
 }
