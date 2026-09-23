@@ -2,7 +2,15 @@
 
 All notable changes to lazy-storage are documented here. The format follows Keep a Changelog; versions follow Semantic Versioning.
 
-## [Unreleased]
+## [0.15.0] - 2026-09-23
+
+An app can now tell its user what happened to an edit: `conflict` says
+which of its writes lost and what won, `rejected` which the server (or
+the model) refused, and `db.isPending(path)` whether a field or record
+still has an edit on its way. A dropped socket comes back as soon as the
+browser is online or the tab is looked at again, and the quickstart
+type-checks. Nothing to change on upgrade; the server's `ack` and its
+answer to a hello gain an optional `lost`, which earlier clients ignore.
 
 ### Added
 
