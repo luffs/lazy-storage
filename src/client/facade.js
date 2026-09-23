@@ -31,7 +31,7 @@ import { registerSet, valueAt } from '../core/paths.js';
 import { keysBetween, comparePositions } from '../core/positions.js';
 import { isArrayish } from '../core/model.js';
 import { randomId } from '../core/ids.js';
-import { createList } from './list.js';
+import { createList, longestIncreasing } from './list.js';
 
 const { Utils } = LazyWatch;
 // Batches the facade itself makes on the view, which its listener must not translate back
@@ -41,6 +41,10 @@ const IDS = { origin: 'ids' };
 
 const isIndex = key => /^(0|[1-9]\d*)$/.test(key);
 const plain = value => (LazyWatch.isProxy(value) ? LazyWatch.snapshot(value) : structuredClone(value));
+/** The object behind a view proxy, for reads that need no tracking: a scan of a long list reads every element */
+const raw = value => LazyWatch.resolveIfProxy(value);
+/** The record id of an array element, or undefined */
+const idOf = element => (Utils.isPlainObject(element) && typeof element.id === 'string' ? element.id : undefined);
 const same = (a, b) => JSON.stringify(plain(a)) === JSON.stringify(plain(b));
 
 /**
@@ -152,9 +156,9 @@ export function createFacade({ wire, lists, position = 'pos' }) {
     const structural = Array.isArray(fragment)
       || !Utils.isPlainObject(fragment)
       || Object.hasOwn(fragment, '$splice')
-      || (Number.isInteger(fragment.$length) && fragment.$length !== Object.keys(map).length)
+      || (Number.isInteger(fragment.$length) && fragment.$length !== Object.keys(raw(map)).length)
       || Object.keys(fragment).some(k => isIndex(k) && (!Utils.isPlainObject(fragment[k]) || Object.hasOwn(fragment[k], 'id') || Object.hasOwn(fragment[k], position)));
-    if (structural) return syncList(viewPath, wirePath);
+    if (structural) return syncList(viewPath, wirePath, touchedBy(fragment, raw(array)));
     for (const key of Object.keys(fragment)) {
       if (!isIndex(key)) continue;
       const element = array[Number(key)];
@@ -164,38 +168,71 @@ export function createFacade({ wire, lists, position = 'pos' }) {
     }
   }
 
-  /** Make the wire map and positions of a list match its view array */
-  function syncList(viewPath, wirePath) {
+  /**
+   * The ids of the records a structural batch on a list put in or changed:
+   * the items its splices inserted and the elements its index keys wrote
+   * (read from the array as it is now, which is what index keys address
+   * once the splices are applied). Null when the batch replaced the array
+   * whole, so every record is to be looked at. A record the batch did not
+   * touch is as the wire already has it, and syncList leaves it be
+   */
+  function touchedBy(fragment, array) {
+    if (!Utils.isPlainObject(fragment)) return null;
+    const touched = new Set();
+    for (const op of Array.isArray(fragment.$splice) ? fragment.$splice : []) {
+      for (const item of Array.isArray(op?.[2]) ? op[2] : []) {
+        const id = idOf(item);
+        if (id !== undefined) touched.add(id);
+      }
+    }
+    for (const key of Object.keys(fragment)) {
+      if (!isIndex(key)) continue;
+      const id = idOf(array[Number(key)]);
+      if (id !== undefined) touched.add(id);
+    }
+    return touched;
+  }
+
+  /**
+   * Make the wire map and positions of a list match its view array. Only
+   * the records in `touched` (and new ones) have their fields synced;
+   * null syncs them all
+   */
+  function syncList(viewPath, wirePath, touched = null) {
     const array = valueAt(view, viewPath);
+    const elements = raw(array);
     const map = wireMapFor(wirePath);
     const ids = [];
+    const taken = new Set();
     const minted = [];
-    for (let i = 0; i < array.length; i++) {
-      const element = array[i];
+    for (let i = 0; i < elements.length; i++) {
+      const element = elements[i];
       if (!Utils.isPlainObject(element)) continue;
       let id = element.id;
-      if (typeof id !== 'string' || !id || ids.includes(id)) {
+      if (typeof id !== 'string' || !id || taken.has(id)) {
         id = randomId();
         minted.push([i, id]);
       }
       ids.push(id);
+      taken.add(id);
     }
     if (minted.length) {
       const fragment = {};
       for (const [index, id] of minted) fragment[index] = { id };
       patchView(viewPath, fragment, IDS);
     }
-    const keep = new Set(ids);
-    for (const id of Object.keys(map)) if (!keep.has(id)) delete map[id];
+    const records = raw(map);   // reads; writes go through `map`
+    for (const id of Object.keys(records)) if (!taken.has(id)) delete map[id];
+    const fresh = new Set(minted.map(([, id]) => id));
     let n = 0;
-    for (let i = 0; i < array.length; i++) {
-      const element = array[i];
-      if (!Utils.isPlainObject(element)) continue;
+    for (let i = 0; i < elements.length; i++) {
+      if (!Utils.isPlainObject(elements[i])) continue;
       const id = ids[n++];
       // A new record starts as a shell and is filled by the same sync as an
       // existing one, so a nested list inside it mints its ids into the view
-      if (!Utils.isPlainObject(map[id])) map[id] = { id };
-      syncObject(element, map[id], [...viewPath, String(i)], [...wirePath, id]);
+      if (!Utils.isPlainObject(records[id])) map[id] = { id };
+      else if (touched && !touched.has(id) && !fresh.has(id)) continue;
+      syncObject(array[i], map[id], [...viewPath, String(i)], [...wirePath, id]);
     }
     createList(wire, wirePath, { position }).reconcile(ids);
   }
@@ -271,26 +308,35 @@ export function createFacade({ wire, lists, position = 'pos' }) {
   }
 
   const indexOf = (array, id) => {
-    for (let i = 0; i < array.length; i++) if (Utils.isPlainObject(array[i]) && array[i].id === id) return i;
+    const elements = raw(array);
+    for (let i = 0; i < elements.length; i++) if (idOf(elements[i]) === id) return i;
     return -1;
   };
 
   /**
    * A wire change under a list. Anything structural (a record gone, new,
    * or repositioned) is settled in one pass that brings the array to the
-   * wire's sorted order: deletions first, then a walk down the target
-   * order, moving a present record into place or inserting a new one; all
-   * as one list of splices, applied in sequence. Moves are decided
-   * against the whole target order rather than one record at a time,
-   * since a batch that repositions several records (another client's
-   * reconcile) leaves no single record's neighbours trustworthy. Field
-   * changes on surviving records follow.
+   * wire's sorted order, as one list of splices applied in sequence:
+   * records gone are taken out; of the survivors, the longest run already
+   * in the target order stays where it is and the rest are taken out too;
+   * then a walk down the target order puts each moved or new record in at
+   * its place. A move is thus one splice out and one in, however far it
+   * goes (each splice rewrites the array, so shifting every record a move
+   * passes cost a splice per record). Moves are decided against the whole
+   * target order rather than one record at a time, since a batch that
+   * repositions several records (another client's reconcile) leaves no
+   * single record's neighbours trustworthy. Field changes on surviving
+   * records follow.
    */
   function applyList(viewPath, wirePath, mapDiff, meta) {
-    const map = valueAt(wire, wirePath);
+    // Read only, and a whole list of it: the object behind the proxy
+    const map = raw(valueAt(wire, wirePath));
     const array = valueAt(view, viewPath);
     if (mapDiff === null || !Utils.isPlainObject(map)) {
-      if (Array.isArray(array) && array.length) patchView(viewPath, [], meta);
+      // The list itself went (an undo of its creation, a deletion) or is no
+      // map: the view has what the wire has there, nothing at all included
+      const next = map === undefined ? null : fromWire(plain(map), wirePath);
+      if (next === null ? array !== undefined : !same(array, next)) patchView(viewPath, next, meta);
       return;
     }
     if (!Utils.isPlainObject(mapDiff)) return;
@@ -302,34 +348,56 @@ export function createFacade({ wire, lists, position = 'pos' }) {
     const structural = Object.keys(mapDiff).some(id =>
       mapDiff[id] === null || !Utils.isPlainObject(map[id]) || indexOf(array, id) < 0 || (Utils.isPlainObject(mapDiff[id]) && Object.hasOwn(mapDiff[id], position)));
     if (structural) {
+      const elements = raw(array);
       const ops = [];
-      // The array as it will be, as original indices (-1: a record inserted below)
-      const idAt = original => (Utils.isPlainObject(array[original]) ? array[original].id : undefined);
-      const current = array.map((_, i) => i);
       const present = new Set(Object.keys(map).filter(id => Utils.isPlainObject(map[id])));
-      for (let i = current.length - 1; i >= 0; i--) {
-        if (!present.has(idAt(current[i]))) {
-          ops.push([i, 1, []]);
-          current.splice(i, 1);
-        }
+      // Records gone (or a second element with an id already seen), from the end so earlier indices hold
+      const first = new Map();   // id -> its index in the array as it is
+      for (let i = 0; i < elements.length; i++) {
+        const id = idOf(elements[i]);
+        if (present.has(id) && !first.has(id)) first.set(id, i);
       }
+      for (let i = elements.length - 1; i >= 0; i--) {
+        if (first.get(idOf(elements[i])) !== i) ops.push([i, 1, []]);
+      }
+      const survivors = [...first.keys()];   // in array order, as the array is once those are out
+      // Already in order with nothing gone or new, as the echo of the app's own edit usually is: no splice
+      if (!ops.length && first.size === present.size && inOrder(map, survivors)) return applyFields(viewPath, wirePath, mapDiff, map, inserted, meta);
       const target = [...present].sort((a, b) => comparePositions(map[a][position], a, map[b][position], b));
+      const rank = new Map(target.map((id, t) => [id, t]));
+      const stay = longestIncreasing(survivors.map(id => rank.get(id)));
+      // The survivors that move go out too, from the end; what is left is in target order
+      for (let i = survivors.length - 1; i >= 0; i--) if (!stay.has(i)) ops.push([i, 1, []]);
+      const staying = survivors.filter((_, i) => stay.has(i));
+      let next = 0;
       for (let t = 0; t < target.length; t++) {
         const id = target[t];
-        if (current[t] !== undefined && current[t] !== -1 && idAt(current[t]) === id) continue;
-        const j = current.findIndex((original, k) => k > t && original !== -1 && idAt(original) === id);
-        if (j >= 0) {
-          ops.push([j, 1, []], [t, 0, [plain(array[current[j]])]]);
-          const [original] = current.splice(j, 1);
-          current.splice(t, 0, original);
+        if (staying[next] === id) {
+          next++;
+          continue;
+        }
+        if (first.has(id)) {
+          ops.push([t, 0, [structuredClone(elements[first.get(id)])]]);
         } else {
           ops.push([t, 0, [fromWireRecord(plain(map[id]), [...wirePath, id], id)]]);
-          current.splice(t, 0, -1);
           inserted.add(id);
         }
       }
       if (ops.length) patchView(viewPath, { $splice: ops }, meta);
     }
+    applyFields(viewPath, wirePath, mapDiff, map, inserted, meta);
+  }
+
+  /** Whether `ids` are in the list's sorted order, by the records' positions in `map` */
+  function inOrder(map, ids) {
+    for (let i = 1; i < ids.length; i++) {
+      if (comparePositions(map[ids[i - 1]][position], ids[i - 1], map[ids[i]][position], ids[i]) > 0) return false;
+    }
+    return true;
+  }
+
+  /** The field changes of a wire batch on a list, applied to the records' elements (a record just inserted already has them) */
+  function applyFields(viewPath, wirePath, mapDiff, map, inserted, meta) {
     for (const id of Object.keys(mapDiff)) {
       const change = mapDiff[id];
       if (change === null || !Utils.isPlainObject(change) || !Utils.isPlainObject(map[id]) || inserted.has(id)) continue;

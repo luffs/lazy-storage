@@ -6,13 +6,15 @@ import { createStore, memoryStorage } from '../src/server/index.js';
 import { createClient } from '../src/client/index.js';
 import { memoryOutbox } from '../src/client/storage.js';
 import { createNetwork, seededRandom, fakeTime } from './helpers.js';
+import { comparePositions } from '../src/core/positions.js';
 
 const WIRE_INITIAL = { tasks: {}, settings: { theme: 'light' } };
 const VIEW_INITIAL = { tasks: [], settings: { theme: 'light' } };
 const LISTS = ['tasks', 'tasks/*/subtasks'];
 const snap = state => LazyWatch.snapshot(state);
 const titles = array => array.map(t => t.title);
-const wireOrder = (map, position = 'pos') => Object.entries(map ?? {}).sort(([ia, p], [ib, q]) => (p[position] < q[position] ? -1 : p[position] > q[position] ? 1 : ia < ib ? -1 : 1)).map(([, r]) => r.title);
+/** A wire list's titles in list order: by position, ties by id, records without one last */
+const wireOrder = (map, position = 'pos') => Object.entries(map ?? {}).sort(([ia, p], [ib, q]) => comparePositions(p[position], ia, q[position], ib)).map(([, r]) => r.title);
 
 function setup() {
   const store = createStore({ initial: WIRE_INITIAL });
@@ -200,8 +202,18 @@ test('two array clients editing the same list while apart converge with the wire
   assert.deepEqual(snap(y.wire), store.snapshot());
 });
 
+/** What the view must always be: the wire's list sorted by position, each record's fields without the position, subtasks likewise */
+function assertViewIsWire(c, label) {
+  const fromWire = map => Object.entries(map ?? {})
+    .sort(([ia, p], [ib, q]) => comparePositions(p.pos, ia, q.pos, ib))
+    .map(([, { pos, subtasks, ...rest }]) => ({ ...rest, ...(subtasks ? { subtasks: fromWire(subtasks) } : {}) }));
+  const view = snap(c.state.tasks).map(({ subtasks, ...rest }) => ({ ...rest, ...(subtasks ? { subtasks } : {}) }));
+  assert.deepEqual(view, fromWire(snap(c.wire).tasks), `${label}: ${c.replicaId}'s view is not its wire`);
+}
+
 test('random array edits on three view clients, offline and online, always converge (fuzz)', async () => {
-  for (let run = 0; run < 15; run++) {
+  // FACADE_RUNS=300 for a longer campaign
+  for (let run = 0; run < (Number(process.env.FACADE_RUNS) || 25); run++) {
     const rng = seededRandom(100 + run);
     const store = createStore({ initial: WIRE_INITIAL, rateLimit: false });
     const net = createNetwork(store);
@@ -217,10 +229,20 @@ test('random array edits on three view clients, offline and online, always conve
       else if (roll < 0.55 && tasks.length) { tasks[rng.int(tasks.length)].title = `e${step}`; ops.push('edit'); }
       else if (roll < 0.65 && tasks.length > 1) { c.state.tasks = snap(tasks).sort(() => rng.next() - 0.5); ops.push('shuffle'); }
       else if (roll < 0.75 && tasks.length) { const t = tasks[rng.int(tasks.length)]; if (!t.subtasks) t.subtasks = []; t.subtasks.push({ title: `s${step}` }); ops.push('sub'); }
-      else if (roll < 0.85) { if (c.status === 'offline') { c.link.goOnline(); c.connect(); ops.push('online'); } else { c.link.goOffline(); ops.push('offline'); } }
+      else if (roll < 0.8) { if (c.status === 'offline') { c.link.goOnline(); c.connect(); ops.push('online'); } else { c.link.goOffline(); ops.push('offline'); } }
+      else if (roll < 0.85 && tasks.length > 1) {
+        // A move in one batch, maybe with an edit to the record it moves
+        const [moved] = tasks.splice(rng.int(tasks.length), 1);
+        tasks.splice(rng.int(tasks.length + 1), 0, moved);
+        if (rng.chance(0.5)) tasks[rng.int(tasks.length)].title = `m${step}`;
+        ops.push('move');
+      }
+      else if (roll < 0.88 && tasks.length > 1) { if (rng.chance(0.5)) tasks.reverse(); else tasks.sort((a, b) => (a.title < b.title ? -1 : 1)); ops.push('reorder'); }
       else if (roll < 0.92 && c.canUndo) { c.undo(); ops.push('undo'); }
+      else if (roll < 0.94 && c.canRedo) { c.redo(); ops.push('redo'); }
       else { tasks.push({ title: `p${step}` }); ops.push('push'); }
       await net.settle();
+      for (const each of clients) assertViewIsWire(each, `run ${run}, step ${step} (${ops.slice(-3).join(',')})`);
     }
     for (const c of clients) if (c.status === 'offline') { c.link.goOnline(); c.connect(); }
     await net.settle();

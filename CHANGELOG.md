@@ -23,8 +23,38 @@ All notable changes to lazy-storage are documented here. The format follows Keep
   (evicted, refused its replica, its store unloaded) still processed
   messages a transport of your own kept feeding it
 
+### Fixed
+
+- **A remote move no longer freezes a list view.** When another client
+  moved a record, the array view shifted every record the move passed,
+  each shift a splice of the whole array: a record moved 1000 places in
+  a 5k-record list took some 30 s, and 200 places in 2k about 1.2 s. The
+  view now keeps the longest run of records already in order and moves
+  only the rest, so a move is one splice out and one in (8.6 ms for the
+  latter, most of it lazy-watch's splice). A remote field edit finds its
+  record without reading the array through the proxy (2.7 ms to 0.15 ms
+  on 5k records)
+- **A push or a move on a large list view no longer resyncs every
+  record.** Any change of length compared every field of every record
+  with the wire and checked each id against all before it: a push onto
+  5k records took ~77 ms, a move ~90 ms. Only the records the batch put
+  in or changed are synced now, ids are checked through a set, and the
+  list's positions are read past the proxy; `reconcile` skips its sort
+  when given every record (a push ~7 ms, a move ~22 ms, the rest of it
+  lazy-watch's splice)
+- **A list removed from the wire is removed from the view.** Undoing the
+  creation of a nested list (`task.subtasks = []`, then undo) left an
+  empty array in the view where the wire had nothing
+
 ### Added
 
+- **`npm run bench:client`**, a benchmark of what an app feels on the
+  client: React and Vue components on `useClient` as the store changes
+  (counting re-renders and state copies), the array view of a large list
+  under local and remote pushes, moves and edits, `localStorageOutbox`
+  under remote traffic and a long offline spell (counting bytes
+  serialized), and a lazy-watch object write against a field write.
+  `--only <text>` runs the cases whose name contains it
 - **A hostile-client fuzzer** (`npm run fuzz:hostile`, a fixed-seed pass
   in `npm test`, a longer campaign in CI): an attacker with a socket of
   its own sends forged ops, other replicas' ids and the server's, seqs

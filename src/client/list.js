@@ -138,22 +138,30 @@ export function createList(state, path, { position = 'pos' } = {}) {
     reconcile(ids) {
       const map = container(false);
       if (!map) return 0;
+      // Reads go to the object behind the proxy: a whole list's worth of
+      // tracked reads costs more than the rest of this. Writes go through it
+      const records = LazyWatch.resolveIfProxy(map);
       const listed = [];
       const seen = new Set();
-      for (const raw of ids) {
-        const id = String(raw);
-        if (!seen.has(id) && Utils.isPlainObject(map[id])) { seen.add(id); listed.push(id); }
+      for (const given of ids) {
+        const id = String(given);
+        if (!seen.has(id) && Utils.isPlainObject(records[id])) { seen.add(id); listed.push(id); }
       }
-      const order = [...listed, ...sorted().map(([id]) => id).filter(id => !seen.has(id))];
-      const keys = order.map(id => keyOf(map[id]));
+      // Records the ids leave out follow in their current order; when there
+      // are none (the usual call, with the whole list), no sort is needed
+      let count = 0;
+      for (const id of Object.keys(records)) if (Utils.isPlainObject(records[id])) count++;
+      const order = count === listed.length ? listed : [...listed, ...sorted().map(([id]) => id).filter(id => !seen.has(id))];
+      const keys = order.map(id => keyOf(records[id]));
       const keep = longestIncreasing(keys);
+      // The key of the next record that keeps its own, for each index
+      const nextKept = new Array(order.length + 1).fill(null);
+      for (let i = order.length - 1; i >= 0; i--) nextKept[i] = keep.has(i + 1) ? keys[i + 1] : nextKept[i + 1];
       let written = 0;
       let lower = null;
       for (let i = 0; i < order.length; i++) {
         if (keep.has(i)) { lower = keys[i]; continue; }
-        let upper = null;
-        for (let j = i + 1; j < order.length; j++) if (keep.has(j)) { upper = keys[j]; break; }
-        const key = keyBetween(lower, upper);
+        const key = keyBetween(lower, nextKept[i]);
         map[order[i]][position] = key;
         lower = key;
         written++;
@@ -168,8 +176,8 @@ export function createList(state, path, { position = 'pos' } = {}) {
   };
 }
 
-/** Indices of a longest strictly increasing run of keys (nulls never count); patience sorting */
-function longestIncreasing(keys) {
+/** Indices of a longest strictly increasing run of keys, strings or numbers (nulls never count); patience sorting */
+export function longestIncreasing(keys) {
   const tails = [];      // index of the smallest tail of a run of each length
   const previous = new Array(keys.length).fill(-1);
   for (let i = 0; i < keys.length; i++) {
