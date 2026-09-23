@@ -5,7 +5,7 @@
     "": {
       "name": "lazy-storage",
       "dependencies": {
-        "lazy-watch": "^6.2.1",
+        "lazy-watch": "^6.3.0",
       },
       "devDependencies": {
         "@happy-dom/global-registrator": "^20.14.0",
@@ -19,9 +19,13 @@
         "ws": "^8.21.3",
       },
       "peerDependencies": {
+        "react": ">=18",
+        "vue": ">=3.2",
         "ws": ">=8",
       },
       "optionalPeers": [
+        "react",
+        "vue",
         "ws",
       ],
     },
@@ -115,7 +119,7 @@
 
     "happy-dom": ["happy-dom@20.14.0", "", { "dependencies": { "@types/node": ">=20.0.0", "@types/whatwg-mimetype": "^3.0.2", "@types/ws": "^8.18.1", "buffer-image-size": "^0.6.4", "entities": "^7.0.1", "whatwg-mimetype": "^3.0.0", "ws": "^8.21.0" } }, "sha512-4bRh1KzRvKDnFNTlLhzT1RZTpkKhQbQDl9j+7GXszWsvuspYdo29k6OHRf4PwiM6oLb8r/pMWeYiJjkfod5AvQ=="],
 
-    "lazy-watch": ["lazy-watch@6.2.1", "", {}, "sha512-RRe1iPFWl5MK068lPr/WnGry3fLN+saMhDXv8rlIy6IDdSj2u+n+x4M2qoJgXyllbEvRvxCXtr+uWMB/vOiE0Q=="],
+    "lazy-watch": ["lazy-watch@6.3.0", "", {}, "sha512-aDEAXlZNiemqvQKOkTVlbqeLr0h00zz0MVjP7gMev+ZEfQZFvM2Rp0tTsBDol3hU9cx9A3hc00b2Ktzvmg1JNQ=="],
 
     "magic-string": ["magic-string@0.30.21", "", { "dependencies": { "@jridgewell/sourcemap-codec": "^1.5.5" } }, "sha512-vd2F4YUyEXKGcLHoq+TEyCjxueSeHnFxyyjNp80yg0XV4vUhnDer/lvvlqM/arB5bXQN5K2/3oinyCRyx8T2CQ=="],
 
