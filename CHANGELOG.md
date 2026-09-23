@@ -22,8 +22,21 @@ All notable changes to lazy-storage are documented here. The format follows Keep
 - **`db.isPending(path)`**: whether an edit not yet acknowledged writes
   at, under, or over a path, for a "saving…" mark on a field or record;
   it changes with the outbox, as the `sync` event announces
+- **A socket that is down comes back when the browser does.** After a
+  drop the connection waited out its backoff (up to ten seconds) even
+  once the network was back or the user returned to the tab. In a
+  browser it now tries again at once on `online`, and on
+  `visibilitychange` to visible, with the backoff starting over; a
+  connection closed on purpose or turned away by the server stays down.
+  `wake: false` on `createConnection` (or `sharedConnection`) turns it off
 
 ### Changed
+
+- **The quickstart type-checks.** `createClient({ initial: { tasks: [] } })`
+  inferred the state as `{ tasks: never[] }`, so `db.state.tasks.push(...)`
+  was a type error. A state type taken from `initial` now widens an empty
+  array to `any[]` (`FromInitial`); a type argument, or `any`, passes as
+  it is
 
 - **A lost write no longer costs the server a copy of the state.**
   `correction()` snapshotted the whole state for every op that lost a

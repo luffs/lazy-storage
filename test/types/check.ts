@@ -74,6 +74,17 @@ db.on('rejected', ({ seq, code, diff }) => { const maybe: number | null = seq; v
 const saving: boolean = db.isPending('tasks/a/title') || db.isPending(['tasks', 'a']);
 void saving;
 
+// The quickstart's shape: an empty array in initial takes records, and other fields keep their types
+const inferred = createClient({ store: 'q', connection, initial: { tasks: [], count: 0, nested: { tags: [] } } });
+inferred.state.tasks.push({ title: 'Ship it', done: false });
+inferred.state.nested.tags.push('x');
+const count: number = inferred.state.count;
+// @ts-expect-error count stays a number
+const notString: string = inferred.state.count;
+const typed = createClient<State>({ store: 'q', connection });
+const sameType: State = typed.state;
+void count; void notString; void sameType;
+
 const view = useClientVue(db);
 const mirrored: string | undefined = view.state.tasks.a?.title;
 const online: boolean = view.status.value === 'online';

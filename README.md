@@ -438,7 +438,10 @@ sockets survive proxies and server idle timeouts, and drops and reopens a
 socket it has not heard from for two of those intervals (a half-open one
 that would otherwise stay `online` with nothing arriving). Reconnects back
 off with jitter, so a server restart does not bring every client back in
-the same instant.
+the same instant; in a browser, a socket that is down tries again at once
+when the network comes back (`online`) or the page is looked at again
+(`visibilitychange`), rather than at the next backoff step (`wake`, or
+`false`).
 
 ### One socket per browser
 
@@ -878,7 +881,7 @@ runs on the synced state and shows in the array view like any other change.
 
 - `createClient({ store, connection | transport, initial, registers, lists, position, replicaId, storage, mirror, cache, cacheDelay, undo, undoLimit, reconnect, presence, now })` — `mirror: true` is a follower's defaults: `cache`, `undo` and `presence` off, each still settable; `db.restored` — started from the cached state; `db.version` — the store version this client has seen everything up to; `db.wire` — the synced state under a lists view
 - `openClient(options)` → `Promise<db>` — the same, for a storage adapter whose `load()` returns a promise
-- `createConnection({ transport, reconnect, keepalive })` → `connect()`, `close()`, `status` (`'offline' | 'connecting' | 'online'` — the socket's; a client says `online` only once its store is synced as well), `attached`, `closed` — why the server turned the socket away, or null — `fetch(path)` when the transport can — `on('status' | 'closed', fn)` — a socket shared by clients
+- `createConnection({ transport, reconnect, keepalive, wake })` → `connect()`, `close()`, `status` (`'offline' | 'connecting' | 'online'` — the socket's; a client says `online` only once its store is synced as well), `attached`, `closed` — why the server turned the socket away, or null — `fetch(path)` when the transport can — `on('status' | 'closed', fn)` — a socket shared by clients
 - `sharedConnection({ name, transport, storage, reconnect, keepalive, channel, locks, tabId, linger, sweepEvery, onError })` → the same, plus `leader`, `tabId`, `upstream` — the socket's status — `pending(store)` — the replica's unsent ops — `on('sync', fn)`, `follow(port, stores)` — a page on a MessagePort following the replica for those stores, ended by what it returns — `dispose()` — one socket and one replica per browser, the tabs electing a leader (see [One socket per browser](#one-socket-per-browser))
 - `portConnection(port, { reconnect, keepalive })` → the connection for the other end of `follow`: a client with no socket of its own, whose `upstream` and `pending(store)` are the browser's, as the host says; `messagePortTransport(port)` is the transport underneath, for a plain connection that wants neither
 - `db.state` — the mirror (a lazy-watch proxy). Read and write it directly
@@ -931,7 +934,10 @@ an `http.Server` with `shutdown({ reason })`; `createHandlers(options)` → `{ u
 `toRequest(req)` — the Web `Request` `authenticate` sees. **node:sqlite** (`lazy-storage/server/sqlite-node`): `sqliteStorage(file, { wal })`, as the Bun one.
 
 **Types**: declarations ship with the package for every entry (`types/`);
-the Node entry's need `@types/node`.
+the Node entry's need `@types/node`. A client's state type comes from
+`initial`, an empty array there widened from `never[]` to `any[]` so the
+quickstart's `tasks: []` takes records; give the type argument
+(`createClient<State>(...)`) for records typed throughout.
 
 **Core** (`lazy-storage/core`): the pieces both sides share — `createClock`,
 `compareTs`, `mergeOp`, `leaves`, `expandRegisters`, `rebuild`, `registerSet`,

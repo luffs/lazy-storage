@@ -54,6 +54,7 @@ const { Utils } = LazyWatch;
  *   (default: memory, so nothing survives a reload)
  * @param {{min: number, max: number}|false} [options.reconnect] - for the socket
  * @param {number|false} [options.keepalive] - for the socket
+ * @param {boolean} [options.wake=true] - for the socket (see createConnection)
  * @param {((name: string) => Object)|null} [options.channel] - makes the
  *   channel between tabs (default: BroadcastChannel; null for none)
  * @param {Object|null} [options.locks] - a Web Locks manager (default:
@@ -74,6 +75,7 @@ export function sharedConnection({
   storage = () => memoryOutbox(),
   reconnect = { min: 500, max: 10_000 },
   keepalive = 30_000,
+  wake = true,
   channel = typeof BroadcastChannel === 'function' ? channelName => new BroadcastChannel(channelName) : null,
   locks = typeof navigator !== 'undefined' && navigator.locks ? navigator.locks : null,
   tabId = randomId(),
@@ -242,7 +244,7 @@ export function sharedConnection({
   function lead() {
     if (disposed || relay) return;
     relay = createRelay({
-      tabId, transport, storage, reconnect, keepalive, infos, onError, linger,
+      tabId, transport, storage, reconnect, keepalive, wake, infos, onError, linger,
       send: (tab, message) => {
         if (tab === tabId) down(structuredClone(message));
         else if (ports.has(tab)) ports.get(tab).port.postMessage(message);
@@ -386,8 +388,8 @@ function persistIdentity(adapter, client) {
  * its behalf: a hidden client per store on the real connection, and per
  * follower and store a session that is answered like a server would.
  */
-function createRelay({ tabId, transport, storage, reconnect, keepalive, infos, linger, send, onStatus, onPending, onError }) {
-  const socket = createConnection({ transport, reconnect, keepalive });
+function createRelay({ tabId, transport, storage, reconnect, keepalive, wake, infos, linger, send, onStatus, onPending, onError }) {
+  const socket = createConnection({ transport, reconnect, keepalive, wake });
   const entries = new Map();   // store -> { client, registers, sessions: Map<tab, session>, queue, stops, timer }
   const clock = createClock(`relay-${tabId}`);
   // The socket opens with the first hidden client; until it has been tried it is connecting, not down

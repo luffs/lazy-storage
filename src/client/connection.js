@@ -35,12 +35,17 @@ const UNAUTHORIZED = 4401;
  *   dead one is noticed: a socket that has not been heard from (a pong or
  *   anything else) for two intervals of pings is dropped and reconnected.
  *   false disables both
+ * @param {boolean} [options.wake=true] - in a browser, retry at once when
+ *   the network comes back (`online`) or the page is looked at again
+ *   (`visibilitychange`) while the socket is down, rather than at the next
+ *   backoff step, which may be seconds away. A socket closed on purpose or
+ *   turned away by the server stays down
  *
  * `status` is 'offline' | 'connecting' | 'online' — the socket's, `online`
  * meaning open. A client on it uses the same words, its `online` meaning
  * the socket is open and its store is synced as well.
  */
-export function createConnection({ transport, reconnect = { min: 500, max: 10_000 }, keepalive = 30_000 } = {}) {
+export function createConnection({ transport, reconnect = { min: 500, max: 10_000 }, keepalive = 30_000, wake = true } = {}) {
   if (typeof transport !== 'function') throw new TypeError('createConnection requires a transport factory');
   const handlers = new Map(); // store id -> { handler, link }
   const listeners = { status: new Set(), closed: new Set() };
@@ -146,7 +151,27 @@ export function createConnection({ transport, reconnect = { min: 500, max: 10_00
     closedByUser = false;
     ended = null;
     clearTimeout(retryTimer);
+    watchPage(true);
     open();
+  }
+
+  // The page's word that trying now is worth it: the network is back, or
+  // the user is looking again. Only a socket that is down and meant to be
+  // up is retried, and the backoff starts over
+  const onWake = () => {
+    if (conn || closedByUser || ended || !reconnect) return;
+    if (globalThis.document?.visibilityState === 'hidden') return;
+    clearTimeout(retryTimer);
+    retryDelay = reconnect.min;
+    open();
+  };
+  let watching = false;
+  function watchPage(on) {
+    if (!wake || on === watching || typeof globalThis.addEventListener !== 'function') return;
+    watching = on;
+    const method = on ? 'addEventListener' : 'removeEventListener';
+    globalThis[method]('online', onWake);
+    globalThis.document?.[method]?.('visibilitychange', onWake);
   }
 
   /** Open a socket, unless one is open or opening */
@@ -229,6 +254,7 @@ export function createConnection({ transport, reconnect = { min: 500, max: 10_00
     close() {
       closedByUser = true;
       wanted = false;
+      watchPage(false);
       clearTimeout(retryTimer);
       stopKeepalive();
       const c = conn;

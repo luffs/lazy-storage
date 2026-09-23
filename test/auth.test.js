@@ -174,3 +174,33 @@ test('a socket that stops answering is dropped by the next ping and reconnected'
   assert.ok(opened >= 2, 'and opened again');
   connection.close();
 });
+
+test('a socket that is down retries at once when the network comes back or the page is looked at, not at the next backoff step', async () => {
+  const handlers = new Map();
+  const had = globalThis.addEventListener;
+  globalThis.addEventListener = (type, fn) => handlers.set(type, fn);
+  globalThis.removeEventListener = (type, fn) => { if (handlers.get(type) === fn) handlers.delete(type); };
+  try {
+    let opened = 0;
+    const net = createNetwork({ session: () => { opened++; return { receive() {}, close() {} }; } });
+    const link = net.link();
+    const connection = createConnection({ transport: link.factory, reconnect: { min: 10_000, max: 10_000 }, keepalive: false });
+    connection.connect();
+    await net.settle();
+    assert.equal(connection.status, 'online');
+    link.goOffline();                       // the network went: the next try is ten seconds away
+    await net.settle();
+    assert.equal(connection.status, 'offline');
+    link.goOnline();
+    handlers.get('online')();               // the browser says it is back
+    await net.settle();
+    assert.equal(connection.status, 'online', 'back without waiting out the backoff');
+    assert.equal(opened, 2);
+
+    connection.close();
+    assert.equal(handlers.has('online'), false, 'a connection closed on purpose stops listening');
+  } finally {
+    if (had === undefined) { delete globalThis.addEventListener; delete globalThis.removeEventListener; }
+    else globalThis.addEventListener = had;
+  }
+});

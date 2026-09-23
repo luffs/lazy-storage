@@ -41,6 +41,8 @@ export interface ConnectionOptions {
   reconnect?: ReconnectOptions | false;
   /** Ping interval in ms while open (default 30 000); false disables */
   keepalive?: number | false;
+  /** In a browser, retry at once on `online` or when the page is looked at again, while the socket is down (default true) */
+  wake?: boolean;
 }
 
 /** A client's attachment to a connection under its store id */
@@ -102,6 +104,8 @@ export interface SharedConnectionOptions {
   reconnect?: ReconnectOptions | false;
   /** Ping interval for the socket (default 30 000); false disables */
   keepalive?: number | false;
+  /** Retry the socket at once on `online` or when the page is looked at again (default true) */
+  wake?: boolean;
   /** Makes the channel between tabs (default: BroadcastChannel); null for none */
   channel?: ((name: string) => TabChannel) | null;
   /** The lock manager tabs elect a leader with (default: navigator.locks); null for none, and this tab leads on its own */
@@ -409,7 +413,18 @@ export interface Client<S extends object = any> {
   dispose(): void;
 }
 
+/**
+ * The state type a client takes from `initial`: an empty array there is
+ * inferred as `never[]`, which nothing can be pushed onto, so it widens to
+ * `any[]` (give the type argument, `createClient<State>(...)`, for records
+ * typed throughout). A type given, or `any`, passes as it is
+ */
+export type FromInitial<T> = 0 extends (1 & T) ? T
+  : [T] extends [never[]] ? any[]
+  : T extends object ? { [K in keyof T]: FromInitial<T[K]> }
+  : T;
+
 /** A client on an adapter that loads synchronously; throws for one whose load() returns a promise */
-export function createClient<S extends object = any>(options: ClientOptions<S>): Client<S>;
+export function createClient<S extends object = any>(options: ClientOptions<S>): Client<FromInitial<S>>;
 /** createClient for an adapter whose load() returns a promise (IndexedDB) */
-export function openClient<S extends object = any>(options: ClientOptions<S>): Promise<Client<S>>;
+export function openClient<S extends object = any>(options: ClientOptions<S>): Promise<Client<FromInitial<S>>>;
