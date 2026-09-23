@@ -57,6 +57,7 @@
     "src",
     "README.md",
     "CHANGELOG.md",
+    "LICENSE",
     "types"
   ],
   "sideEffects": false,

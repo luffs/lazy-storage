@@ -4,6 +4,11 @@ All notable changes to lazy-storage are documented here. The format follows Keep
 
 ## [Unreleased]
 
+### Added
+
+- A `LICENSE` file (ISC, as `package.json` has always said), shipped in
+  the package
+
 ### Fixed
 
 - **IndexedDB storage no longer stops saving after another tab closes
