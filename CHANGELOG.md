@@ -49,6 +49,16 @@ All notable changes to lazy-storage are documented here. The format follows Keep
   never had. The SQLite adapter refuses to replace a store this process
   has loaded (`store-open`) or another serves (`store-locked`), and
   writes the document in one transaction
+- **Restore while the server runs.** `stores.restore(id, doc)` (or
+  `store.restore(doc)` outside a registry) ends the live store, puts the
+  document in its storage, and lets the next `get` serve it; its
+  sessions say hello again within a second
+- **The client hears when the store started over.** `db.on('reset', ({
+  epoch, previous }) => ...)` fires when the server answers under a new
+  epoch while the client held a version of the old one (a backup put
+  back, a store moved or wiped), with the state the client showed just
+  before, so an app can tell its user that recent changes may be gone.
+  Under a `sharedConnection` every tab hears it
 
 ## [0.15.0] - 2026-09-23
 

@@ -285,6 +285,12 @@ export interface Store<S extends object = any> {
    * refuses what this one would
    */
   export(): StoreDocument;
+  /**
+   * Put `doc` in this store's storage in place of what it holds and end
+   * this store (its sessions say hello again); the next load serves the
+   * document under a new epoch. With a registry, use `stores.restore`
+   */
+  restore(doc: StorageDocument): void;
   flush(): void;
   dispose(): void;
   /** True once dispose() ran (a registry's idle sweep does): patch, apply and session throw from then on */
@@ -310,6 +316,12 @@ export interface StoreRegistry<S extends object = any> {
   ids(): string[];
   /** The live stores' stats rolled up: how many are live and idle (no session), and the sums across them */
   stats(): { stores: number; idle: number; sessions: number; replicas: number; rows: number; tombstones: number; log: number };
+  /**
+   * Put `doc` in the store's storage in place of what it holds, while the
+   * server runs: the store ends, its sessions say hello again, and the next
+   * get(id) serves the document under a new epoch
+   */
+  restore(id: string, doc: StorageDocument): void;
   /** Dispose a live store (its sessions close; persisted data stays) */
   release(id: string): boolean;
   /** Release every store idle for `idle` or longer; returns their ids */

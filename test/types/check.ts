@@ -71,6 +71,7 @@ owned.disconnect();
 
 db.on('conflict', ({ seq, lost }) => { const first: string[] = lost[0].path; void seq; void first; });
 db.on('rejected', ({ seq, code, diff }) => { const maybe: number | null = seq; void maybe; void code; void diff; });
+db.on('reset', ({ epoch, previous }) => { const was: number = previous.version; void epoch; void was; void previous.state; });
 const saving: boolean = db.isPending('tasks/a/title') || db.isPending(['tasks', 'a']);
 void saving;
 
@@ -198,6 +199,8 @@ memoryStorage().replace({ rows: [] });
 const stores = createStores(id => (isStoreId(id) ? createStore<State>({ storage: memoryStorage() }) : null), { idle: 60_000 });
 const got: Store<State> | null = stores.get('team-1');
 const released: string[] = stores.sweep();
+stores.restore('team-1', exported);
+store.restore(exported);
 
 const custom: ServerStorage = {
   load: () => null,

@@ -19,6 +19,8 @@
 // which also resets its idle clock — or keeps such stores out of the
 // registry altogether.
 
+import { assertDocument } from './storage.js';
+
 const STORE_ID = /^[A-Za-z0-9][A-Za-z0-9._~-]{0,127}$/;
 
 export const isStoreId = id => typeof id === 'string' && STORE_ID.test(id);
@@ -78,6 +80,28 @@ export function createStores(factory, { idle = Infinity, sweepEvery = 60_000, no
         totals.log += s.log;
       }
       return totals;
+    },
+    /**
+     * Put `doc` (store.export(), or an adapter's load()) in the store's
+     * storage in place of what it holds, while the server runs: the store
+     * (loaded first when it is not live) ends, its sessions say hello
+     * again, and the next get(id) serves the document under a new epoch,
+     * so every client that was connected gets it as a snapshot. Throws
+     * what loading or the storage throws (code 'store-locked': another
+     * process serves the store). For storage that no longer loads, use the
+     * adapter's replace(doc) with the store released
+     */
+    restore(id, doc) {
+      assertDocument(doc);
+      const store = stores.get(id);
+      if (!store) {
+        const err = new Error(`No store "${id}": the id is invalid, or the factory refused it`);
+        err.code = 'unknown-store';
+        throw err;
+      }
+      live.delete(id);
+      idleSince.delete(id);
+      store.restore(doc);
     },
     /** Dispose a live store (its sessions close; persisted data stays) */
     release(id) {

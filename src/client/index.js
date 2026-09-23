@@ -52,7 +52,7 @@ const REMOTE = { origin: 'remote' };
 const SNAPSHOT = { origin: 'remote', snapshot: true };
 const RESTORE = { origin: 'restore' };
 const HISTORY = new Set(['undo', 'redo']);
-const EVENTS = ['status', 'error', 'sync', 'closed', 'presence', 'peers', 'history', 'conflict', 'rejected'];
+const EVENTS = ['status', 'error', 'sync', 'closed', 'presence', 'peers', 'history', 'conflict', 'rejected', 'reset'];
 // A hello carries at most this many ops, so it stays under any payload
 // limit after a long offline spell; the rest go as ops once the answer
 // lands, the way edits made during the hello do
@@ -465,6 +465,15 @@ function build({
   function caughtUp(msg, applyServerState) {
     clock.receive(msg.ts);
     checkRegisters(msg.registers);
+    // A new epoch where this client held a version of the old one: the
+    // store's storage started over (a backup restored, a store moved or
+    // wiped), and what the client held may be gone. The state it showed
+    // is kept for the event, read before the snapshot overwrites it. A
+    // version of 0 held nothing (a store that never committed mints an
+    // epoch per load), and a relay's epoch is null: its replica reports
+    const reset = typeof msg.epoch === 'string' && known.epoch !== null && known.v > 0 && msg.epoch !== known.epoch
+      ? { epoch: msg.epoch, previous: { epoch: known.epoch, version: known.v, state: LazyWatch.snapshot(state) } }
+      : null;
     // The version first, so what persistence writes for the batches below
     // is stamped with the version the state is about to reflect
     if (Number.isInteger(msg.v)) known = { epoch: typeof msg.epoch === 'string' ? msg.epoch : null, v: msg.v };
@@ -487,12 +496,14 @@ function build({
     if (more) {
       hello();
       emit('sync');
+      if (reset) emit('reset', reset);
       for (const conflict of conflicts) emit('conflict', conflict);
       return;
     }
     synced = true;
     refreshStatus();
     emit('sync');
+    if (reset) emit('reset', reset);
     for (const conflict of conflicts) emit('conflict', conflict);
   }
 
@@ -625,8 +636,9 @@ function build({
         return;
       }
       case 'conflict':
-      case 'rejected': {
-        // A relay passing on the browser replica's (see shared.js); a server sends neither
+      case 'rejected':
+      case 'reset': {
+        // A relay passing on the browser replica's (see shared.js); a server sends none of these
         const { t, store: _store, ...payload } = msg;
         emit(t, payload);
         return;

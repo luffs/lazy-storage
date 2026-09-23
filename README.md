@@ -243,6 +243,10 @@ db.on('rejected', ({ seq, code, message, diff }) => {
   // the server refused the op (forbidden, expired, invalid, too-large), or
   // the model refused the batch locally (seq null): dropped, the state back in line
 });
+db.on('reset', ({ previous }) => {
+  // the server's storage started over (a backup put back): the state is
+  // now the server's, and previous.state is what this client showed
+});
 db.isPending('tasks/x/title');   // an edit not yet acknowledged writes at, under, or over the path
 ```
 
@@ -253,7 +257,7 @@ id (`['tasks', id, 'title']`). `isPending` changes when the outbox does,
 which the `sync` event announces (and `useClientSelector` follows). Under
 a `sharedConnection`, a tab's own edits are acknowledged once the
 browser's replica holds them, and every tab hears the replica's
-conflicts and refusals.
+conflicts, refusals, and resets.
 
 Clocks are hybrid logical clocks, so a replica whose wall clock runs slow
 is pulled forward by whatever it receives. A clock that runs *fast* would
@@ -478,20 +482,42 @@ writeFileSync('team-1.json', JSON.stringify(stores.get('team-1').export()));
 
 For a whole SQLite file, `sqlite.backup(file)` copies it with `VACUUM
 INTO` while the server runs: consistent, compacted, and without the
-leases, so a server started on the copy serves its stores at once.
+leases, so a server started on the copy serves its stores at once. The
+copy is made synchronously, so the process answers nobody while it runs;
+for a large file, back up from a script of its own (opening the file
+takes no lease).
 
-A copy is older than what clients have seen by the time it is restored.
-So a replaced store, and every store in a backup, starts a new
-**epoch**: a client that was connected gets a snapshot when it comes back
-rather than a delta, which would come from a history it never had. The
-cost of a move is one snapshot per client. Edits acknowledged after the
-copy was made are lost with the restore; edits still waiting in a
-client's outbox are sent again and applied.
+To put a copy back while the server runs, hand it to the registry:
 
-`replace` is never done under a live store: the SQLite adapter refuses a
-store this process has loaded (code `store-open`; `stores.release(id)`
-first) and one another process serves (`store-locked`), and writes the
-document in one transaction.
+```js
+const copy = sqliteStorage('backups/2026-09-23.sqlite');
+const doc = copy.store('team-1').load();
+copy.close();
+stores.restore('team-1', doc);
+```
+
+The live store ends and its storage takes the document; its sessions are
+told `unavailable` and say hello again within a second, and the next
+`stores.get` serves the copy. (`store.restore(doc)` does the same for a
+store outside a registry, and leaves you to make the next one.) A store
+another process serves is refused with `store-locked`: restore it there.
+Storage that no longer loads can still take a document through the
+adapter, `sqlite.store(id).replace(doc)`, which is refused under a
+store this process has loaded (`store-open`) or another serves
+(`store-locked`).
+
+A copy is older than what clients have seen by the time it is put back,
+so a replaced store, and every store in a backup, starts a new
+**epoch**. A client that was connected gets a snapshot when it comes
+back, rather than a delta that would come from a history it never had,
+and hears `reset` with the state it showed before (see [What happened to
+my edit](#what-happened-to-my-edit)), so the app can tell its user that
+recent changes may be gone. Edits acknowledged after the copy was made
+are lost with it; edits still in a client's outbox are sent again and
+applied. One made offline to a record created after the copy brings
+that record back with only the fields it wrote: a `validate` that
+refuses a record without its `id` keeps such fragments out. Moving a
+store with `replace` costs one snapshot per client, and a reset.
 
 ## Multiple stores
 
@@ -983,7 +1009,7 @@ runs on the synced state and shows in the array view like any other change.
 - `db.list(path, { position })` — an ordered list of records: `all()`, `ids()`, `get(id)`, `has(id)`, `add(record, where) → id`, `move(id, where)`, `remove(id)`, `reconcile(ids) → written`, `keyFor(where)`; `where` is `{ before }`, `{ after }`, `{ at }`, or nothing for the end
 - `db.connect()`, `db.disconnect()`, `db.status` (`'offline' | 'connecting' | 'online'` — `online` the moment a snapshot or delta is applied, with `db.state` already current; the batch carrying it to `watch` listeners follows on the microtask, and a snapshot equal to what the client had produces none, so "the store is current" is the status event, not the first `watch`), `db.pending`
 - `db.watch(listener)` — state changes; `meta?.origin === 'remote'` marks the server's
-- `db.on('status' | 'error' | 'sync' | 'presence' | 'peers' | 'closed' | 'history' | 'conflict' | 'rejected', fn)` — lifecycle events; `conflict` carries `{ seq, lost: [{ path, mine, theirs }] }` for an op whose leaves lost, `rejected` `{ seq, code, message, diff }` for one refused (see [What happened to my edit](#what-happened-to-my-edit)); a refused op is an error with a `code` (`forbidden`, `expired`, `invalid`, `too-large` drop the op; `rate-limited` keeps it and retries; `clock-skew` is handled without one), and so is a snapshot that could not be fetched (`snapshot-fetch`, after which the client asks for it inline); `history` carries `{ canUndo, canRedo }` after a local batch, an undo, a redo, or `clearHistory()`
+- `db.on('status' | 'error' | 'sync' | 'presence' | 'peers' | 'closed' | 'history' | 'conflict' | 'rejected' | 'reset', fn)` — lifecycle events; `conflict` carries `{ seq, lost: [{ path, mine, theirs }] }` for an op whose leaves lost, `rejected` `{ seq, code, message, diff }` for one refused, `reset` `{ epoch, previous: { epoch, version, state } }` when the store's storage started over (see [What happened to my edit](#what-happened-to-my-edit)); a refused op is an error with a `code` (`forbidden`, `expired`, `invalid`, `too-large` drop the op; `rate-limited` keeps it and retries; `clock-skew` is handled without one), and so is a snapshot that could not be fetched (`snapshot-fetch`, after which the client asks for it inline); `history` carries `{ canUndo, canRedo }` after a local batch, an undo, a redo, or `clearHistory()`
 - `db.undo()`, `db.redo()`, `db.canUndo`, `db.canRedo`, `db.checkpoint()`, `db.group(fn)`, `db.clearHistory()`
 - `webSocketTransport(url, { WebSocket, fetch })` — `fetch` fetches a large snapshot from the socket's server (the global fetch by default, on the route resolved against the socket URL with its query; your own to add headers; false to keep every snapshot on the socket); `memoryOutbox()`, `localStorageOutbox(key, { onError })` — document adapters (`onError` hears a write that failed, a full quota say, after which offline edits no longer survive a reload): `{ load(), save(outbox), saveState(cache) }`, the built-in ones also `clear()` — forget the store's outbox and cache
 - `indexedDBStorage(name, { onError })` → also `settled()`, `close()`, `destroy()` — a row adapter: `{ load(), commit({ puts, deletes, meta }), replace({ rows, meta }), saveOp(op, meta), removeOp(seq, meta), dropOps(seq, meta) }`, where a delete removes the path and everything under it, `saveOp` also rewrites an op a newer one pruned, `removeOp` takes out one a newer op emptied, and `meta` is `{ replicaId, seq, version, epoch }`
@@ -1005,9 +1031,9 @@ runs on the synced state and shows in the array view like any other change.
 - `store.closeSessions(predicate, message)` — evict sessions; `store.presence()` — distinct users with a live session; `store.peers()` — every live session as `{ replicaId, user, data }`
 - `store.patch(diff)` — a server-side change, timestamped and broadcast, never held back by a tombstone; `store.patchFrom(diff, state)` — a lazy-watch batch from state kept elsewhere, its array fragments replaced with the whole arrays read from `state` (see [Serving state the server owns](#serving-state-the-server-owns)); `store.apply(op)` — a trusted op, gates skipped
 - `store.on(listener)`, `store.snapshot()`, `store.state`, `store.version`, `store.replicas`
-- `store.compact()` → `{ tombstones, replicas }` removed; `store.export()` → the store as a JSON document (see [Backups](#backups-restores-and-moving-a-store)); `store.flush()`, `store.dispose()`
+- `store.compact()` → `{ tombstones, replicas }` removed; `store.export()` → the store as a JSON document, `store.restore(doc)` puts one in its storage and ends the store (see [Backups](#backups-restores-and-moving-a-store)); `store.flush()`, `store.dispose()`
 - `memoryStorage()`, `jsonFileStorage(path, { debounce, onError })` — `onError` hears a debounced write that failed, which is tried again a second later
-- `createStores(factory, { idle, sweepEvery, now })` → `get(id)`, `has(id)`, `ids()`, `stats()` — the live stores' stats rolled up: `{ stores, idle, sessions, replicas, rows, tombstones, log }` — `release(id)`, `sweep()`, `dispose()`; `isStoreId(id)`
+- `createStores(factory, { idle, sweepEvery, now })` → `get(id)`, `has(id)`, `ids()`, `stats()` — the live stores' stats rolled up: `{ stores, idle, sessions, replicas, rows, tombstones, log }` — `release(id)`, `restore(id, doc)`, `sweep()`, `dispose()`; `isStoreId(id)`
 - `createHub(resolveStore, { send, user, authorizeId, authorize, channel, httpSnapshots, onError })` → `{ receive(message), close(), stores, user }` — the server side of a multiplexed connection, session-shaped; `channel` is a transport's topic fan-out, `httpSnapshots` `{ url(id), threshold }` its snapshot route
 - `toJSON(message)` — a message's JSON, encoded once however many sockets it goes to; use it in a transport of your own so a broadcast is not re-encoded per socket (`tagStore(message, id)` is what a hub does)
 

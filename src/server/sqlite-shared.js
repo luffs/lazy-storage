@@ -154,6 +154,8 @@ export function sqliteStorageOn({ exec, prepare, transaction, close, db }, { fil
     give: prepare('DELETE FROM leases WHERE store = ? AND holder = ?'),
     giveAll: prepare('DELETE FROM leases WHERE holder = ?')
   } : null;
+  // Stores loaded here: with leases on, the ones this process holds a lease
+  // on; with them off, still the ones replace() must not write under
   const held = new Set();
   const acquire = leasing ? transaction(id => {
     const current = lq.get.get(id);
@@ -167,7 +169,7 @@ export function sqliteStorageOn({ exec, prepare, transaction, close, db }, { fil
     }
     lq.take.run(id, holder, host, pid, now + ttl);
     held.add(id);
-  }) : () => {};
+  }) : id => { held.add(id); };
   let renewer = null;
   if (leasing) {
     renewer = setInterval(() => {
@@ -270,7 +272,7 @@ export function sqliteStorageOn({ exec, prepare, transaction, close, db }, { fil
         },
         /** The store is let go of: another process may serve it now */
         close() {
-          if (!leasing || !held.delete(id)) return;
+          if (!held.delete(id) || !leasing) return;
           try {
             lq.give.run(id, holder);
           } catch { /* the lease runs out on its own */ }

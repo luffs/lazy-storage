@@ -2,7 +2,7 @@
 import 'fake-indexeddb/auto';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createStore, createStores, createHub } from '../src/server/index.js';
+import { createStore, createStores, createHub, memoryStorage } from '../src/server/index.js';
 import { createClient } from '../src/client/index.js';
 import { createConnection } from '../src/client/connection.js';
 import { sharedConnection } from '../src/client/shared.js';
@@ -568,4 +568,28 @@ test('what the browser\'s replica had refused, or lost, reaches every tab', asyn
   a.db.state.tasks.x = { id: 'x', locked: true };
   await b.until(() => heard.a.length && heard.c.length, 'both tabs heard the refusal');
   assert.deepEqual([heard.a, heard.c], [['forbidden'], ['forbidden']]);
+});
+
+test('a store put back from a copy reaches every tab as one reset: the replica tells, by the epoch the tabs never see', async t => {
+  const stores = createStores(() => createStore({ initial: INITIAL, storage: memoryStorage() }));
+  const net = createNetwork({ session: ({ send, user }) => createHub(id => stores.get(id), { send, user }) });
+  const b = browser(net);
+  t.after(() => { b.close(); stores.dispose(); });
+  const a = b.tab('a');
+  const c = b.tab('c');
+  await b.until(() => a.db.status === 'online' && c.db.status === 'online', 'both online');
+  const heard = { a: [], c: [] };
+  a.db.on('reset', r => heard.a.push(r));
+  c.db.on('reset', r => heard.c.push(r));
+  a.db.state.tasks.x = { id: 'x' };
+  await b.until(() => stores.get('main').snapshot().tasks.x, 'x on the server');
+  const copy = stores.get('main').export();
+  c.db.state.tasks.y = { id: 'y' };
+  await b.until(() => stores.get('main').snapshot().tasks.y, 'y on the server');
+
+  stores.restore('main', copy);
+  await b.until(() => heard.a.length && heard.c.length && a.db.state.tasks.y === undefined && c.db.state.tasks.y === undefined, 'both tabs heard, and hold the copy');
+  assert.deepEqual([heard.a.length, heard.c.length], [1, 1]);
+  assert.deepEqual(heard.c[0].previous.state, { tasks: { x: { id: 'x' }, y: { id: 'y' } } });
+  assert.equal(heard.a[0].epoch, stores.get('main').epoch);
 });

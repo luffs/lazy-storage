@@ -437,6 +437,8 @@ function createRelay({ tabId, transport, storage, reconnect, keepalive, wake, in
         // What the replica's ops lost or had refused: the browser's, so every tab hears it
         client.on('conflict', conflict => all({ t: 'conflict', ...conflict })),
         client.on('rejected', rejected => all({ t: 'rejected', ...rejected })),
+        // The store started over (a backup restored): only the replica can tell, by the epoch
+        client.on('reset', reset => all({ t: 'reset', ...reset })),
         client.on('sync', () => onPending(store, client.pending))
       ];
       client.connect();

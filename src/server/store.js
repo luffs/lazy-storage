@@ -87,7 +87,7 @@ import { registerSet, pathKey, parsePathKey, setAt, valueAt } from '../core/path
 import { leaves, assertModel, rebuild, expandRegisters, replacingRegisters } from '../core/model.js';
 import { mergeOp, compactTombstones } from '../core/merge.js';
 import { ClockMap } from '../core/clocks.js';
-import { memoryStorage } from './storage.js';
+import { memoryStorage, assertDocument } from './storage.js';
 import { toJSON, presetJSON, SNAPSHOT_THRESHOLD } from './wire.js';
 import { randomId } from '../core/ids.js';
 
@@ -1091,6 +1091,22 @@ export function createStore({
      * at one
      */
     export: exportDocument,
+    /**
+     * Put `doc` (store.export(), or an adapter's load()) in this store's
+     * storage in place of what it holds, while the server runs, and end
+     * this store: its sessions are told `unavailable` and say hello again,
+     * and the next load (a registry's get) serves the document, under a
+     * new epoch. A document that is not one, or storage without
+     * `replace`, is refused before anything ends. With a registry, use
+     * stores.restore(id, doc), which also drops this instance
+     */
+    restore(doc) {
+      alive('restore');
+      if (typeof storage.replace !== 'function') throw new TypeError("This store's storage cannot take a document (it has no replace(doc))");
+      assertDocument(doc);
+      self.dispose();
+      storage.replace(doc);
+    },
     flush: () => storage.flush(),
     dispose() {
       if (disposed) return;

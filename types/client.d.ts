@@ -349,6 +349,18 @@ export interface ClientEvents {
   conflict: Conflict;
   /** An op the server refused (or a batch the model refused locally, seq null): dropped, the state back in line */
   rejected: Rejected;
+  /**
+   * The store's storage started over (a backup restored, the store moved
+   * or wiped): the state is now the server's, and what this client held
+   * that the server does not may be gone. `previous` is what it held,
+   * read just before the server's state replaced it
+   */
+  reset: Reset;
+}
+
+export interface Reset {
+  epoch: string;
+  previous: { epoch: string; version: number; state: unknown };
 }
 
 export interface Conflict {
