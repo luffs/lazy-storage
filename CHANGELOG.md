@@ -2,7 +2,26 @@
 
 All notable changes to lazy-storage are documented here. The format follows Keep a Changelog; versions follow Semantic Versioning.
 
-## [Unreleased]
+## [0.13.0] - 2026-09-23
+
+A hardening release. One signed-in client could pollute
+`Object.prototype` on the server, silence the store's own writes by
+claiming its replica id, freeze its clock, or have any store loaded
+before authorization; all of that is closed, and a dozen ways an edit
+could be lost or a replica left behind are fixed. What an upgrade may
+need:
+
+- Move a check that needs only the user and the store id from
+  `authorize` to the new `authorizeId`, which runs before the store is
+  loaded; `authorize` alone still works, and still loads first
+- A server of your own must answer `ping` with `pong`: a socket silent
+  for two keepalive intervals is now dropped and reopened
+- A `localStorageOutbox` key is one tab's at a time; tabs that should
+  share a replica use `sharedConnection`
+- The rate limit is per user and a hello costs a token; a session keeps
+  one replica id; clients may no longer delete a top-level container of
+  `initial`
+- Requires lazy-watch 6.3.0
 
 ### Security
 
@@ -139,6 +158,14 @@ All notable changes to lazy-storage are documented here. The format follows Keep
   nothing across a reload, and hears `storage-in-use` through `onError`.
   A `sharedConnection` leader, which a lock already makes the only one,
   takes the key over (`takeOver()`) whatever a crashed tab left behind
+
+### Changed
+
+- **Requires lazy-watch 6.3.0**, which delivers a batch emitted from
+  inside a listener after the batch being delivered. The client reverts
+  a refused local batch that way, and a listener registered after it (the
+  Vue mirror of `lazy-storage/vue`, an app's own `db.watch`) used to get
+  the revert first and then the refused edit, and kept the edit
 
 ## [0.12.1] - 2026-09-12
 

@@ -1,6 +1,6 @@
 {
   "name": "lazy-storage",
-  "version": "0.12.1",
+  "version": "0.13.0",
   "description": "Self-hosted realtime state store with offline sync, built on lazy-watch: keyed collections, last-writer-wins per field, an outbox that survives reconnects.",
   "type": "module",
   "exports": {
@@ -83,7 +83,7 @@
     "react"
   ],
   "dependencies": {
-    "lazy-watch": "^6.2.1"
+    "lazy-watch": "^6.3.0"
   },
   "publishConfig": {
     "provenance": true,
