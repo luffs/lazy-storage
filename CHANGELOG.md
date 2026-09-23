@@ -2,7 +2,18 @@
 
 All notable changes to lazy-storage are documented here. The format follows Keep a Changelog; versions follow Semantic Versioning.
 
-## [Unreleased]
+## [0.16.0] - 2026-09-23
+
+Running the server gets its operations: one process per store on a
+SQLite file (leases), versioned migrations that run as a store loads,
+and backups and restores, down to putting a copy back while the server
+runs, with every client told when that happened (`reset`). Nothing to
+change on upgrade. Leases are on by default and protect deploys from the
+next one on: a 0.15 process takes none, so the deploy that replaces it
+is not yet covered. A SQLite file gains a `leases` table and a `schema`
+column, which 0.15 leaves alone, so a rollback still opens it. The wire
+protocol is unchanged; a tab on an earlier version ignores the `reset` a
+newer leader tab relays.
 
 ### Added
 
