@@ -16,6 +16,8 @@ export interface ReplicaProgress {
   seq: number;
   /** The store's clock when the replica's last op arrived */
   seen: number;
+  /** The key of the user who first spoke for it; another user may not take it over */
+  owner?: string;
 }
 
 export interface LogEntry {
@@ -36,7 +38,7 @@ export interface StorageDocument {
 export interface StorageCommit {
   upserts: Array<[key: string, row: StoredRow]>;
   deletes: string[];
-  replica?: { id: string; seq: number; seen: number };
+  replica?: { id: string; seq: number; seen: number; owner?: string };
   forgetReplicas?: string[];
   version: number;
   epoch: string;

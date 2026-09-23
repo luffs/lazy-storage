@@ -489,6 +489,17 @@ Two hooks on the Bun adapter decide who gets a session on which store:
   asked for is loaded before it is judged. All three hooks may return
   promises.
 
+A replica belongs to the user who first says hello with it (by
+presence's `key`, or the user's `id`), recorded with its progress and
+kept across restarts. A session speaks for its own replica only, and
+another user cannot take one over, connected or away, so a replica id
+seen in presence is of no use to anyone else: such a hello is closed with
+`replica-taken`. That is also what a browser meets when someone else
+signs in with the last user's storage, so key the storage by user
+(``localStorageOutbox(`app:${user.id}:${store}`)``); on `replica-taken`
+the app decides what becomes of the pending edits and opens the store
+with storage of its own. Sessions without a user own nothing.
+
 Opening a store is not the same as writing to it, so the store itself
 decides what a client may write:
 
@@ -957,7 +968,9 @@ store factory threw), and `invalid-store` (an id outside the allowed
 alphabet, or a message without one) each end one store. `unauthorized`
 (`authenticate` returned nothing) ends the socket: it arrives without a
 `store`, and the close that follows carries code 4401 in case the message
-did not make it. `unavailable` is the one that is not final: the store was
+did not make it. `replica-taken` ends one store: the hello named a
+replica another user owns (see [Authentication](#authentication-presence-and-eviction)).
+`unavailable` is the one that is not final: the store was
 disposed under an open session (a registry released it), and the client
 says hello again after a moment, which loads it afresh; nothing pending
 is lost and the app hears no `closed`.
@@ -992,10 +1005,20 @@ runs on the same machine.
 ## Testing
 
 ```bash
-npm test          # unit and integration tests plus a fixed-seed convergence run (Node)
-npm run test:bun  # the Bun adapter and the bun:sqlite adapters (Bun; `bun test` runs the same)
-npm run fuzz      # a longer randomized convergence campaign; a failure prints the seed
+npm test              # unit and integration tests plus fixed-seed runs of both fuzzers (Node)
+npm run test:bun      # the Bun adapter and the bun:sqlite adapters (Bun; `bun test` runs the same)
+npm run fuzz          # a longer randomized convergence campaign; a failure prints the seed
+npm run fuzz:hostile  # the same with an attacker beside honest clients
 ```
+
+The hostile fuzzer gives a signed-in attacker a socket of its own and
+lets it send anything: ops under other replicas' ids and the server's,
+seqs far ahead, poisoned timestamps, reserved names, fragments, deletions
+of the skeleton, oversized hellos, shares, churn, and garbage. After
+every step it checks that `Object.prototype` is untouched, the server's
+own writes land, no honest client hears an error or diverges, the
+skeleton stands, nothing was loaded that nobody may open, sessions do not
+leak, and at the end that the store on disk equals the store in memory.
 
 The in-memory network the suite runs on is published as
 `lazy-storage/testing`, for an app's own tests: `createNetwork(store)`

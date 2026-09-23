@@ -55,3 +55,30 @@ test('a store round-trips through node:sqlite: rows, replicas, epoch, and the de
   }
 });
 
+
+test('a file from before replicas had owners gains the column, and an owner survives a reopen', { skip: !sqliteStorage }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'lazy-storage-node-sqlite-'));
+  const file = join(dir, 'old.sqlite');
+  try {
+    const { DatabaseSync } = await import('node:sqlite');
+    const old = new DatabaseSync(file);
+    old.exec(`CREATE TABLE replicas (store TEXT NOT NULL, replica TEXT NOT NULL, seq INTEGER NOT NULL, seen INTEGER, PRIMARY KEY (store, replica)) WITHOUT ROWID;
+      CREATE TABLE stores (store TEXT PRIMARY KEY, version INTEGER NOT NULL DEFAULT 0, epoch TEXT) WITHOUT ROWID;
+      INSERT INTO stores VALUES ('main', 3, 'e1');
+      INSERT INTO replicas VALUES ('main', 'legacy', 7, 1000);`);
+    old.close();
+
+    const sqlite = sqliteStorage(file);
+    const storage = sqlite.store('main');
+    assert.deepEqual(storage.load().replicas, { legacy: { seq: 7, seen: 1000 } }, 'an old row reads as before');
+    storage.commit({ upserts: [], deletes: [], replica: { id: 'r1', seq: 0, seen: 2000, owner: 'ann' }, version: 3, epoch: 'e1' });
+    storage.commit({ upserts: [], deletes: [], replica: { id: 'r1', seq: 4, seen: 3000 }, version: 4, epoch: 'e1' });
+    sqlite.close();
+
+    const again = sqliteStorage(file);
+    assert.deepEqual(again.store('main').load().replicas.r1, { seq: 4, seen: 3000, owner: 'ann' }, 'progress moves on, the owner stays');
+    again.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

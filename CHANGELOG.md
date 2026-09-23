@@ -2,6 +2,41 @@
 
 All notable changes to lazy-storage are documented here. The format follows Keep a Changelog; versions follow Semantic Versioning.
 
+## [Unreleased]
+
+### Security
+
+- **A replica belongs to its user, connected or away.** 0.13.0 refused a
+  replica id only while a live session of another user held it, and the
+  first to claim it won: a signed-in user who read a teammate's replica
+  id in presence could say hello with it while the teammate was offline,
+  and the teammate, back online, was refused its own replica and locked
+  out of the store until the other session ended; an op under it could
+  also make the teammate's later edits duplicates. The user who first
+  says hello with a replica now owns it, recorded with its progress
+  (`owner` in the replica row; the SQLite adapters add the column to an
+  existing file), and a hello from anyone else is closed with the new
+  code `replica-taken`, while the owner carries on. A browser that signs
+  in as another user with the last one's storage meets the same code:
+  key client storage by user. Sessions without a user own nothing
+- **A closed session hears nothing more.** A session the store had closed
+  (evicted, refused its replica, its store unloaded) still processed
+  messages a transport of your own kept feeding it
+
+### Added
+
+- **A hostile-client fuzzer** (`npm run fuzz:hostile`, a fixed-seed pass
+  in `npm test`, a longer campaign in CI): an attacker with a socket of
+  its own sends forged ops, other replicas' ids and the server's, seqs
+  far ahead, poisoned timestamps, reserved names, fragments, skeleton
+  deletions, oversized hellos, shares, churn, and garbage beside honest
+  clients, and every step checks that `Object.prototype` is untouched,
+  the server's own writes land, no honest client hears an error or
+  diverges, the skeleton stands, nothing unauthorized is loaded, sessions
+  do not leak, and the store on disk equals the store in memory. It found
+  the lockout above, and catches each of 0.13.0's security fixes when
+  that fix is taken out
+
 ## [0.13.0] - 2026-09-23
 
 A hardening release. One signed-in client could pollute

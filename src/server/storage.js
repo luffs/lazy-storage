@@ -3,8 +3,8 @@
 // A store persists as ROWS, one per leaf path: { value, ts, deleted }.
 // Live rows carry the value and the timestamp that won it; tombstones
 // carry the timestamp only. Alongside the rows: each replica's progress
-// (the last sequence number seen from it, and when), and the store's
-// version.
+// (the last sequence number seen from it, and when, and the user it
+// belongs to), and the store's version.
 //
 // An empty object is a leaf too (`assignees: {}` is one row). When such a
 // container later gains children, its `{}` row stays next to the child
@@ -16,14 +16,17 @@
 // The interface is incremental so a row-oriented backend (SQLite) writes
 // only what an op touched:
 //
-//   load()  -> null | { rows: Array<[pathKey, row]>, replicas: { replicaId: { seq, seen } }, version, epoch, log? }
+//   load()  -> null | { rows: Array<[pathKey, row]>, replicas: { replicaId: { seq, seen, owner? } }, version, epoch, log? }
 //   commit({ upserts: Array<[pathKey, row]>, deletes: pathKey[],
-//            replica?: { id, seq, seen }, forgetReplicas?: replicaId[], version, epoch,
+//            replica?: { id, seq, seen, owner? }, forgetReplicas?: replicaId[], version, epoch,
 //            log?: { v, diff }, logFloor?: number })
 //   flush() -> void   (write out anything buffered; called on dispose)
 //
 // `seen` is the store's clock (ms) when the replica's op arrived; a
 // `seen` of null means unknown (a document from before it was recorded).
+// `owner` is the key (a string) of the user who first spoke for the
+// replica, absent for a replica of sessions without a user: another user
+// may not take the replica over. An adapter that drops it loses only that.
 // `epoch` is a random id the store mints once per storage life, so a
 // client can tell whether its cached version means anything here.
 // `log` in a commit is the accepted diff this op made, at version `v`;
@@ -53,7 +56,10 @@ function document(initial = null, { keepLog = false } = {}) {
       seen = true;
       for (const key of change.deletes) rows.delete(key);
       for (const [key, row] of change.upserts) rows.set(key, structuredClone(row));
-      if (change.replica) replicas[change.replica.id] = { seq: change.replica.seq, seen: change.replica.seen };
+      if (change.replica) {
+        const { seq, seen, owner } = change.replica;
+        replicas[change.replica.id] = owner === undefined ? { seq, seen } : { seq, seen, owner };
+      }
       for (const id of change.forgetReplicas ?? []) delete replicas[id];
       version = change.version;
       if (change.epoch !== undefined) epoch = change.epoch;

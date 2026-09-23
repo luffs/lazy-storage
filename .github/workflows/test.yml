@@ -71,3 +71,7 @@ jobs:
       - name: Run a longer randomized campaign
         # A random seed each run; a failure prints the seed and a reproduction command
         run: node test/fuzz/run.js --runs 200 --steps 50 --clients 4
+
+      - name: Run a longer hostile-client campaign
+        # An attacker beside honest clients: forged ops, poisoned stamps, reserved names, churn
+        run: node test/fuzz/run.js --mode hostile --runs 300 --steps 60

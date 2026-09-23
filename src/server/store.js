@@ -123,10 +123,12 @@ export class RefusedError extends Error {
   }
 }
 
-/** Replica progress from a saved document: `{ replicas: { id: { seq, seen } } }` */
+/** Replica progress from a saved document: `{ replicas: { id: { seq, seen, owner? } } }` */
 function loadReplicas(saved) {
   const replicas = new Map();
-  for (const [id, r] of Object.entries(saved?.replicas ?? {})) replicas.set(id, { seq: r.seq, seen: r.seen });
+  for (const [id, r] of Object.entries(saved?.replicas ?? {})) {
+    replicas.set(id, typeof r.owner === 'string' ? { seq: r.seq, seen: r.seen, owner: r.owner } : { seq: r.seq, seen: r.seen });
+  }
   return replicas;
 }
 
@@ -571,7 +573,7 @@ export function createStore({
       // op under another id could claim a seq far ahead and turn that
       // replica's (or the server's own) later writes into duplicates
       const claim = claimReplica(session, op.replicaId);
-      if (claim) throw new RefusedError(claim.code, claim.message);
+      if (claim) throw new RefusedError(claim.code === 'replica-taken' ? 'forbidden' : claim.code, claim.message);
       session.speaksFor = op.replicaId;
       if (op.ts[2] !== op.replicaId) throw new RefusedError('invalid', 'op.ts must carry the op\'s own replica id');
     }
@@ -584,7 +586,8 @@ export function createStore({
     else assertModel(diff, regs);
 
     const seen = time();
-    replicas.set(op.replicaId, { seq: op.seq, seen });
+    const owner = replicas.get(op.replicaId)?.owner ?? ownerKey(session?.user);
+    replicas.set(op.replicaId, owner === undefined ? { seq: op.seq, seen } : { seq: op.seq, seen, owner });
     clock.receive(op.ts);
 
     const { accepted, rejected, won, dropped } = mergeOp(clocks, op.ts, diff, regs, { authority });
@@ -603,7 +606,7 @@ export function createStore({
     commit({
       upserts: won.map(([path, value]) => [pathKey(path), value === null ? { ts: op.ts, deleted: true } : { value, ts: op.ts }]),
       deletes: dropped,
-      replica: { id: op.replicaId, seq: op.seq, seen },
+      replica: replicas.get(op.replicaId) && { id: op.replicaId, ...replicas.get(op.replicaId) },
       // The log entry this op made, and the oldest version the store still
       // keeps, so an adapter persisting the log can prune to match
       log: applied && deltaLog > 0 ? { v: version, diff: applied } : undefined,
@@ -722,10 +725,11 @@ export function createStore({
   /**
    * Whether a session may speak for `replicaId`: null when it may, else the
    * error to send. The server's own id is reserved; a session keeps the id
-   * it first spoke for (its hello's, or its first op's); and an id a live
-   * session of another user holds is refused, so a replica id seen in
-   * presence cannot be borrowed. (An id no session holds is free: a browser
-   * that signs in as someone else keeps its replica.)
+   * it first spoke for (its hello's, or its first op's); and a replica
+   * belongs to the user who first spoke for it, recorded with its progress,
+   * so another user can take it over neither while it is connected nor
+   * while it is away. A session without a user owns nothing and is not
+   * held back. See takeReplica for where ownership is recorded
    */
   function claimReplica(s, replicaId) {
     if (replicaId === 'server') return { code: 'forbidden', message: 'The replica id "server" is reserved for the store' };
@@ -733,13 +737,25 @@ export function createStore({
       return s.speaksFor === replicaId ? null
         : { code: 'forbidden', message: `This session speaks for replica "${s.speaksFor}", not "${replicaId}"` };
     }
-    const key = ownerKey(s.user);
-    for (const other of sessions) {
-      if (other !== s && other.speaksFor === replicaId && ownerKey(other.user) !== key) {
-        return { code: 'forbidden', message: 'Another user holds that replica id' };
-      }
+    const owner = replicas.get(replicaId)?.owner;
+    if (owner !== undefined && owner !== ownerKey(s.user)) {
+      return { code: 'replica-taken', message: 'That replica id belongs to another user' };
     }
     return null;
+  }
+
+  /**
+   * Record the session's user as the owner of a replica nobody owns yet, at
+   * its hello, so a replica that only reads is held too, and persist it with
+   * the replica's progress
+   */
+  function takeReplica(s, replicaId) {
+    const key = ownerKey(s.user);
+    const known = replicas.get(replicaId);
+    if (key === undefined || known?.owner !== undefined) return;
+    const entry = { seq: known?.seq ?? 0, seen: known?.seen ?? time(), owner: key };
+    replicas.set(replicaId, entry);
+    commit({ upserts: [], deletes: [], replica: { id: replicaId, ...entry } });
   }
 
   /**
@@ -749,8 +765,8 @@ export function createStore({
    */
   const bucketOf = (s, replicaId) => (s.user === undefined ? `r:${replicaId}` : `u:${ownerKey(s.user)}`);
 
-  /** What a replica's user is told apart by: presence's key when set, else the default */
-  const ownerKey = user => (user === undefined ? undefined : (pres?.key ?? defaultPresenceKey)(user));
+  /** What a replica's user is told apart by, as a string: presence's key when set, else the default */
+  const ownerKey = user => (user === undefined ? undefined : String((pres?.key ?? defaultPresenceKey)(user)));
 
   function session({ send, user, onEvict, broadcast: publish, httpSnapshot } = {}) {
     if (typeof send !== 'function') throw new TypeError('A session needs a send function');
@@ -768,11 +784,23 @@ export function createStore({
       sharedJson: undefined,
       presence: true,        // whether it wants to hear of its peers (its hello may say no)
       receive(msg) {
+        // A closed session (evicted, refused its replica, or its store
+        // unloaded) hears nothing more, whatever still reaches it
+        if (!sessions.has(s)) return;
         if (!Utils.isPlainObject(msg)) return send({ t: 'error', message: 'Expected a message object' });
         switch (msg.t) {
           case 'hello': {
             if (typeof msg.replicaId !== 'string' || !msg.replicaId) return send({ t: 'error', message: 'hello requires a replicaId' });
             const claim = claimReplica(s, msg.replicaId);
+            if (claim?.code === 'replica-taken') {
+              // Final for this store on this connection: the client's replica
+              // is someone else's (a browser that signed in as another user
+              // with the last one's storage, or a forgery); the app decides
+              send({ t: 'closed', code: claim.code, message: claim.message });
+              s.close();
+              s.onEvict?.();
+              return;
+            }
             if (claim) return send({ t: 'error', ...claim });
             // A hello costs a token: its ops ride free, so a reconnect after
             // a long offline spell is not throttled, but a client cannot
@@ -781,6 +809,12 @@ export function createStore({
             if (wait > 0) return send({ t: 'error', code: 'rate-limited', message: `Too many hellos; try again in ${wait} ms`, retryAfter: wait });
             s.speaksFor = msg.replicaId;
             s.heldUntil = null;
+            try {
+              takeReplica(s, msg.replicaId);
+            } catch (err) {
+              if (disposed) return;   // the commit failed and the store unloaded (see commit)
+              throw err;
+            }
             const joined = !s.replicaId;
             s.replicaId = msg.replicaId;
             if (msg.presence === false) s.presence = false;

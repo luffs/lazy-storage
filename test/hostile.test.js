@@ -3,7 +3,7 @@
 // sends is taken on trust
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createStore } from '../src/server/index.js';
+import { createStore, memoryStorage } from '../src/server/index.js';
 import { leaves, rebuild, ModelError } from '../src/core/model.js';
 import { registerSet, setAt } from '../src/core/paths.js';
 
@@ -62,12 +62,16 @@ test('a session speaks for one replica: another id, the server\'s, or a live use
   session.receive({ t: 'hello', replicaId: 'other', ops: [] });
   assert.equal(last().code, 'forbidden', 'a session keeps the replica it first spoke for');
 
-  // A victim's replica id, as presence shows it, cannot be borrowed while the victim is on
+  // A victim's replica id, as presence shows it, belongs to the victim: it cannot be borrowed
   const victim = rawSession(store, 'victim', { id: 'ann' });
   const thief = rawSession(store, 'victim', { id: 'mallory' });
-  assert.equal(thief.last().code, 'forbidden');
+  assert.deepEqual([thief.last().t, thief.last().code], ['closed', 'replica-taken']);
+  const heard = thief.sent.length;
   thief.session.receive({ t: 'op', op: { replicaId: 'victim', seq: 1e12, ts: ts('victim'), diff: {} } });
-  assert.equal(thief.last().code, 'forbidden');
+  assert.equal(thief.sent.length, heard, 'the refused session hears nothing more');
+  const other = rawSession(store, 'm2', { id: 'mallory' });
+  other.session.receive({ t: 'op', op: { replicaId: 'victim', seq: 1e12, ts: ts('victim'), diff: {} } });
+  assert.equal(other.last().code, 'forbidden', 'nor through another session of its own');
   victim.session.receive({ t: 'op', op: { replicaId: 'victim', seq: 1, ts: ts('victim'), diff: { tasks: { v: { id: 'v' } } } } });
   assert.equal(victim.last().t, 'ack');
   assert.equal(store.state.tasks.v.id, 'v');
@@ -103,4 +107,22 @@ test('a client cannot delete a top-level container of initial; the server can, a
   op(4, { order: null });
   assert.equal(last().t, 'ack', 'an array of initial is a leaf, and may go');
   store.dispose();
+});
+
+test('a replica belongs to the user who first spoke for it, while it is away and after a restart too', () => {
+  const storage = memoryStorage();
+  const store = createStore({ initial: { tasks: {} }, storage });
+  const victim = rawSession(store, 'victim', { id: 'ann' });
+  victim.session.close();                    // offline: no live session holds the id
+  const thief = rawSession(store, 'victim', { id: 'mallory' });
+  assert.equal(thief.last().code, 'replica-taken', 'refused while the victim is away');
+  store.dispose();
+
+  const again = createStore({ initial: { tasks: {} }, storage });
+  assert.equal(rawSession(again, 'victim', { id: 'mallory' }).last().code, 'replica-taken', 'and after a restart');
+  const back = rawSession(again, 'victim', { id: 'ann' });
+  back.session.receive({ t: 'op', op: { replicaId: 'victim', seq: 1, ts: [Date.now(), 0, 'victim'], diff: { tasks: { a: { id: 'a' } } } } });
+  assert.equal(back.last().t, 'ack', 'the owner carries on');
+  assert.equal(rawSession(again, 'anon', undefined).last().t, 'snapshot', 'a session without a user owns nothing and is not held back');
+  again.dispose();
 });
