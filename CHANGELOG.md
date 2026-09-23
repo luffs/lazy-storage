@@ -2,7 +2,15 @@
 
 All notable changes to lazy-storage are documented here. The format follows Keep a Changelog; versions follow Semantic Versioning.
 
-## [Unreleased]
+## [0.14.1] - 2026-09-23
+
+Four ways to lose data or the server, fixed: IndexedDB storage stopped
+saving for good once another tab closed the database; a replica whose
+storage failed to open left every tab `connecting`; a follower tab's
+edit was acknowledged before the leader had stored it; and a failed
+`jsonFileStorage` write crashed the process. Nothing to change on
+upgrade; `indexedDBStorage` gains `onReset` and `jsonFileStorage` an
+`onError` option.
 
 ### Added
 
