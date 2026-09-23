@@ -23,6 +23,20 @@ All notable changes to lazy-storage are documented here. The format follows Keep
   processes may still share a file by serving different stores.
   `lease: false` on `sqliteStorage` turns it off. A store now calls its
   storage's optional `close()` when disposed
+- **Migrations.** `initial` covers a container added to the state, but a
+  change to data already stored (a field renamed, a default filled in)
+  had nowhere to go but the app's own startup code. `createStore({
+  migrations: [state => diff, ...] })` runs the ones a store's rows have
+  not been through, in order, when it loads and before anyone is served;
+  each diff is applied as the server's own `patch` (persisted, logged,
+  sent on). How many have run (`schema`) is stored with the rows in the
+  same commit as each migration's, so a crash never leaves one half done:
+  in the SQLite adapters a column on `stores` (added to an existing
+  file), in the others a field of the document. A new store starts with
+  every one done; one stored before any were given runs them all; storage
+  that has run more than the list holds (a rollback after a newer version
+  migrated it) is refused with code `schema-ahead`; a migration that
+  throws stops the load, naming it. `store.stats()` gains `schema`
 
 ## [0.15.0] - 2026-09-23
 

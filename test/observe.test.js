@@ -51,7 +51,7 @@ test('stats counts what the store holds', async () => {
   await net.settle();
   a.collection('tasks').remove('t1');
   await net.settle();
-  assert.deepEqual(store.stats(), { version: 2, epoch: store.epoch, sessions: 1, replicas: 1, rows: 1, tombstones: 1, log: 2 });
+  assert.deepEqual(store.stats(), { version: 2, epoch: store.epoch, schema: 0, sessions: 1, replicas: 1, rows: 1, tombstones: 1, log: 2 });
 });
 
 test('a hub hands a throwing store factory to onError instead of the console', () => {

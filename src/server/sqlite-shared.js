@@ -49,7 +49,8 @@ const SCHEMA = `
   CREATE TABLE IF NOT EXISTS stores (
     store   TEXT    PRIMARY KEY,
     version INTEGER NOT NULL DEFAULT 0,
-    epoch   TEXT
+    epoch   TEXT,
+    schema  INTEGER
   ) WITHOUT ROWID;
   CREATE TABLE IF NOT EXISTS replicas (
     store   TEXT    NOT NULL,
@@ -103,8 +104,9 @@ export function sqliteStorageOn({ exec, prepare, transaction, close, db }, { fil
   // than fail the commit at once with SQLITE_BUSY
   exec('PRAGMA busy_timeout = 5000;');
   exec(SCHEMA);
-  // Files from before replicas had owners gain the column
+  // Files from before replicas had owners, or stores a schema, gain the column
   if (!prepare('PRAGMA table_info(replicas)').all().some(c => c.name === 'owner')) exec('ALTER TABLE replicas ADD COLUMN owner TEXT;');
+  if (!prepare('PRAGMA table_info(stores)').all().some(c => c.name === 'schema')) exec('ALTER TABLE stores ADD COLUMN schema INTEGER;');
 
   const q = {
     upsert: prepare(`
@@ -115,10 +117,10 @@ export function sqliteStorageOn({ exec, prepare, transaction, close, db }, { fil
         ts_replica = excluded.ts_replica, deleted = excluded.deleted`),
     del: prepare('DELETE FROM leaves WHERE store = ? AND path = ?'),
     rows: prepare('SELECT path, value, ts_ms, ts_count, ts_replica, deleted FROM leaves WHERE store = ?'),
-    version: prepare('SELECT version, epoch FROM stores WHERE store = ?'),
+    version: prepare('SELECT version, epoch, schema FROM stores WHERE store = ?'),
     setVersion: prepare(`
-      INSERT INTO stores (store, version, epoch) VALUES (?, ?, ?)
-      ON CONFLICT (store) DO UPDATE SET version = excluded.version, epoch = excluded.epoch`),
+      INSERT INTO stores (store, version, epoch, schema) VALUES (?, ?, ?, ?)
+      ON CONFLICT (store) DO UPDATE SET version = excluded.version, epoch = excluded.epoch, schema = COALESCE(excluded.schema, stores.schema)`),
     replicas: prepare('SELECT replica, seq, seen, owner FROM replicas WHERE store = ?'),
     setReplica: prepare(`
       INSERT INTO replicas (store, replica, seq, seen, owner) VALUES (?, ?, ?, ?, ?)
@@ -194,7 +196,7 @@ export function sqliteStorageOn({ exec, prepare, transaction, close, db }, { fil
     for (const replica of change.forgetReplicas ?? []) q.forgetReplica.run(id, replica);
     if (change.log) q.putLog.run(id, change.log.v, JSON.stringify(change.log.diff));
     if (Number.isInteger(change.logFloor)) q.pruneLog.run(id, change.logFloor);
-    q.setVersion.run(id, change.version, change.epoch);
+    q.setVersion.run(id, change.version, change.epoch, Number.isInteger(change.schema) ? change.schema : null);
   });
 
   const remove = transaction(id => {
@@ -226,7 +228,7 @@ export function sqliteStorageOn({ exec, prepare, transaction, close, db }, { fil
           ]);
           const replicas = Object.fromEntries(q.replicas.all(id).map(r => [r.replica, r.owner === null ? { seq: r.seq, seen: r.seen } : { seq: r.seq, seen: r.seen, owner: r.owner }]));
           const log = q.log.all(id).map(r => ({ v: r.v, diff: JSON.parse(r.diff) }));
-          return { rows, replicas, version: meta.version, epoch: meta.epoch, log };
+          return { rows, replicas, version: meta.version, epoch: meta.epoch, ...(meta.schema === null || meta.schema === undefined ? {} : { schema: meta.schema }), log };
         },
         commit(change) {
           commit(id, change);

@@ -31,6 +31,8 @@ export interface StorageDocument {
   version: number;
   /** Minted by the store with its first commit */
   epoch: string;
+  /** How many of the store's migrations the rows have been through; absent before any were given */
+  schema?: number;
   /** The persisted delta log, ascending by version, when the adapter keeps it */
   log?: LogEntry[];
 }
@@ -42,6 +44,8 @@ export interface StorageCommit {
   forgetReplicas?: string[];
   version: number;
   epoch: string;
+  /** How many migrations the rows have been through, stored with them */
+  schema: number;
   /** The accepted diff this op made, for adapters that keep the delta log */
   log?: LogEntry;
   /** Entries below this version are no longer needed */
@@ -162,6 +166,14 @@ export interface StoreOptions<S extends object = any> {
   rateLimit?: RateLimit | false;
   storage?: ServerStorage;
   /**
+   * Changes to the state's shape, in order, each run once per store before
+   * it serves anyone: handed a copy of the state, it returns a diff applied
+   * as the server's own patch, or nothing. A new store starts with every
+   * one done; storage that has run more than this list holds is refused
+   * with code 'schema-ahead'
+   */
+  migrations?: Array<(state: S, context: { store: Store<S> }) => object | void>;
+  /**
    * Whether sessions learn of each other; default false (nothing broadcast,
    * `presence()` and `peers()` empty, a share refused with `forbidden`).
    * true turns it on with the defaults; an object sets any of its options
@@ -208,6 +220,8 @@ export interface StoreEvents {
 export interface StoreStats {
   version: number;
   epoch: string;
+  /** How many migrations the store has been through */
+  schema: number;
   sessions: number;
   replicas: number;
   rows: number;

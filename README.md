@@ -419,6 +419,45 @@ is the store's clock when its last op arrived, and the store's `epoch`, a
 random id minted once per life of the storage (it is how a client's cached
 version is told apart from one that belongs to storage since wiped).
 
+### Migrations
+
+`initial` covers a container added to the state; a change to data that is
+already stored (a field renamed, a default filled in, records moved) is a
+**migration**. A store runs the ones its rows have not been through, in
+order, when it loads and before it serves anyone:
+
+```js
+createStore({
+  initial: { tasks: {} },
+  storage: sqlite.store(id),
+  migrations: [
+    // 0: tasks' title became name
+    state => ({ tasks: Object.fromEntries(Object.entries(state.tasks).map(([id, t]) => [id, { name: t.title, title: null }])) }),
+    // 1: every task has a priority
+    state => ({ tasks: Object.fromEntries(Object.keys(state.tasks).map(id => [id, { priority: 'normal' }])) })
+  ]
+});
+```
+
+A migration is handed a copy of the state and returns a diff (or
+nothing), which is applied as the server's own `patch`: persisted, kept
+in the delta log, and sent on, so a client that was away catches up with
+a delta that includes it. How many migrations have run is stored with the
+rows, in the same commit as each migration's, so a crash never leaves one
+half done and the next load starts where the last stopped
+(`store.stats().schema`). A new store starts with every one done, since
+`initial` is already in the latest shape; a store stored before any were
+given runs them all. Only append to the list. A migration that throws
+stops the store from loading (the error names it). Storage that has run
+more migrations than the list holds, because code was rolled back after a
+newer version migrated it, is refused with code `schema-ahead` rather
+than served and written in the older shape. Stores migrate as they are
+first opened; to migrate every one at once, open each (`sqlite.ids()`,
+then `stores.get(id)`). Edits a client made offline in the old shape are
+applied as written when it returns, so a migration that renames is best
+paired with a `validate` that translates or refuses the old name for a
+while.
+
 ## Multiple stores
 
 `createStores(id => store)` is a registry: it builds a store on first use
@@ -924,8 +963,8 @@ runs on the synced state and shows in the array view like any other change.
 
 **Server** (`lazy-storage/server`)
 
-- `createStore({ initial, registers, readOnly, validate, maxSkew, retention, compactEvery, deltaLog, maxLeaves, rateLimit, storage, presence, onError, now })` — `presence` is `false` (default), `true`, or `{ key, user, validate, every, maxShare }`; `store.epoch` — this life of the storage
-- `store.observe(event, fn)` → unsubscribe — `'op'`, `'refused'`, `'session'`; `store.stats()` → `{ version, epoch, sessions, replicas, rows, tombstones, log }`
+- `createStore({ initial, registers, readOnly, validate, maxSkew, retention, compactEvery, deltaLog, maxLeaves, rateLimit, storage, migrations, presence, onError, now })` — `migrations` see [Migrations](#migrations); — `presence` is `false` (default), `true`, or `{ key, user, validate, every, maxShare }`; `store.epoch` — this life of the storage
+- `store.observe(event, fn)` → unsubscribe — `'op'`, `'refused'`, `'session'`; `store.stats()` → `{ version, epoch, schema, sessions, replicas, rows, tombstones, log }`
 - `store.session({ send, user, onEvict, broadcast, httpSnapshot })` → `{ receive(message), close(), user, replicaId }` — one per connection, transport-agnostic; `broadcast` is a transport's fan-out to every session at once, `httpSnapshot` `{ url, threshold }` where a client that can fetch gets a large snapshot
 - `store.snapshotJSON()` — the state as JSON, encoded once per change; `snapshotResponse(store, request)` — the snapshot route's Response (`{ v, epoch, state }`, brotli or gzip as accepted, an ETag and 304s), for a server of your own
 - `store.closeSessions(predicate, message)` — evict sessions; `store.presence()` — distinct users with a live session; `store.peers()` — every live session as `{ replicaId, user, data }`

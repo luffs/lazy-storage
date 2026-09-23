@@ -289,3 +289,15 @@ sharedConnection({ transport: webSocketTransport('ws://x') });
 // --- Forgetting a store -------------------------------------------------------
 localStorageOutbox('app:gone').clear();
 memoryOutbox().clear();
+
+// --- Migrations -------------------------------------------------------------
+
+const migrated = createStore<State>({
+  initial: { tasks: {}, order: [] },
+  migrations: [
+    state => ({ tasks: Object.fromEntries(Object.keys(state.tasks).map(id => [id, { done: false }])) }),
+    (state, { store: self }) => { void self.version; }
+  ]
+});
+const migratedTo: number = migrated.stats().schema;
+void migratedTo;

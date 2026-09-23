@@ -190,6 +190,17 @@ const defaultPresenceKey = user =>
  *   a share cost one token each; the ops inside a hello are not counted,
  *   and a hello carries at most HELLO_OPS of them (the rest wait for the
  *   next). `false` disables
+ * @param {Array<(state: Object, context: { store: Object }) => Object|void>} [options.migrations] -
+ *   changes to the shape of the state, in order, each run once per store:
+ *   it is handed a copy of the state and returns a diff (applied as the
+ *   server's own `patch`, so it is persisted, logged, and sent to every
+ *   client) or nothing. How many have run is stored with the store's rows,
+ *   in the same commit as the migration's, so a store loaded later picks
+ *   up where it stopped; a new store starts with them all done (`initial`
+ *   is in the latest shape), and one stored before migrations were given
+ *   runs them all. A store whose storage has run more migrations than this
+ *   list holds (code rolled back after a newer one migrated it) is refused
+ *   with code 'schema-ahead', rather than written in the older shape
  * @param {Object} [options.storage] - a storage adapter (default: memory)
  * @param {boolean|Object} [options.presence=false] - whether sessions
  *   learn of each other. Off, nothing is broadcast, `presence()` and
@@ -227,6 +238,7 @@ export function createStore({
   maxLeaves = 10_000,
   rateLimit = { burst: 500, perSecond: 100 },
   storage = memoryStorage(),
+  migrations = [],
   presence: presenceOption = false,   // `presence` below is the list
   onError = err => console.error('lazy-storage:', err),
   now
@@ -247,6 +259,15 @@ export function createStore({
   // whose cache remembers a version of storage that has since been wiped
   // gets a snapshot, not a delta computed against a different history
   const epoch = saved ? saved.epoch : randomId();
+  if (!Array.isArray(migrations) || migrations.some(m => typeof m !== 'function')) throw new TypeError('migrations must be an array of functions');
+  // How many migrations the stored rows have been through; see migrate() below
+  let schema = saved ? (Number.isInteger(saved.schema) ? saved.schema : 0) : migrations.length;
+  if (schema > migrations.length) {
+    storage.close?.();
+    const err = new Error(`The store's storage has run ${schema} migrations and this code knows ${migrations.length}: it was migrated by a newer version, and is not served in an older shape`);
+    err.code = 'schema-ahead';
+    throw err;
+  }
   const clock = createClock('server', now);
   const sessions = new Set();
   let serverSeq = replicas.get('server')?.seq ?? 0;
@@ -330,7 +351,7 @@ export function createStore({
    */
   function commit(change) {
     try {
-      storage.commit({ ...change, version, epoch });
+      storage.commit({ ...change, version, epoch, schema });
     } catch (err) {
       onError(err);
       self.dispose();
@@ -1031,7 +1052,7 @@ export function createStore({
     stats() {
       let tombstones = 0;
       for (const entry of clocks.values()) if (entry.deleted) tombstones++;
-      return { version, epoch, sessions: sessions.size, replicas: replicas.size, rows: clocks.size, tombstones, log: log.length };
+      return { version, epoch, schema, sessions: sessions.size, replicas: replicas.size, rows: clocks.size, tombstones, log: log.length };
     },
     /** Forget what the retention window no longer needs; returns { tombstones, replicas } removed */
     compact,
@@ -1076,5 +1097,28 @@ export function createStore({
   // Rows loaded from disk may hold deletions and replicas the window has
   // outlived; the first op after that runs compaction again on schedule
   compact();
+  migrate();
   return self;
+
+  /**
+   * Run the migrations the stored rows have not been through, in order,
+   * before anyone is served. Each one's diff is the server's own patch,
+   * committed together with the new count, so a crash between two leaves
+   * the store at the one before, never half through one. A migration that
+   * throws stops the store from loading, the storage let go
+   */
+  function migrate() {
+    for (let i = schema; i < migrations.length; i++) {
+      try {
+        const diff = migrations[i](LazyWatch.snapshot(state), { store: self });
+        schema = i + 1;
+        if (Utils.isPlainObject(diff) && Object.keys(diff).length) patch(diff);
+        else commit({ upserts: [], deletes: [] });
+      } catch (err) {
+        schema = i;
+        if (!disposed) self.dispose();
+        throw new Error(`Migration ${i} failed: ${err?.message ?? err}`, { cause: err });
+      }
+    }
+  }
 }

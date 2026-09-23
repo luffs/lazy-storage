@@ -16,9 +16,9 @@
 // The interface is incremental so a row-oriented backend (SQLite) writes
 // only what an op touched:
 //
-//   load()  -> null | { rows: Array<[pathKey, row]>, replicas: { replicaId: { seq, seen, owner? } }, version, epoch, log? }
+//   load()  -> null | { rows: Array<[pathKey, row]>, replicas: { replicaId: { seq, seen, owner? } }, version, epoch, schema?, log? }
 //   commit({ upserts: Array<[pathKey, row]>, deletes: pathKey[],
-//            replica?: { id, seq, seen, owner? }, forgetReplicas?: replicaId[], version, epoch,
+//            replica?: { id, seq, seen, owner? }, forgetReplicas?: replicaId[], version, epoch, schema,
 //            log?: { v, diff }, logFloor?: number })
 //   flush() -> void   (write out anything buffered; called on dispose)
 //
@@ -29,6 +29,9 @@
 // may not take the replica over. An adapter that drops it loses only that.
 // `epoch` is a random id the store mints once per storage life, so a
 // client can tell whether its cached version means anything here.
+// `schema` is how many of the store's `migrations` the rows have been
+// through; an adapter that does not keep it has every migration run again
+// on each load, so it keeps it.
 // `log` in a commit is the accepted diff this op made, at version `v`;
 // an adapter may keep these (pruning below `logFloor`) and hand them back
 // as `log: [{ v, diff }]` on load, so a restarted server still answers
@@ -47,10 +50,11 @@ function document(initial = null, { keepLog = false } = {}) {
   const replicas = initial ? structuredClone(initial.replicas ?? {}) : {};
   let version = initial ? initial.version : 0;
   let epoch = initial?.epoch ?? null;
+  let schema = Number.isInteger(initial?.schema) ? initial.schema : undefined;
   let seen = initial !== null;
   return {
     load: () => (seen
-      ? { rows: [...rows].map(([k, r]) => [k, structuredClone(r)]), replicas: structuredClone(replicas), version, epoch, ...(keepLog ? { log: structuredClone(log) } : {}) }
+      ? { rows: [...rows].map(([k, r]) => [k, structuredClone(r)]), replicas: structuredClone(replicas), version, epoch, ...(schema === undefined ? {} : { schema }), ...(keepLog ? { log: structuredClone(log) } : {}) }
       : null),
     commit(change) {
       seen = true;
@@ -63,12 +67,13 @@ function document(initial = null, { keepLog = false } = {}) {
       for (const id of change.forgetReplicas ?? []) delete replicas[id];
       version = change.version;
       if (change.epoch !== undefined) epoch = change.epoch;
+      if (Number.isInteger(change.schema)) schema = change.schema;
       if (keepLog) {
         if (change.log) log.push(structuredClone(change.log));
         if (Number.isInteger(change.logFloor)) log = log.filter(e => e.v >= change.logFloor);
       }
     },
-    serialize: () => ({ rows: [...rows], replicas, version, epoch, ...(keepLog ? { log } : {}) })
+    serialize: () => ({ rows: [...rows], replicas, version, epoch, ...(schema === undefined ? {} : { schema }), ...(keepLog ? { log } : {}) })
   };
 }
 
