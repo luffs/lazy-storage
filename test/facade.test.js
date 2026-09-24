@@ -89,6 +89,43 @@ test('changes from others arrive as array changes: inserts at their sorted place
   assert.deepEqual(titles(app.state.tasks[1].subtasks), ['sub'], 'a nested list appears as an array');
 });
 
+test("a record's handle and listeners follow it: moved by another client, sorted, spliced, and deleted", async () => {
+  const { net, app, plain } = setup();
+  await net.settle();
+  const list = plain.list('tasks');
+  list.add({ title: 'a' });
+  list.add({ title: 'b' });
+  const c = list.add({ title: 'c' });
+  await net.settle();
+  const handle = app.state.tasks[2];
+  const heard = [];
+  LazyWatch.on(handle, diff => heard.push(diff));
+
+  list.move(c, { at: 0 });
+  await net.settle();
+  assert.deepEqual(titles(app.state.tasks), ['c', 'a', 'b']);
+  assert.equal(app.state.tasks[0], handle, 'the record itself moved, not a copy of it');
+  handle.title = 'c!';
+  await net.settle();
+  assert.equal(plain.state.tasks[c].title, 'c!', 'a write through the handle reaches its record');
+
+  app.state.tasks.sort((x, y) => (x.title < y.title ? 1 : -1));
+  const [moved] = app.state.tasks.splice(0, 1);
+  app.state.tasks.splice(2, 0, moved);
+  await net.settle();
+  assert.deepEqual(titles(app.state.tasks), ['b', 'a', 'c!']);
+  assert.deepEqual(wireOrder(plain.state.tasks), ['b', 'a', 'c!']);
+  assert.equal(moved, handle, 'splice returned the handle, and putting it back kept it');
+  assert.equal(app.state.tasks[2], handle);
+  assert.deepEqual(heard, [{ title: 'c!' }], 'the listener heard its own edit, nothing about the moves');
+
+  list.remove(c);
+  await net.settle();
+  assert.deepEqual(titles(app.state.tasks), ['b', 'a']);
+  assert.deepEqual(heard.at(-1), null, 'told once its record left');
+  assert.throws(() => { handle.title = 'gone'; }, /detached/);
+});
+
 test('nested lists: arrays inside records translate both ways', async () => {
   const { store, net, app, plain } = setup();
   await net.settle();

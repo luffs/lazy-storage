@@ -2,6 +2,34 @@
 
 All notable changes to lazy-storage are documented here. The format follows Keep a Changelog; versions follow Semantic Versioning.
 
+## [Unreleased]
+
+### Fixed
+
+- **A record read from a list view stays that record.** A handle kept on
+  a record (`const task = db.state.tasks[0]`, a row's click handler
+  holding one) addressed an index: after the app's own sort, `splice`,
+  or `unshift` it edited whichever record had come to sit there, and
+  the edit synced to everyone; after another client moved the record, it
+  was detached and writes through it threw. It now follows its record
+  through every move, local or remote, and so does a listener registered
+  on it
+
+### Changed
+
+- **Requires lazy-watch 7.0.1**, whose handles follow their objects. On
+  a list view, `splice`, `shift` and `pop` return the removed
+  records' handles rather than copies: the usual move
+  (`tasks.splice(j, 0, ...tasks.splice(i, 1))`) keeps the record
+  itself, but a write to a removed record before it is put back throws;
+  put it back first, or edit a copy (`LazyWatch.snapshot(task)`). A
+  listener on a record hears `null` once when the record is deleted and
+  does not follow another record that comes to its index. A move on a
+  5k-record list view takes ~5 ms instead of ~6. 7.0.1 over 7.0.0: a
+  record taken out and pushed back is a move too, its listeners stay
+  exact however it comes back, and undo stays exact across the batches
+  of one step
+
 ## [0.16.0] - 2026-09-23
 
 Running the server gets its operations: one process per store on a

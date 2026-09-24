@@ -11,11 +11,11 @@
 // plain writes on the wire state, which the client turns into ops. A
 // change inside a record ({ 3: { title } } in lazy-watch's array
 // fragment) maps its index to the record's id. Anything structural (a
-// splice, a length change, a whole record at an index, which is what a
-// reorder or a replacement emits) resyncs that list by id: records gone
-// from the array are deleted, new ones added (minting an id when the app
-// gave none, written back into the view), and `reconcile` writes the
-// fewest positions that make the wire order match the array.
+// splice, which is also what a sort or reverse emits, a length change, a
+// whole record at an index, as a replacement writes) resyncs that list by
+// id: records gone from the array are deleted, new ones added (minting an
+// id when the app gave none, written back into the view), and `reconcile`
+// writes the fewest positions that make the wire order match the array.
 //
 // Wire -> view. Every batch on the wire state (remote, undo, the app's
 // own echoed back, a correction) is applied to the view by id: a deleted
@@ -377,6 +377,8 @@ export function createFacade({ wire, lists, position = 'pos' }) {
           continue;
         }
         if (first.has(id)) {
+          // A copy of what the same ops took out: lazy-watch puts the element
+          // itself back, so the app's handles and listeners on it follow the move
           ops.push([t, 0, [structuredClone(elements[first.get(id)])]]);
         } else {
           ops.push([t, 0, [fromWireRecord(plain(map[id]), [...wirePath, id], id)]]);

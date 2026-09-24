@@ -128,7 +128,12 @@ fewest positions that make the wire order match. Changes from others
 arrive as splices at their sorted place, moves, and field patches, tagged
 `origin: 'remote'` for the app's listeners. A record pushed without an id
 gets one in the next batch; read it back from the array rather than from
-the object you pushed. A list path cannot also be a register.
+the object you pushed. A record read from the array (`const task =
+db.state.tasks[i]`) stays that record wherever a sort, a splice, or
+another client's move takes it, and so does a listener on it
+(`LazyWatch.on(task, …)`); `splice` hands back the records it removed,
+so the usual move (`tasks.splice(j, 0, ...tasks.splice(i, 1))`) keeps
+them. A list path cannot also be a register.
 
 ### With a UI framework
 
