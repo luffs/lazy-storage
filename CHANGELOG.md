@@ -13,6 +13,19 @@ All notable changes to lazy-storage are documented here. The format follows Keep
   `buffered`, `largest`, and `cutOff`, how many sockets were closed for
   passing `maxBuffered`. Enough for a status endpoint that shows which
   clients are falling behind
+- **What a store sends, and how long an op takes.** `store.stats()`
+  gains `sent`, by message type (`patch`, `ack`, `snapshot`, `delta`,
+  `presence`, `http-snapshot`, …): `{ messages, bytes }`, deliveries (a
+  broadcast once per session it reached) and their bytes of JSON before
+  compression, an HTTP snapshot's as served. The adapters encode every
+  message once already, so counting costs nothing there. `observe('op')`
+  gains `ms`, the time from the op reaching the store to its patch handed
+  to the sessions. The README shows a status endpoint and a `prom-client`
+  setup built on these; lazy-storage depends on neither
+- **`db.stats()` on the client**: `{ pending, oldestPendingMs, ackMs,
+  remoteAgeMs }`, the ops waiting and for how long, the last
+  acknowledgement's round trip, and how old the last patch from another
+  replica was when it arrived. For a "still saving…" hint or a status line
 
 ### Fixed
 

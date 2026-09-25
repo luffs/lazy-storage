@@ -88,7 +88,7 @@ import { leaves, assertModel, rebuild, expandRegisters, replacingRegisters } fro
 import { mergeOp, compactTombstones } from '../core/merge.js';
 import { ClockMap } from '../core/clocks.js';
 import { memoryStorage, assertDocument } from './storage.js';
-import { toJSON, presetJSON, SNAPSHOT_THRESHOLD } from './wire.js';
+import { toJSON, presetJSON, SNAPSHOT_THRESHOLD, TALLY } from './wire.js';
 import { randomId } from '../core/ids.js';
 
 const { Utils } = LazyWatch;
@@ -278,6 +278,17 @@ export function createStore({
   const log = restoreLog(saved?.log, version, deltaLog);
   const buckets = new Map();  // replicaId -> { tokens, at }, for the rate limit
   const observers = { op: new Set(), refused: new Set(), session: new Set() };
+  // What the store has sent, by message type: how many deliveries, and
+  // their bytes of JSON (before any compression; the length of the
+  // encoding every message gets once anyway, which is its size in bytes
+  // for ASCII). A broadcast counts once per session it reaches
+  const sent = {};
+  function tally(type, count, bytes) {
+    const entry = sent[type] ??= { messages: 0, bytes: 0 };
+    entry.messages += count;
+    entry.bytes += bytes;
+  }
+  const tallyMessage = (message, count) => tally(String(message.t), count, count * toJSON(message).length);
   // The state as JSON, encoded straight from the proxy's plain target (a
   // deep copy through the proxy costs several times more) and kept until
   // the next accepted op, so a burst of reconnects pays for one encoding
@@ -327,13 +338,14 @@ export function createStore({
   }
 
   function broadcast(message) {
-    toJSON(message);  // encoded once, however many sessions there are
+    if (sessions.size === 0) return;
+    tallyMessage(message, sessions.size);  // encoded once, however many sessions there are
     // A session whose transport can fan out (Bun's topic publish, which
     // compresses once) hears it through one publish, which reaches every
     // such session at once; the rest are sent to one by one
     let published = false;
     for (const s of sessions) {
-      if (!s.publish) s.send(message);
+      if (!s.publish) s.transportSend(message);
       else if (!published) {
         s.publish(message);
         published = true;
@@ -590,6 +602,7 @@ export function createStore({
    * @returns {{ duplicate: boolean, accepted: Object|null, rejected: string[][], correction: Object|null }}
    */
   function apply(op, session, { authority = false } = {}) {
+    const started = performance.now();
     assertOp(op);
     if (session) {
       // A session speaks for the replica its hello named and no other: an
@@ -638,7 +651,7 @@ export function createStore({
     if (applied) broadcast({ t: 'patch', diff: applied, ts: op.ts, v: version });
     const lost = [...rejected, ...stripped];
     if (observers.op.size) {
-      notify('op', { replicaId: op.replicaId, seq: op.seq, user: session?.user, accepted: accepted !== null, rejected: lost.length, version });
+      notify('op', { replicaId: op.replicaId, seq: op.seq, user: session?.user, accepted: accepted !== null, rejected: lost.length, version, ms: performance.now() - started });
     }
     return { duplicate: false, accepted, rejected: lost, correction: lost.length ? correction(lost) : null };
   }
@@ -794,10 +807,16 @@ export function createStore({
    * that says in its hello it can fetch is then pointed at `url` in place
    * of a snapshot of `threshold` bytes or more.
    */
-  function session({ send, user, onEvict, broadcast: publish, httpSnapshot } = {}) {
-    if (typeof send !== 'function') throw new TypeError('A session needs a send function');
+  function session({ send: transportSend, user, onEvict, broadcast: publish, httpSnapshot } = {}) {
+    if (typeof transportSend !== 'function') throw new TypeError('A session needs a send function');
+    /** Send to this session alone, counted (see `sent`) */
+    const send = message => {
+      tallyMessage(message, 1);
+      transportSend(message);
+    };
     const s = {
       send,
+      transportSend,
       user,
       onEvict,
       publish: typeof publish === 'function' ? publish : null,   // hears broadcasts through the transport's fan-out
@@ -1052,6 +1071,7 @@ export function createStore({
     closeSessions,
     /** The state as JSON, encoded once per change: what a snapshot carries, inline or over HTTP */
     snapshotJSON: encodedState,
+    [TALLY]: tally,
     /** Distinct users with a live session */
     presence,
     /** Every live session: `{ replicaId, user, data }`, `data` being what it shares */
@@ -1077,7 +1097,9 @@ export function createStore({
     stats() {
       let tombstones = 0;
       for (const entry of clocks.values()) if (entry.deleted) tombstones++;
-      return { version, epoch, schema, sessions: sessions.size, replicas: replicas.size, rows: clocks.size, tombstones, log: log.length };
+      const out = {};
+      for (const [type, entry] of Object.entries(sent)) out[type] = { ...entry };
+      return { version, epoch, schema, sessions: sessions.size, replicas: replicas.size, rows: clocks.size, tombstones, log: log.length, sent: out };
     },
     /** Forget what the retention window no longer needs; returns { tombstones, replicas } removed */
     compact,

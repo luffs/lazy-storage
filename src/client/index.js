@@ -184,6 +184,16 @@ function build({
   // it refuses an op for running ahead (see 'clock-skew' below)
   const wall = now ?? Date.now;
   let offset = 0;
+  // For stats(): when each pending op last went out (seq -> performance.now()),
+  // the last ack's round trip, and how old the last remote patch was on arrival
+  const sentAt = new Map();
+  let ackMs = null;
+  let remoteAgeMs = null;
+  /** Send one op live, noting when */
+  const sendOp = op => {
+    sentAt.set(op.seq, performance.now());
+    link.send({ t: 'op', op });
+  };
   const clock = createClock(replicaId, () => wall() + offset);
   const restamped = new Map(); // seq -> how many times the op was re-stamped after a skew refusal
   const listeners = Object.fromEntries(EVENTS.map(e => [e, new Set()]));
@@ -330,6 +340,9 @@ function build({
 
   /** Drop acknowledged ops (seq and below) from the outbox and its persistence */
   function acknowledge(upTo) {
+    const at = sentAt.get(upTo);
+    if (at !== undefined) ackMs = performance.now() - at;
+    for (const seq of sentAt.keys()) if (seq <= upTo) sentAt.delete(seq);
     outbox = outbox.filter(op => op.seq > upTo);
     for (const s of restamped.keys()) if (s <= upTo) restamped.delete(s);
     persistence.drop(upTo);
@@ -413,7 +426,7 @@ function build({
     outbox.push(op);
     persistence.op(op, superseded);
     persistence.batch(expanded, meta);
-    if (linked() && synced && !throttled) link.send({ t: 'op', op });
+    if (linked() && synced && !throttled) sendOp(op);
     emit('sync');
     // The undo manager listens ahead of this, so the batch is in history by now
     if (undoManager) emit('history', history());
@@ -436,6 +449,8 @@ function build({
    */
   function hello({ full = false } = {}) {
     const message = { t: 'hello', replicaId, ops: outbox.slice(0, HELLO_LIMIT) };
+    const at = performance.now();
+    for (const op of message.ops) sentAt.set(op.seq, at);
     helloCut = outbox.length > HELLO_LIMIT;
     throttled = false;
     if (!full) Object.assign(message, { since: known.v, epoch: known.epoch });
@@ -490,7 +505,7 @@ function build({
     const more = helloCut && outbox.length > 0;
     for (const op of outbox) {
       LazyWatch.patch(state, op.diff, REMOTE);
-      if (!more) link.send({ t: 'op', op });
+      if (!more) sendOp(op);
     }
     persistence.version();
     if (more) {
@@ -624,6 +639,9 @@ function build({
           return;
         }
         if (Number.isInteger(msg.v)) known.v = msg.v;
+        // How old another replica's write is by the time it arrives, on the
+        // clock the server keeps this one to (see 'clock-skew')
+        if (Array.isArray(msg.ts) && msg.ts[2] !== replicaId && Number.isFinite(msg.ts[0])) remoteAgeMs = Math.max(0, wall() + offset - msg.ts[0]);
         LazyWatch.patch(state, msg.diff, REMOTE);
         return;
       case 'ack': {
@@ -739,7 +757,7 @@ function build({
       restamped.set(op.seq, attempts);
       persistence.op(op);
     }
-    if (synced && !throttled) for (const op of behind) link.send({ t: 'op', op });
+    if (synced && !throttled) for (const op of behind) sendOp(op);
     return true;
   }
 
@@ -842,6 +860,21 @@ function build({
     get status() { return status(); },
     /** Unacknowledged local ops */
     get pending() { return outbox.length + browserPending(); },
+    /**
+     * How the client is doing, for a "saving…" indicator or a status line:
+     * `pending` ops, how long the oldest has waited (`oldestPendingMs`),
+     * the last ack's round trip (`ackMs`), and how old the last remote
+     * patch was when it arrived (`remoteAgeMs`); null where nothing has
+     * happened yet
+     */
+    stats() {
+      return {
+        pending: outbox.length + browserPending(),
+        oldestPendingMs: outbox.length ? Math.max(0, wall() + offset - outbox[0].ts[0]) : null,
+        ackMs,
+        remoteAgeMs
+      };
+    },
     /** The store version this client has seen everything up to */
     get version() { return known.v; },
     /** Distinct users with a live session on this store (empty while offline) */

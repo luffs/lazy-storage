@@ -206,6 +206,8 @@ export interface OpEvent {
   /** Leaves the op lost */
   rejected: number;
   version: number;
+  /** Milliseconds from the op reaching the store to its patch handed to the sessions: the gates, the merge, the commit, the broadcast */
+  ms: number;
 }
 
 export interface RefusedEvent {
@@ -240,6 +242,13 @@ export interface StoreStats {
   rows: number;
   tombstones: number;
   log: number;
+  /**
+   * What the store has sent, by message type ('patch', 'ack', 'snapshot',
+   * 'delta', 'presence', 'http-snapshot', …): deliveries, a broadcast once
+   * per session it reached, and their bytes of JSON before compression
+   * (an HTTP snapshot's as served, compressed)
+   */
+  sent: Record<string, { messages: number; bytes: number }>;
 }
 
 export interface Store<S extends object = any> {

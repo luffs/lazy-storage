@@ -375,6 +375,18 @@ export interface Rejected {
   diff: Diff;
 }
 
+/** What db.stats() reports */
+export interface ClientStats {
+  /** Unacknowledged local ops */
+  pending: number;
+  /** How long the oldest of them has waited, or null when none is */
+  oldestPendingMs: number | null;
+  /** The last acknowledgement's round trip: op sent to ack received */
+  ackMs: number | null;
+  /** How old the last patch from another replica was when it arrived (clocks agree to within the server's maxSkew) */
+  remoteAgeMs: number | null;
+}
+
 export interface Client<S extends object = any> {
   /** The mirrored state: read and write it like a plain object (with lists declared, the view with arrays) */
   readonly state: S;
@@ -386,6 +398,8 @@ export interface Client<S extends object = any> {
   readonly status: ClientStatus;
   /** Unacknowledged local ops */
   readonly pending: number;
+  /** How the client is doing, for a "saving…" indicator or a status line; null where nothing has happened yet */
+  stats(): ClientStats;
   /** The store version this client has seen everything up to */
   readonly version: number;
   /** Distinct users with a live session on this store (empty while offline) */

@@ -42,6 +42,9 @@ const id: string = tasks.add({ title: 'new', done: false });
 tasks.update(id, { done: true });
 const maybe: Task | undefined = tasks.get(id);
 const pending: number = db.pending;
+const { oldestPendingMs, ackMs, remoteAgeMs } = db.stats();
+const slow: boolean = (oldestPendingMs ?? 0) > 5000 || (ackMs ?? 0) > 1000 || (remoteAgeMs ?? 0) > 2000;
+void slow;
 const version: number = db.version;
 db.on('status', s => { const _s: 'offline' | 'connecting' | 'online' = s; });
 db.on('error', (err: ClientError) => { if (err.code === 'rate-limited') return; });
@@ -73,7 +76,7 @@ db.on('conflict', ({ seq, lost }) => { const first: string[] = lost[0].path; voi
 db.on('rejected', ({ seq, code, diff }) => { const maybe: number | null = seq; void maybe; void code; void diff; });
 db.on('reset', ({ epoch, previous }) => { const was: number = previous.version; void epoch; void was; void previous.state; });
 const saving: boolean = db.isPending('tasks/a/title') || db.isPending(['tasks', 'a']);
-void saving;
+void slow;
 
 // The quickstart's shape: an empty array in initial takes records, and other fields keep their types
 const inferred = createClient({ store: 'q', connection, initial: { tasks: [], count: 0, nested: { tags: [] } } });
@@ -181,6 +184,9 @@ store.patch({ tasks: { a: { id: 'a', title: 't', done: false } } });
 const session = store.session({ send: m => { if (m.t === 'ack') return m.seq; }, user: { id: 'u1' } });
 session.receive({ t: 'ping' });
 const off = store.observe('op', (e: OpEvent) => e.accepted);
+store.observe('op', e => { const took: number = e.ms; void took; });
+const patchBytes: number = store.stats().sent.patch?.bytes ?? 0;
+void patchBytes;
 store.observe('session', e => e.event === 'open');
 // @ts-expect-error unknown event
 store.observe('nope', () => {});

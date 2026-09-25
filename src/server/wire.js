@@ -63,6 +63,13 @@ export function closeUnauthorized(ws) {
   ws.close(4401, 'Unauthorized');
 }
 
+/**
+ * A store's own counter of what it sends, by message type (see
+ * store.stats().sent), under a symbol so that only the modules that send
+ * for it (the snapshot route) reach it: `store[TALLY](type, count, bytes)`
+ */
+export const TALLY = Symbol('lazy-storage.tally');
+
 /** The close code and reason for a socket cut off for falling behind: 1013, try again later */
 export const TOO_FAR_BEHIND = [1013, 'Too far behind'];
 
