@@ -2,7 +2,19 @@
 
 All notable changes to lazy-storage are documented here. The format follows Keep a Changelog; versions follow Semantic Versioning.
 
-## [Unreleased]
+## [0.18.0] - 2026-09-25
+
+The server can say how it is doing: how far behind each socket is, what
+each store sends by message type and how many bytes, and how long each
+op takes, with `db.stats()` for the same on the client; plain numbers
+for a status endpoint or whatever metrics system the server already
+runs. A socket that stops reading is now cut off on Bun as on Node. One
+change to check on upgrade: the Bun adapter closes a socket past
+`maxBuffered` (16 MB) with code 1013 where it used to keep it and drop
+messages; clients reconnect and catch up, and `maxBuffered: false`
+keeps the old behaviour. `stats()` results and the `op` event gain
+fields, which a test comparing them whole will notice. The wire protocol
+and stored data are unchanged.
 
 ### Added
 
