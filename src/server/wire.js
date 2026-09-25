@@ -98,19 +98,28 @@ export const TALLY = Symbol('lazy-storage.tally');
 export const TOO_FAR_BEHIND = [1013, 'Too far behind'];
 
 /**
- * The adapters' `socketStats()`: how many sockets are open, the bytes
- * they hold unsent in total and at most, and how many were cut off for
- * falling behind since the server started. `sockets` is their
- * `sockets()` list
+ * The close code and reason for a socket the app disconnected: not final,
+ * unlike 4401, so the client reconnects (with its usual backoff) and the
+ * upgrade authenticates it afresh. Whether it gets back in is then
+ * `authenticate`'s call, and every store it asks for is authorized again
  */
-export function rollUpSockets(sockets, cutOff) {
+export const REAUTHENTICATE = [4001, 'Reauthenticate'];
+
+/**
+ * The adapters' `socketStats()`: how many sockets are open, the bytes
+ * they hold unsent in total and at most, and since the server started,
+ * how many were cut off for falling behind, disconnected by the app, and
+ * store sessions closed by `revalidate`. `sockets` is their `sockets()`
+ * list
+ */
+export function rollUpSockets(sockets, { cutOff, disconnected, revoked }) {
   let buffered = 0;
   let largest = 0;
   for (const s of sockets) {
     buffered += s.buffered;
     if (s.buffered > largest) largest = s.buffered;
   }
-  return { sockets: sockets.length, buffered, largest, cutOff };
+  return { sockets: sockets.length, buffered, largest, cutOff, disconnected, revoked };
 }
 
 /**

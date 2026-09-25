@@ -20,7 +20,7 @@
 // `shutdown()` that does this and then stops the server.
 import { LazyWatch } from 'lazy-watch';
 import { createHub } from './hub.js';
-import { toJSON, closeUnauthorized, deflateOptions, TOO_FAR_BEHIND, rollUpSockets } from './wire.js';
+import { toJSON, closeUnauthorized, deflateOptions, TOO_FAR_BEHIND, REAUTHENTICATE, rollUpSockets } from './wire.js';
 import { snapshotOptions, snapshotId, serveSnapshot } from './snapshot.js';
 
 /**
@@ -71,14 +71,18 @@ import { snapshotOptions, snapshotId, serveSnapshot } from './snapshot.js';
  *   once a second. false leaves it to Bun, which drops past 16 MB
  * @param {(error: any) => void} [options.onError] - server faults: a
  *   store factory that threw, a bug while handling a message; default console
- * @returns {{ upgrade: (req: Request, server: any) => Promise<Response|undefined|null>, websocket: Object, close: (options?: { reason?: string }) => Promise<void>, get closing(): boolean, sockets: () => Array<Object>, socketStats: () => Object }}
+ * @returns {{ upgrade: (req: Request, server: any) => Promise<Response|undefined|null>, websocket: Object, close: (options?: { reason?: string }) => Promise<void>, get closing(): boolean, sockets: () => Array<Object>, socketStats: () => Object, disconnect: (filter?: (user: any) => boolean) => number, revalidate: (filter?: (user: any, storeId: string) => boolean) => Promise<number> }}
  *   `upgrade` resolves to null when the URL is not ours, undefined after a
  *   successful upgrade, or a Response (the snapshot route's, or an error);
  *   `close` is the graceful shutdown described above. `sockets()` lists
  *   the open sockets, each `{ user, stores, buffered, idleMs, openMs }`
  *   (bytes unsent, time since it last sent something, time since it
  *   opened), and `socketStats()` rolls them up (see rollUpSockets in
- *   wire.js)
+ *   wire.js). `disconnect(filter)` closes the sockets of the users it
+ *   picks, which reconnect and authenticate afresh (after a logout, a
+ *   changed role, a deleted account); `revalidate(filter)` runs the
+ *   authorize hooks again on the open stores it picks and closes those
+ *   now refused (after a change to who may open a store)
  */
 export function createHandlers({
   stores,
@@ -109,6 +113,8 @@ export function createHandlers({
   const seen = new Map();   // socket -> { opened, heard }: when it opened, when it last sent something
   let closing = false;
   let cutOff = 0;           // sockets closed for falling behind
+  let disconnected = 0;     // sockets closed by disconnect()
+  let revoked = 0;          // store sessions closed by revalidate()
   /** Close a socket over maxBuffered; true when it was (1013: the client reconnects and asks for what it missed) */
   const behind = ws => {
     if (!maxBuffered || ws.getBufferedAmount() <= maxBuffered) return false;
@@ -221,6 +227,39 @@ export function createHandlers({
     if (typeof stores.dispose === 'function') stores.dispose();
   }
 
+  /**
+   * Close the sockets whose user `filter(user)` picks (every one, without
+   * a filter) for their clients to reconnect and authenticate afresh (see
+   * REAUTHENTICATE in wire.js). Their sessions end at once: nothing more
+   * reaches these sockets or is taken from them. Returns how many
+   */
+  function disconnect(filter) {
+    if (closing) return 0;
+    let count = 0;
+    for (const [ws, hub] of [...hubs]) {
+      if (filter && !filter(hub.user)) continue;
+      hub.close();
+      hubs.delete(ws);
+      seen.delete(ws);
+      ws.close(...REAUTHENTICATE);
+      count++;
+    }
+    disconnected += count;
+    return count;
+  }
+
+  /**
+   * Judge the open store sessions again, those `filter(user, storeId)`
+   * picks (see the hub's revalidate); resolves to how many were closed
+   */
+  async function revalidate(filter) {
+    if (closing) return 0;
+    let count = 0;
+    for (const closedOnes of await Promise.all([...hubs.values()].map(hub => hub.revalidate(filter)))) count += closedOnes;
+    revoked += count;
+    return count;
+  }
+
   /** The open sockets, how far behind each is (see the returns above) */
   function sockets() {
     const now = Date.now();
@@ -233,7 +272,7 @@ export function createHandlers({
     return out;
   }
 
-  return { upgrade, websocket, close, get closing() { return closing; }, sockets, socketStats: () => rollUpSockets(sockets(), cutOff) };
+  return { upgrade, websocket, close, get closing() { return closing; }, sockets, socketStats: () => rollUpSockets(sockets(), { cutOff, disconnected, revoked }), disconnect, revalidate };
 }
 
 /**
@@ -260,6 +299,8 @@ export function serve({ port = 3200, fetch: fetchHandler, ...options } = {}) {
   });
   server.sockets = handlers.sockets;
   server.socketStats = handlers.socketStats;
+  server.disconnect = handlers.disconnect;
+  server.revalidate = handlers.revalidate;
   /** Graceful shutdown (see createHandlers' close), then stop the server */
   server.shutdown = async options => {
     await handlers.close(options);

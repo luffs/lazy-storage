@@ -2,6 +2,13 @@
 
 All notable changes to lazy-storage are documented here. The format follows Keep a Changelog; versions follow Semantic Versioning.
 
+## [Unreleased]
+
+### Added
+
+- **`disconnect(filter)` on both adapters, for a logout or a changed user.** An open socket kept the user it authenticated as, and its stores, for as long as it stayed up, so a signed-out or deleted user, or one whose role changed, went on reading and writing until the socket happened to drop. `server.disconnect(user => ...)` closes the sockets of the users it picks with code 4001: their sessions end at once, and the client reconnects as after any drop, so `authenticate` decides again (`unauthorized` once the session is gone, the new role otherwise) and every store is authorized again. An edit sent as the socket closed stays in the outbox and lands after the reconnect. No client change: a client of any version reconnects on 4001.
+- **`revalidate(filter)` on both adapters and on a hub, for a change to who may open a store.** `await server.revalidate((user, storeId) => ...)` runs `authorizeId` and `authorize` again on the open store sessions it picks and closes those now refused with `forbidden`, leaving the socket up for its other stores. A store still waiting for its first verdict is asked about again, so a check that began before the change cannot let it in. `socketStats()` counts both, as `disconnected` and `revoked`.
+
 ## [0.18.0] - 2026-09-25
 
 The server can say how it is doing: how far behind each socket is, what

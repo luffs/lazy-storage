@@ -217,6 +217,8 @@ void [jsonFileStorage('x.json', { debounce: 100 }), custom];
 
 const hub = createHub(id => stores.get(id), { send: m => toJSON(m), user: { id: 'u1' }, authorize: (user, storeId) => storeId.startsWith('team-') });
 hub.receive({ t: 'hello', store: 'team-1', replicaId: 'r', ops: [] });
+const judged: Promise<number> = hub.revalidate((user, storeId) => storeId !== 'team-1');
+void judged;
 const tagged = tagStore({ t: 'pong' as const }, 'team-1');
 const storeName: string = tagged.store;
 
@@ -234,8 +236,14 @@ async function bun() {
   const server = serve({ stores, port: 0, maxBuffered: 8 * 1024 * 1024 });
   const port: number = server.port;
   const lagging: string[] = server.sockets().filter(s => s.buffered > 64 * 1024 && s.idleMs < 60_000).flatMap(s => s.stores);
-  const { sockets: open, buffered, largest, cutOff } = handlers.socketStats();
-  void [lagging, open + buffered + largest + cutOff];
+  const { sockets: open, buffered, largest, cutOff, disconnected, revoked } = handlers.socketStats();
+  void [lagging, open + buffered + largest + cutOff + disconnected + revoked];
+  const signedOut: number = server.disconnect(user => (user as { id: string }).id === 'u1');
+  const everyone: number = handlers.disconnect();
+  const closedStores: number = await server.revalidate((user, storeId) => storeId.startsWith('team-'));
+  // @ts-expect-error revalidate resolves to a count
+  const notSync: number = handlers.revalidate();
+  void [signedOut, everyone, closedStores, notSync];
   await server.shutdown();
   return port;
 }
@@ -255,7 +263,8 @@ async function node() {
   const port = (nodeServer.address() as { port: number }).port;
   const openMs: number[] = nodeServer.sockets().map(s => s.openMs);
   const cut: number = nodeServer.socketStats().cutOff;
-  void [openMs, cut];
+  const revoked: number = await nodeServer.revalidate();
+  void [openMs, cut, revoked, nodeServer.disconnect(user => user === 'token')];
   await nodeServer.shutdown({ reason: 'deploy' });
   const lazy = createNodeHandlers({ stores, path: '/sync', maxPayload: 1024 });
   const http = createServer((req, res) => { const r: Request = toRequest(req); res.end(r.url); });

@@ -335,3 +335,70 @@ test('authorizeId runs before the store is loaded: a refusal loads nothing and r
   hub.close();
   stores.dispose();
 });
+
+test('revalidate judges the open stores again: a refusal closes that store alone, a verdict in flight starts over, and a store reopened meanwhile is left alone', async () => {
+  const stores = createStores(() => createStore({ initial: INITIAL }));
+  const tick = () => new Promise(resolve => setImmediate(resolve));
+  const sent = [];
+  const allowed = new Set(['a', 'b']);
+  const hub = createHub(id => stores.get(id), { send: m => sent.push(m), user: { id: 'u' }, authorizeId: (user, id) => allowed.has(id) });
+  hub.receive({ t: 'hello', store: 'a', replicaId: 'r', ops: [] });
+  hub.receive({ t: 'hello', store: 'b', replicaId: 'r', ops: [] });
+  assert.deepEqual(hub.stores, ['a', 'b']);
+  assert.equal(await hub.revalidate(), 0, 'nothing changed, nothing closed');
+  allowed.delete('b');
+  sent.length = 0;
+  assert.equal(await hub.revalidate(), 1);
+  assert.deepEqual(sent.map(m => [m.t, m.store, m.code]), [['closed', 'b', 'forbidden']]);
+  assert.deepEqual(hub.stores, ['a'], 'the other store stays open');
+  assert.equal(stores.get('b').stats().sessions, 0, 'and the refused one has no session left');
+  allowed.delete('a');
+  assert.equal(await hub.revalidate((user, id) => id !== 'a'), 0, 'the filter picks the stores judged');
+  assert.deepEqual(hub.stores, ['a']);
+  hub.close();
+
+  // A throw is a refusal with its message, as at open
+  let gone = false;
+  const thrower = createHub(id => stores.get(id), { send: m => sent.push(m), authorize: () => { if (gone) throw new Error('team deleted'); return true; } });
+  thrower.receive({ t: 'hello', store: 'e', replicaId: 'r4', ops: [] });
+  gone = true;
+  sent.length = 0;
+  assert.equal(await thrower.revalidate(), 1);
+  assert.deepEqual(sent.map(m => [m.store, m.code, m.message]), [['e', 'forbidden', 'team deleted']]);
+  thrower.close();
+
+  // A store waiting for its first verdict when something changed asks again;
+  // the verdict from before is disowned, whichever way it went
+  const verdicts = [];
+  const slow = createHub(id => stores.get(id), { send: m => sent.push(m), authorizeId: () => new Promise(resolve => verdicts.push(resolve)) });
+  sent.length = 0;
+  slow.receive({ t: 'hello', store: 'c', replicaId: 'r2', ops: [] });
+  const revalidating = slow.revalidate();
+  assert.equal(verdicts.length, 2, 'asked again');
+  verdicts[0](true);
+  await tick();
+  assert.deepEqual(slow.stores, [], 'the verdict from before the change opened nothing');
+  verdicts[1](false);
+  await tick();
+  assert.deepEqual(sent.map(m => [m.store, m.code]), [['c', 'forbidden']]);
+  assert.equal(await revalidating, 0);
+
+  // A verdict on a session that was left and reopened meanwhile is not that session's
+  verdicts.length = 0;
+  let gated = false;
+  const hub3 = createHub(id => stores.get(id), { send: m => sent.push(m), authorizeId: () => (gated ? new Promise(resolve => verdicts.push(resolve)) : true) });
+  hub3.receive({ t: 'hello', store: 'd', replicaId: 'r3', ops: [] });
+  gated = true;
+  sent.length = 0;
+  const judging = hub3.revalidate();
+  hub3.receive({ t: 'leave', store: 'd' });
+  hub3.receive({ t: 'hello', store: 'd', replicaId: 'r3', ops: [] });
+  verdicts[1](true);    // the new session's
+  verdicts[0](false);   // the old one's
+  assert.equal(await judging, 0);
+  assert.deepEqual(hub3.stores, ['d']);
+  assert.equal(sent.filter(m => m.t === 'closed').length, 0);
+  hub3.close();
+  slow.close();
+  stores.dispose();
+});

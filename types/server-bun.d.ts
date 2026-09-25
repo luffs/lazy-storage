@@ -65,6 +65,10 @@ export interface SocketStats {
   largest: number;
   /** Sockets closed for passing `maxBuffered` since the server started */
   cutOff: number;
+  /** Sockets closed by `disconnect()` since the server started */
+  disconnected: number;
+  /** Store sessions closed by `revalidate()` since the server started */
+  revoked: number;
 }
 
 export interface CloseOptions {
@@ -84,6 +88,18 @@ export interface Handlers {
   sockets(): SocketInfo[];
   /** The open sockets rolled up */
   socketStats(): SocketStats;
+  /**
+   * Close the sockets of the users `filter` picks (every socket without one):
+   * their clients reconnect, and `authenticate` decides whether they get back
+   * in. For a logout, a changed role, a deleted account. Returns how many
+   */
+  disconnect(filter?: (user: unknown) => boolean): number;
+  /**
+   * Run the authorize hooks again on the open stores `filter` picks, as the
+   * user each socket authenticated as, and close with 'forbidden' those now
+   * refused. For a change to who may open a store. Resolves to how many
+   */
+  revalidate(filter?: (user: unknown, storeId: string) => boolean): Promise<number>;
 }
 
 export function createHandlers(options: HandlerOptions): Handlers;
@@ -106,6 +122,10 @@ export interface BunServer {
   sockets(): SocketInfo[];
   /** See Handlers.socketStats */
   socketStats(): SocketStats;
+  /** See Handlers.disconnect */
+  disconnect(filter?: (user: unknown) => boolean): number;
+  /** See Handlers.revalidate */
+  revalidate(filter?: (user: unknown, storeId: string) => boolean): Promise<number>;
   [key: string]: any;
 }
 

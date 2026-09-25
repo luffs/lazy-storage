@@ -18,7 +18,7 @@ import { createServer } from 'node:http';
 import { WebSocketServer } from 'ws';
 import { LazyWatch } from 'lazy-watch';
 import { createHub } from './hub.js';
-import { toJSON, closeUnauthorized, deflateOptions, TOO_FAR_BEHIND, rollUpSockets } from './wire.js';
+import { toJSON, closeUnauthorized, deflateOptions, TOO_FAR_BEHIND, REAUTHENTICATE, rollUpSockets } from './wire.js';
 import { snapshotOptions, snapshotId, serveSnapshot } from './snapshot.js';
 
 /** A Web Request for an incoming Node request, headers included */
@@ -49,14 +49,15 @@ function refuse(socket, status, text) {
  *   whose unsent output passes this many bytes: a client that stopped
  *   reading would otherwise hold every patch in memory. It reconnects and
  *   catches up with a delta. false lets the buffer grow
- * @returns {{ upgrade: (req: import('node:http').IncomingMessage, socket: import('node:stream').Duplex, head: Buffer) => Promise<boolean>, request: (req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => Promise<boolean>, close: (options?: { reason?: string }) => Promise<void>, closing: boolean, sockets: () => Array<Object>, socketStats: () => Object, wss: WebSocketServer }}
+ * @returns {{ upgrade: (req: import('node:http').IncomingMessage, socket: import('node:stream').Duplex, head: Buffer) => Promise<boolean>, request: (req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => Promise<boolean>, close: (options?: { reason?: string }) => Promise<void>, closing: boolean, sockets: () => Array<Object>, socketStats: () => Object, disconnect: (filter?: (user: any) => boolean) => number, revalidate: (filter?: (user: any, storeId: string) => boolean) => Promise<number>, wss: WebSocketServer }}
  *   `upgrade` resolves to false when the URL is not ours (answer it
  *   yourself), true when it took the socket; `request` likewise for a
  *   plain request, which is ours when it is the snapshot route.
  *   `sockets()` lists the open sockets, each `{ user, stores, buffered,
  *   idleMs, openMs }` (bytes unsent, time since it last sent something,
  *   time since it opened), and `socketStats()` rolls them up (see
- *   rollUpSockets in wire.js)
+ *   rollUpSockets in wire.js). `disconnect` and `revalidate` are the Bun
+ *   adapter's
  */
 export function createHandlers({
   stores,
@@ -96,23 +97,31 @@ export function createHandlers({
     if (ws.readyState !== ws.OPEN) return;
     if (maxBuffered && ws.bufferedAmount > maxBuffered) {
       // 1013, try again later: the client reconnects and its hello asks for
-      // what it missed. A socket that stopped reading never answers the
-      // close, which ws would wait out for 30 s with the session still
-      // attached: after a second it is dropped
+      // what it missed
       cutOff++;
-      ws.close(...TOO_FAR_BEHIND);
-      const drop = setTimeout(() => ws.terminate(), 1000);
-      if (typeof drop.unref === 'function') drop.unref();
+      shut(ws, TOO_FAR_BEHIND);
       return;
     }
     const json = toJSON(message);
     ws.send(json, { compress: deflate !== null && Buffer.byteLength(json) >= deflate.threshold });
+  };
+  /**
+   * Close a socket with a code, and drop it after a second if it has not
+   * answered: one that stopped reading never does, and ws would wait that
+   * out for 30 s with its session still attached
+   */
+  const shut = (ws, [code, reason]) => {
+    ws.close(code, reason);
+    const drop = setTimeout(() => ws.terminate(), 1000);
+    if (typeof drop.unref === 'function') drop.unref();
   };
   const hubs = new Map();
   const heard = new Map();   // socket -> when it last sent something, for idleTimeout
   const opened = new Map();  // socket -> when it opened
   let closing = false;
   let cutOff = 0;            // sockets closed for falling behind
+  let disconnected = 0;      // sockets closed by disconnect()
+  let revoked = 0;           // store sessions closed by revalidate()
   const sweeper = idleTimeout ? setInterval(() => {
     const now = Date.now();
     for (const [ws, at] of heard) if (now - at > idleTimeout) ws.terminate();
@@ -231,6 +240,32 @@ export function createHandlers({
     if (typeof stores.dispose === 'function') stores.dispose();
   }
 
+  /** Close the sockets whose user `filter(user)` picks, to authenticate afresh, as the Bun adapter's */
+  function disconnect(filter) {
+    if (closing) return 0;
+    let count = 0;
+    for (const [ws, hub] of [...hubs]) {
+      if (filter && !filter(hub.user)) continue;
+      hub.close();
+      hubs.delete(ws);
+      heard.delete(ws);
+      opened.delete(ws);
+      shut(ws, REAUTHENTICATE);
+      count++;
+    }
+    disconnected += count;
+    return count;
+  }
+
+  /** Judge the open store sessions again, as the Bun adapter's; resolves to how many were closed */
+  async function revalidate(filter) {
+    if (closing) return 0;
+    let count = 0;
+    for (const closedOnes of await Promise.all([...hubs.values()].map(hub => hub.revalidate(filter)))) count += closedOnes;
+    revoked += count;
+    return count;
+  }
+
   /** The open sockets, how far behind each is (see the returns above) */
   function sockets() {
     const now = Date.now();
@@ -243,7 +278,7 @@ export function createHandlers({
     }));
   }
 
-  return { upgrade, request, close, get closing() { return closing; }, sockets, socketStats: () => rollUpSockets(sockets(), cutOff), wss };
+  return { upgrade, request, close, get closing() { return closing; }, sockets, socketStats: () => rollUpSockets(sockets(), { cutOff, disconnected, revoked }), disconnect, revalidate, wss };
 }
 
 /**
@@ -273,6 +308,8 @@ export function serve({ port = 3200, host, request, ...options } = {}) {
   });
   server.sockets = handlers.sockets;
   server.socketStats = handlers.socketStats;
+  server.disconnect = handlers.disconnect;
+  server.revalidate = handlers.revalidate;
   /** Graceful shutdown (see createHandlers' close), then close the server */
   server.shutdown = async closeOptions => {
     await handlers.close(closeOptions);

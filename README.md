@@ -670,6 +670,47 @@ Two hooks on the Bun adapter decide who gets a session on which store:
   asked for is loaded before it is judged. All three hooks may return
   promises.
 
+The hooks run when a socket opens and when it first asks for a store.
+After that an open socket keeps its user and its stores for as long as
+it stays up, which may be hours, so when something changes that should
+end that, tell the server:
+
+- `server.disconnect(user => ...)` closes the sockets of the users it
+  picks (every socket, without a filter) with code 4001. That is not
+  final: the client reconnects as after any drop, `authenticate` runs
+  again, and every store it asks for is authorized again. So one call
+  covers a logout, a deleted account and a changed role: a user whose
+  session is gone is turned away with `unauthorized`, and one whose role
+  changed comes back under the new one. Nothing reaches the closed
+  sockets or is taken from them once the call returns; an edit sent
+  meanwhile stays in the client's outbox and lands after the reconnect.
+  Returns how many sockets it closed.
+- `await server.revalidate((user, storeId) => ...)` runs `authorizeId`
+  and `authorize` again on the open store sessions it picks (all of
+  them, without a filter), as the user each socket authenticated as, and
+  closes those now refused with `forbidden`, as a refusal at open would
+  be; the socket stays up for its other stores. That is the one for a
+  change to who may open a store, a member taken off a team, say.
+  Resolves to how many it closed.
+
+```js
+function logout(sessionId) {
+  sessions.delete(sessionId);
+  server.disconnect(user => user.sessionId === sessionId);   // back to authenticate, which now says no
+}
+
+async function removeMember(teamId, userId) {
+  await db.removeMember(teamId, userId);
+  await server.revalidate((user, storeId) => user.id === userId && storeId === teamId);
+}
+```
+
+`revalidate` judges with the user object the socket authenticated with,
+so it sees a change only where the hooks read it from its source (the
+team's members, not a role copied onto the user at upgrade). When what
+changed is the user, `disconnect` them instead. `socketStats()` counts
+both, as `disconnected` and `revoked`.
+
 A replica belongs to the user who first says hello with it (by
 presence's `key`, or the user's `id`), recorded with its progress and
 kept across restarts. A session speaks for its own replica only, and
@@ -941,8 +982,10 @@ with how many are live and how many idle, for a health endpoint. Both adapters l
 `buffered` (bytes queued for it and not yet sent: how far behind it is),
 `idleMs` (since it last sent anything; a client pings every 30 s) and
 `openMs`, and `server.socketStats()` rolls them up (`sockets`,
-`buffered`, `largest`, and `cutOff`, the sockets closed for passing
-`maxBuffered`):
+`buffered`, `largest`, `cutOff`, the sockets closed for passing
+`maxBuffered`, and `disconnected` and `revoked`, what `disconnect()`
+and `revalidate()` closed; see
+[Authentication](#authentication-presence-and-eviction)):
 
 ```js
 app.get('/status', (req, res) => res.json({
@@ -1093,7 +1136,7 @@ runs on the synced state and shows in the array view like any other change.
 - `store.compact()` → `{ tombstones, replicas }` removed; `store.export()` → the store as a JSON document, `store.restore(doc)` puts one in its storage and ends the store (see [Backups](#backups-restores-and-moving-a-store)); `store.flush()`, `store.dispose()`
 - `memoryStorage()`, `jsonFileStorage(path, { debounce, onError })` — `onError` hears a debounced write that failed, which is tried again a second later
 - `createStores(factory, { idle, sweepEvery, now })` → `get(id)`, `has(id)`, `ids()`, `stats()` — the live stores' stats rolled up: `{ stores, idle, sessions, replicas, rows, tombstones, log }` — `release(id)`, `restore(id, doc)`, `sweep()`, `dispose()`; `isStoreId(id)`
-- `createHub(resolveStore, { send, user, authorizeId, authorize, channel, httpSnapshots, onError })` → `{ receive(message), close(), stores, user }` — the server side of a multiplexed connection, session-shaped; `channel` is a transport's topic fan-out, `httpSnapshots` `{ url(id), threshold }` its snapshot route
+- `createHub(resolveStore, { send, user, authorizeId, authorize, channel, httpSnapshots, onError })` → `{ receive(message), close(), revalidate(filter), stores, user }` — the server side of a multiplexed connection, session-shaped; `channel` is a transport's topic fan-out, `httpSnapshots` `{ url(id), threshold }` its snapshot route
 - `toJSON(message)` — a message's JSON, encoded once however many sockets it goes to; use it in a transport of your own so a broadcast is not re-encoded per socket (`tagStore(message, id)` is what a hub does)
 
 **SQLite** (`lazy-storage/server/sqlite`, Bun): `sqliteStorage(file, { wal, lease: { ttl } | false })` →
@@ -1101,12 +1144,12 @@ runs on the synced state and shows in the array view like any other change.
 
 **Bun adapter** (`lazy-storage/server/bun`): `serve({ stores, port, path, fetch, authenticate, authorizeId, authorize, maxPayload, perMessageDeflate, httpSnapshots, maxBuffered, onError })` —
 `stores` is a registry or `id => store|null` (for one store, `() => store`); the
-hub listens at `path` and the snapshot route under it; the returned server gains `shutdown({ reason })`, `sockets()` and `socketStats()`.
+hub listens at `path` and the snapshot route under it; the returned server gains `shutdown({ reason })`, `sockets()`, `socketStats()`, `disconnect(filter)` and `revalidate(filter)`.
 `createHandlers({ stores, path, authenticate, authorizeId, authorize, maxPayload, perMessageDeflate, httpSnapshots, maxBuffered, onError })` →
-`{ upgrade(req, server), websocket, close({ reason }), closing, sockets(), socketStats() }` for mounting inside your own `Bun.serve`.
+`{ upgrade(req, server), websocket, close({ reason }), closing, sockets(), socketStats(), disconnect(filter), revalidate(filter) }` for mounting inside your own `Bun.serve`.
 
 **Node adapter** (`lazy-storage/server/node`, needs `ws`): `serve({ stores, port, host, request, path, authenticate, authorizeId, authorize, maxPayload, perMessageDeflate, httpSnapshots, idleTimeout, maxBuffered, onError })` →
-an `http.Server` with `shutdown({ reason })`, `sockets()` and `socketStats()`; `createHandlers(options)` → `{ upgrade(req, socket, head), request(req, res), close({ reason }), closing, sockets(), socketStats(), wss }`;
+an `http.Server` with `shutdown({ reason })`, `sockets()`, `socketStats()`, `disconnect(filter)` and `revalidate(filter)`; `createHandlers(options)` → `{ upgrade(req, socket, head), request(req, res), close({ reason }), closing, sockets(), socketStats(), disconnect(filter), revalidate(filter), wss }`;
 `toRequest(req)` — the Web `Request` `authenticate` sees. **node:sqlite** (`lazy-storage/server/sqlite-node`): `sqliteStorage(file, { wal })`, as the Bun one.
 
 **Types**: declarations ship with the package for every entry (`types/`);
@@ -1202,12 +1245,14 @@ without help from the app, which only hears an `error` event:
 ### Closed codes
 
 `evicted` (`closeSessions` on the server), `forbidden` (`authorizeId`
-or `authorize` refused the store), `unknown-store` (the resolver returned null, or the
+or `authorize` refused the store, when it was opened or on `revalidate()`), `unknown-store` (the resolver returned null, or the
 store factory threw), and `invalid-store` (an id outside the allowed
 alphabet, or a message without one) each end one store. `unauthorized`
 (`authenticate` returned nothing) ends the socket: it arrives without a
 `store`, and the close that follows carries code 4401 in case the message
-did not make it. `replica-taken` ends one store: the hello named a
+did not make it. A socket closed with code 4001 was disconnected by the
+app (`disconnect()`), which is not final: the client reconnects, and
+`authenticate` decides again. `replica-taken` ends one store: the hello named a
 replica another user owns (see [Authentication](#authentication-presence-and-eviction)).
 `unavailable` is the one that is not final: the store was
 disposed under an open session (a registry released it), or another

@@ -20,6 +20,18 @@ export interface NodeHandlers {
   sockets(): SocketInfo[];
   /** The open sockets rolled up */
   socketStats(): SocketStats;
+  /**
+   * Close the sockets of the users `filter` picks (every socket without one):
+   * their clients reconnect, and `authenticate` decides whether they get back
+   * in. For a logout, a changed role, a deleted account. Returns how many
+   */
+  disconnect(filter?: (user: unknown) => boolean): number;
+  /**
+   * Run the authorize hooks again on the open stores `filter` picks, as the
+   * user each socket authenticated as, and close with 'forbidden' those now
+   * refused. For a change to who may open a store. Resolves to how many
+   */
+  revalidate(filter?: (user: unknown, storeId: string) => boolean): Promise<number>;
   /** The underlying `ws` WebSocketServer */
   readonly wss: any;
 }
@@ -46,6 +58,10 @@ export type NodeServer = Server & {
   sockets(): SocketInfo[];
   /** See NodeHandlers.socketStats */
   socketStats(): SocketStats;
+  /** See NodeHandlers.disconnect */
+  disconnect(filter?: (user: unknown) => boolean): number;
+  /** See NodeHandlers.revalidate */
+  revalidate(filter?: (user: unknown, storeId: string) => boolean): Promise<number>;
 };
 
 /** An http server with the handlers mounted; listening has been started */

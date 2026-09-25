@@ -7,9 +7,10 @@
 // lazily on the first message for a store, after `authorizeId(user, id)`
 // (before the store is resolved) and `authorize(user, id, store)` (after)
 // allowed it (synchronously or through a promise; messages for that store
-// queue meanwhile), and closed by `leave`, by eviction, or when
-// the connection closes. The per-store protocol is untouched, so a store
-// cannot tell a hub session from a direct one.
+// queue meanwhile), and closed by `leave`, by eviction, by `revalidate`
+// judging them again and refusing, or when the connection closes. The
+// per-store protocol is untouched, so a store cannot tell a hub session
+// from a direct one.
 //
 // Terminal conditions for one store are reported with a `closed` message
 // carrying a code — 'invalid-store', 'unknown-store', 'forbidden' — which
@@ -47,6 +48,7 @@ const { Utils } = LazyWatch;
 export function createHub(resolveStore, { send, user, authorizeId, authorize, channel, httpSnapshots, onError = err => console.error('lazy-storage:', err) } = {}) {
   if (typeof send !== 'function') throw new TypeError('A hub needs a send function');
   const sessions = new Map();
+  const storeOf = new Map(); // store id -> the store its session is on, judged again by revalidate
   const pending = new Map(); // store id -> messages queued while authorization is in flight
   let closed = false;
 
@@ -54,6 +56,7 @@ export function createHub(resolveStore, { send, user, authorizeId, authorize, ch
 
   function drop(id) {
     sessions.delete(id);
+    storeOf.delete(id);
     // Stop this socket hearing the store's broadcasts (the socket stays for its other stores)
     channel?.unsubscribe(id);
   }
@@ -71,6 +74,7 @@ export function createHub(resolveStore, { send, user, authorizeId, authorize, ch
       httpSnapshot: httpSnapshots ? { url: httpSnapshots.url(id), threshold: httpSnapshots.threshold } : undefined
     });
     sessions.set(id, session);
+    storeOf.set(id, store);
     return session;
   }
 
@@ -86,8 +90,7 @@ export function createHub(resolveStore, { send, user, authorizeId, authorize, ch
    * (and perhaps a new attempt) disowns it, and whatever it was waiting for
    * is then ignored rather than opening a second session
    */
-  function admit(id, msg) {
-    const queued = [msg];
+  function admit(id, queued) {
     pending.set(id, queued);
     const current = () => !closed && pending.get(id) === queued;
     const deny = message => {
@@ -136,6 +139,41 @@ export function createHub(resolveStore, { send, user, authorizeId, authorize, ch
     });
   }
 
+  /**
+   * Judge this connection's stores again, as the user it authenticated as:
+   * `authorizeId`, then `authorize` on the store already open. A store
+   * refused now is closed with 'forbidden', as a refusal at open is, and
+   * the socket stays up for the rest. A store still waiting for its first
+   * verdict starts over, so a check that began before whatever changed
+   * cannot let it in. `filter(user, storeId)` picks the stores to judge.
+   * Resolves to how many were closed
+   */
+  async function revalidate(filter) {
+    if (closed || (!authorizeId && !authorize)) return 0;
+    const judged = ([id]) => !filter || filter(user, id);
+    // A fresh queue disowns the attempt in flight (see admit)
+    for (const [id, queued] of [...pending].filter(judged)) admit(id, [...queued]);
+    const verdicts = [...sessions].filter(judged).map(async ([id, session]) => {
+      const store = storeOf.get(id);
+      let allowed;
+      let reason;
+      try {
+        allowed = (!authorizeId || await authorizeId(user, id)) && (!authorize || await authorize(user, id, store));
+      } catch (err) {
+        reason = err?.message;
+      }
+      // Left, closed, or reopened meanwhile: not this verdict's to close
+      if (allowed || closed || sessions.get(id) !== session) return 0;
+      session.close();
+      drop(id);
+      refuse(id, 'forbidden', reason || `Not allowed to access store "${id}"`);
+      return 1;
+    });
+    let count = 0;
+    for (const closedOne of await Promise.all(verdicts)) count += closedOne;
+    return count;
+  }
+
   return {
     receive(msg) {
       if (closed) return;
@@ -154,8 +192,9 @@ export function createHub(resolveStore, { send, user, authorizeId, authorize, ch
       if (sessions.has(id)) return deliver(id, msg);
       if (pending.has(id)) return void pending.get(id).push(msg);
 
-      admit(id, msg);
+      admit(id, [msg]);
     },
+    revalidate,
     /** Store ids with a live session on this connection */
     get stores() { return [...sessions.keys()]; },
     get user() { return user; },
@@ -166,6 +205,7 @@ export function createHub(resolveStore, { send, user, authorizeId, authorize, ch
         channel?.unsubscribe(id);
       }
       sessions.clear();
+      storeOf.clear();
       pending.clear();
     }
   };

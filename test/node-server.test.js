@@ -343,3 +343,50 @@ test('sockets() shows how far behind each socket is; one that stopped reading is
   healthy.close();
   await server.shutdown();
 });
+
+test('disconnect() has a user authenticate again: back in while the session holds, turned away once it is gone; revalidate() closes the stores a user may no longer open', async () => {
+  const sessions = new Map([['s-alice', { id: 'u1', teams: ['t1', 't2'] }], ['s-bob', { id: 'u2', teams: ['t1'] }]]);
+  const stores = createStores(() => createStore({ initial: INITIAL, storage: memoryStorage() }));
+  const server = serve({
+    port: 0,
+    stores,
+    authenticate: req => sessions.get(new URL(req.url).searchParams.get('token')) ?? null,
+    authorizeId: (user, id) => user.teams.includes(id)
+  });
+  const port = await listening(server);
+  const alice = connect(port, 's-alice');
+  const bob = connect(port, 's-bob');
+  const a1 = attach(alice, 't1', 'a1');
+  const a2 = attach(alice, 't2', 'a2');
+  const b1 = attach(bob, 't1', 'b1');
+  await until(() => [a1, a2, b1].every(c => c.status === 'online'), 'online');
+
+  // Taken off t2: that store is closed to her, the socket stays for t1
+  sessions.get('s-alice').teams = ['t1'];
+  assert.equal(await server.revalidate((user, id) => id === 't1'), 0, 'the filter picks the stores judged');
+  assert.equal(await server.revalidate(), 1);
+  await until(() => a2.closed?.code === 'forbidden', 'alice hears t2 is closed to her');
+  assert.equal(a1.status, 'online');
+  assert.deepEqual(server.sockets().find(s => s.user.id === 'u1').stores, ['t1']);
+
+  // Disconnected while her session holds: she is back at once, and a write
+  // that reached the closed socket lands from her outbox
+  let drops = 0;
+  alice.on('status', status => { if (status === 'offline') drops++; });
+  assert.equal(server.disconnect(user => user.id === 'u1'), 1);
+  a1.collection('tasks').add({ id: 'x', title: 'written as the socket closed' });
+  await until(() => drops === 1 && a1.status === 'online', 'back online');
+  await until(() => b1.state.tasks.x?.title === 'written as the socket closed', 'bob sees it');
+
+  // Signed out: the reconnect is turned away, and only hers
+  sessions.delete('s-alice');
+  server.disconnect(user => user.id === 'u1');
+  await until(() => a1.closed?.code === 'unauthorized', 'alice is signed out');
+  assert.equal(b1.status, 'online');
+  assert.deepEqual(server.sockets().map(s => s.user.id), ['u2']);
+  const { disconnected, revoked } = server.socketStats();
+  assert.deepEqual({ disconnected, revoked }, { disconnected: 2, revoked: 1 });
+  alice.close();
+  bob.close();
+  await server.shutdown();
+});

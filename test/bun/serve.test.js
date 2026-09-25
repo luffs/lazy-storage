@@ -336,6 +336,49 @@ test('shutdown refuses new sockets, closes the open ones so clients reconnect, f
   }
 });
 
+test('disconnect() has a user authenticate again: back in while the session holds, turned away once it is gone; revalidate() closes the stores a user may no longer open', async () => {
+  const sessions = new Map([['s-alice', { id: 'u1', teams: ['t1', 't2'] }], ['s-bob', { id: 'u2', teams: ['t1'] }]]);
+  const own = createStores(() => createStore({ initial: INITIAL, storage: memoryStorage() }));
+  const authServer = serve({
+    port: 0,
+    stores: own,
+    authenticate: req => sessions.get(new URL(req.url).searchParams.get('token')) ?? null,
+    authorizeId: (user, id) => user.teams.includes(id)
+  });
+  const at = token => createConnection({ transport: webSocketTransport(`ws://localhost:${authServer.port}/ws?token=${token}`), reconnect: { min: 20, max: 50 }, keepalive: false });
+  const alice = at('s-alice');
+  const bob = at('s-bob');
+  const a1 = attach(alice, 't1', 'a1');
+  const a2 = attach(alice, 't2', 'a2');
+  const b1 = attach(bob, 't1', 'b1');
+  await until(() => [a1, a2, b1].every(c => c.status === 'online'), 'online');
+
+  sessions.get('s-alice').teams = ['t1'];
+  assert.equal(await authServer.revalidate((user, id) => id === 't1'), 0, 'the filter picks the stores judged');
+  assert.equal(await authServer.revalidate(), 1);
+  await until(() => a2.closed?.code === 'forbidden', 'alice hears t2 is closed to her');
+  assert.equal(a1.status, 'online');
+  assert.deepEqual(authServer.sockets().find(s => s.user.id === 'u1').stores, ['t1']);
+
+  let drops = 0;
+  alice.on('status', status => { if (status === 'offline') drops++; });
+  assert.equal(authServer.disconnect(user => user.id === 'u1'), 1);
+  a1.collection('tasks').add({ id: 'x', title: 'written as the socket closed' });
+  await until(() => drops === 1 && a1.status === 'online', 'back online');
+  await until(() => b1.state.tasks.x?.title === 'written as the socket closed', 'bob sees it');
+
+  sessions.delete('s-alice');
+  authServer.disconnect(user => user.id === 'u1');
+  await until(() => a1.closed?.code === 'unauthorized', 'alice is signed out');
+  assert.equal(b1.status, 'online');
+  assert.deepEqual(authServer.sockets().map(s => s.user.id), ['u2']);
+  const { disconnected, revoked } = authServer.socketStats();
+  assert.deepEqual({ disconnected, revoked }, { disconnected: 2, revoked: 1 });
+  alice.close();
+  bob.close();
+  await authServer.shutdown();
+});
+
 afterAll(async () => {
   for (const connection of open) connection.close();
   server.stop(true);

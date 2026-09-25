@@ -381,6 +381,12 @@ export interface Hub {
   /** Store ids with a live session on this connection */
   readonly stores: string[];
   readonly user: unknown;
+  /**
+   * Run the authorize hooks again on the open stores `filter` picks, closing
+   * with 'forbidden' those now refused; a store still waiting for its first
+   * verdict is asked about again. Resolves to how many were closed
+   */
+  revalidate(filter?: (user: unknown, storeId: string) => boolean): Promise<number>;
 }
 
 export function createHub(resolveStore: StoreResolver, options: HubOptions): Hub;
