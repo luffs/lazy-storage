@@ -88,7 +88,7 @@ import { leaves, assertModel, rebuild, expandRegisters, replacingRegisters } fro
 import { mergeOp, compactTombstones } from '../core/merge.js';
 import { ClockMap } from '../core/clocks.js';
 import { memoryStorage, assertDocument } from './storage.js';
-import { toJSON, presetJSON, encodedBytes, SNAPSHOT_THRESHOLD, TALLY } from './wire.js';
+import { toJSON, presetJSON, encodedBytes, utf8Bytes, SNAPSHOT_THRESHOLD, TALLY } from './wire.js';
 import { randomId } from '../core/ids.js';
 
 const { Utils } = LazyWatch;
@@ -295,12 +295,14 @@ export function createStore({
   // deep copy through the proxy costs several times more) and kept until
   // the next accepted op, so a burst of reconnects pays for one encoding
   let stateJSON = null;
+  let stateBytes = null;   // its UTF-8 size, measured once per encoding when a snapshot is counted
   let self;
 
   function encodedState() {
     if (stateJSON === null) {
       const plain = typeof LazyWatch.resolveIfProxy === 'function' ? LazyWatch.resolveIfProxy(state) : LazyWatch.snapshot(state);
       stateJSON = JSON.stringify(plain);
+      stateBytes = null;
     }
     return stateJSON;
   }
@@ -709,8 +711,12 @@ export function createStore({
     if (route && json.length >= route.threshold) return { ...message, fetch: route.url };
     let decoded;
     Object.defineProperty(message, 'state', { enumerable: true, configurable: true, get: () => (decoded ??= JSON.parse(json)) });
-    return presetJSON(message,
-      `{"t":"snapshot","state":${json},"ts":${JSON.stringify(ts)},"seq":${seq},"registers":${JSON.stringify(registerPatterns)},"v":${version},"epoch":${JSON.stringify(epoch)}${lost.length ? `,"lost":${JSON.stringify(lost)}` : ''}}`);
+    const head = '{"t":"snapshot","state":';
+    const tail = `,"ts":${JSON.stringify(ts)},"seq":${seq},"registers":${JSON.stringify(registerPatterns)},"v":${version},"epoch":${JSON.stringify(epoch)}${lost.length ? `,"lost":${JSON.stringify(lost)}` : ''}}`;
+    // Its size for the count (see `sent`): the state's, measured once per
+    // change like its encoding, and the few bytes around it
+    stateBytes ??= utf8Bytes(json);
+    return presetJSON(message, head + json + tail, head.length + stateBytes + utf8Bytes(tail));
   }
 
   /**

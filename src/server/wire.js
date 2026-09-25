@@ -51,10 +51,13 @@ export function encodedBytes(message) {
 /**
  * Remember `json` as the message's encoding, for a message assembled from
  * parts already encoded (a snapshot splices in the cached state) so that
- * toJSON never re-encodes it.
+ * toJSON never re-encodes it, and `bytes`, its UTF-8 size, when known.
  */
-export function presetJSON(message, json) {
+export function presetJSON(message, json, bytes) {
   Object.defineProperty(message, JSON_CACHE, { value: json, configurable: true });
+  // Its UTF-8 size too, when the parts' sizes are known (a snapshot's
+  // state, measured once per change), so counting it scans nothing
+  if (bytes !== undefined) Object.defineProperty(message, BYTES_CACHE, { value: bytes, configurable: true });
   return message;
 }
 

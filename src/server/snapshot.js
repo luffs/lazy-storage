@@ -92,7 +92,7 @@ function snapshotBody(store) {
   const json = store.snapshotJSON();
   let body = bodies.get(store);
   if (!body || body.json !== json || body.v !== store.version) {
-    body = { json, v: store.version, epoch: store.epoch, plain: `{"v":${store.version},"epoch":${JSON.stringify(store.epoch)},"state":${json}}`, br: null, gzip: null };
+    body = { json, v: store.version, epoch: store.epoch, plain: `{"v":${store.version},"epoch":${JSON.stringify(store.epoch)},"state":${json}}`, plainBytes: undefined, br: null, gzip: null };
     bodies.set(store, body);
   }
   return body;
@@ -134,7 +134,7 @@ export function snapshotResponse(store, request, { origins = '*' } = {}) {
     headers['content-encoding'] = encoding;
     payload = body[encoding] ??= compress[encoding](body.plain);
   }
-  store[TALLY]?.('http-snapshot', 1, request.method === 'HEAD' ? 0 : typeof payload === 'string' ? utf8Bytes(payload) : payload.length);
+  store[TALLY]?.('http-snapshot', 1, request.method === 'HEAD' ? 0 : typeof payload === 'string' ? (body.plainBytes ??= utf8Bytes(payload)) : payload.length);
   return new Response(request.method === 'HEAD' ? null : payload, { status: 200, headers });
 }
 

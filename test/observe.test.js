@@ -75,6 +75,10 @@ test("stats().sent counts what the store sent, by type, a broadcast once per ses
   a.receive({ t: 'op', op: { replicaId: 'a', seq: 1, ts: [Date.now(), 0, 'a'], diff: { tasks: { t1: { id: 't1', title: 'räksmörgås 🙂' } } } } });
   store.patch({ tasks: { t2: { id: 't2', title: 'åäö' } } });
   a.receive({ t: 'nonsense' });
+  // A snapshot of state with å, ä, ö and an emoji in it: its size is put
+  // together from the state's, measured once, and must be exact
+  const c = store.session({ send: m => heard.b.push(m) });
+  c.receive({ t: 'hello', replicaId: 'c', ops: [] });
 
   // Every delivery counted; bytes where a transport encoded, and where the
   // store encodes itself (a broadcast once for all sessions, a snapshot from
