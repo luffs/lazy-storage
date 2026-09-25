@@ -1204,7 +1204,15 @@ npm test              # unit and integration tests plus fixed-seed runs of both 
 npm run test:bun      # the Bun adapter and the bun:sqlite adapters (Bun; `bun test` runs the same)
 npm run fuzz          # a longer randomized convergence campaign; a failure prints the seed
 npm run fuzz:hostile  # the same with an attacker beside honest clients
+npm run test:coverage # the Node suite under c8, failing below 96% of lines and statements, 88% of branches, 92% of functions
+npm run bench:check   # both benchmarks, failing when a case is over its ceiling or a count over its bound
 ```
+
+CI runs all of these. The benchmark ceilings are about ten times a
+laptop's medians, so only a regression of the kind worth catching trips
+them; the client cases' counts (a selector's renders, a mount's state
+copies, what the outbox writes) are held exactly, since no machine
+changes them.
 
 The hostile fuzzer gives a signed-in attacker a socket of its own and
 lets it send anything: ops under other replicas' ids and the server's,

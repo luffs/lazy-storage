@@ -30,6 +30,44 @@ jobs:
       - name: Check the type declarations
         run: npm run test:types
 
+  coverage:
+    name: Coverage gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5.0.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5.0.0
+        with:
+          node-version: 24
+
+      - name: Install dependencies
+        run: npm install --no-package-lock
+
+      - name: Enforce coverage thresholds
+        run: npm run test:coverage
+
+  bench:
+    name: Benchmark guard
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5.0.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5.0.0
+        with:
+          node-version: 24
+
+      - name: Install dependencies
+        run: npm install --no-package-lock
+
+      - name: Hold every benchmark case to its ceiling
+        # Ceilings about ten times a laptop's medians, and exact bounds on
+        # what the client cases count (renders, state copies, bytes written)
+        run: npm run bench:check
+
   bun:
     name: Bun adapters (sqlite, WebSocket server)
     runs-on: ubuntu-latest

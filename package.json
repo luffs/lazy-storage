@@ -70,8 +70,10 @@
     "fuzz": "node test/fuzz/run.js",
     "fuzz:hostile": "node test/fuzz/run.js --mode hostile",
     "test:types": "tsc -p test/types/tsconfig.json",
+    "test:coverage": "npx -y c8 --include=src --reporter=text --reporter=text-summary --check-coverage --statements 96 --lines 96 --branches 88 --functions 92 node --test \"test/*.test.js\"",
     "bench": "node bench/run.js",
-    "bench:client": "node bench/client.js"
+    "bench:client": "node bench/client.js",
+    "bench:check": "node bench/run.js --check && node bench/client.js --check"
   },
   "keywords": [
     "sync",

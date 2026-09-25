@@ -2,7 +2,10 @@
 // broadcast to many sockets, a client's local op with each kind of
 // storage, a reconnect answered with a snapshot versus a delta, and a
 // snapshot on the socket versus over HTTP.
-//   npm run bench            (node bench/run.js [--rounds 5])
+//   npm run bench            (node bench/run.js [--rounds 5] [--check])
+//
+// --check also holds every case to a ceiling (GUARDS, at the end) and
+// exits with 1 when one is over: npm run bench:check, in CI.
 //
 // Every case runs `rounds` times and reports the median, so a noisy
 // machine does not skew the numbers. Compare runs on the same machine;
@@ -292,3 +295,42 @@ for (const r of results) {
   console.log(`${r.name.padEnd(width)}  ${per.padStart(10)}  ${fmt(r.perSec).padStart(12)} ${r.unit}/s`);
 }
 console.log(`\nwire: a 10k-task snapshot is ${fmt(rawBytes / 1024)} KB of JSON, ${fmt(deflatedBytes / 1024)} KB with permessage-deflate (${fmt(rawBytes / deflatedBytes, 1)}x smaller); the route serves it as ${fmt(brotliBytes / 1024)} KB of brotli (${fmt(gzipBytes / 1024)} KB of gzip for a client without it), compressed once per change`);
+
+// --- Guards (--check) ----------------------------------------------------------------------------
+// A ceiling per case on the median time per op, about ten times what a
+// laptop measures: a slow CI runner stays under it, and a regression of
+// the kind worth catching (a path gone quadratic, a cache that stopped
+// hitting) does not
+
+const GUARDS = {
+  'merge: one-leaf op into a 10k-task store': 400,
+  'merge: ten-leaf record add': 800,
+  'merge: register write, 1000 ids': 6000,
+  'session: one-leaf op through the gates (read-only paths, validate, skew, retention)': 400,
+  'broadcast: one patch to 100 sockets (encoded once)': 300,
+  'broadcast: one patch to 1000 sockets (encoded once)': 400,
+  'client: local op, document adapter (localStorage-like), 1k-task state': 1000,
+  'client: local op, row adapter (IndexedDB-like), 1k-task state': 1000,
+  'hello: answered with a snapshot after an op, 10k-task store (encoded)': 3000,
+  'hello: answered with a snapshot while the store is quiet (cached encoding)': 30,
+  'hello: answered with a delta of 10 ops, 10k-task store (encoded)': 40,
+  'hello: snapshot on the socket, compressed per socket (deflate of the cached encoding)': 400,
+  'hello: snapshot over HTTP, the route answering the fetch that follows (compressed once)': 400,
+  'hello: snapshot over HTTP, a reload of a store that has not changed (304)': 50
+};
+
+if (args.check) {
+  let failed = 0;
+  console.log('\nguards (µs per op, median; ceiling)');
+  for (const r of results) {
+    const ceiling = GUARDS[r.name];
+    const ok = ceiling !== undefined && r.perOp <= ceiling;
+    if (!ok) failed++;
+    const why = ceiling === undefined ? 'no guard: add a ceiling to GUARDS' : `${fmt(r.perOp, 1)} (${fmt(ceiling)})`;
+    console.log(`${ok ? ' ok  ' : ' FAIL'} ${r.name}: ${why}`);
+  }
+  if (failed) {
+    console.log(`\n${failed} over its ceiling`);
+    process.exitCode = 1;
+  }
+}

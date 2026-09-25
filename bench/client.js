@@ -2,7 +2,10 @@
 // React and Vue as the store changes, the array view of a large list, the
 // document adapter under remote traffic and a long offline spell, and
 // lazy-watch's cost for an object write.
-//   npm run bench:client     (node bench/client.js [--rounds 3] [--only <text in a case's name>] [--verbose])
+//   npm run bench:client     (node bench/client.js [--rounds 3] [--only <text in a case's name>] [--verbose] [--check])
+//
+// --check also holds every case to its guard (GUARDS, at the end) and
+// exits with 1 when one fails: npm run bench:check, in CI.
 //
 // Every case runs `rounds` times and reports the median, with the counts
 // that explain the time: renders per batch, bytes written, and so on.
@@ -55,7 +58,7 @@ async function bench(name, { setup, run, iterations, unit = 'op', timed = true, 
   }
   rounds.sort((a, b) => a.ms - b.ms);
   const { ms, counts } = rounds[Math.floor(rounds.length / 2)];
-  results.push({ name, unit, timed, perOp: (ms / iterations) * 1000, perSec: (iterations / ms) * 1000, note: note(counts, iterations) });
+  results.push({ name, unit, timed, counts, iterations, perOp: (ms / iterations) * 1000, perSec: (iterations / ms) * 1000, note: note(counts, iterations) });
 }
 
 const ids = n => Array.from({ length: n }, (_, i) => `t${i.toString(36).padStart(6, '0')}`);
@@ -444,5 +447,53 @@ for (const r of results) {
   const per = !r.timed ? '—' : r.perOp >= 1000 ? `${fmt(r.perOp / 1000, 2)} ms` : `${fmt(r.perOp, 1)} µs`;
   const rate = r.timed ? `${fmt(r.perSec)} ${r.unit}/s` : '—';
   console.log(`${r.name.padEnd(width)}  ${per.padStart(10)}  ${rate.padStart(14)}  ${r.note}`);
+}
+
+// --- Guards (--check) -----------------------------------------------------------------------
+// Per case, a ceiling on the median time per op, about ten times what a
+// laptop measures: a slow CI runner stays under it, and a regression of
+// the kind this file found (a list move of seconds) does not. And, where
+// a case counts something, a bound on the count, which no machine
+// changes: the renders a selector saves, the state copies a mount makes,
+// what the outbox writes
+
+const perBatch = what => ({ renders }, n) => renders <= n * what || `${renders / n} row renders per batch, over ${what}`;
+const GUARDS = {
+  'react: remote edit of one task, 500 rows each on useClient': { ms: 80 },
+  'react: a peer shares a cursor, 500 rows that never read peers': { ms: 30 },
+  'react: remote edit of one task, 500 rows each on useClientSelector': { ms: 6, counts: perBatch(1) },
+  'react: a peer shares a cursor, 500 rows on useClientSelector': { ms: 2, counts: perBatch(0) },
+  'vue: mount 200 rows each on useClient, 1k-task state': { ms: 80, counts: ({ clones }) => clones <= 1 || `${clones} deep copies of the state, over 1` },
+  'vue: remote edit of one task, 200 rows each on useClient': { ms: 2 },
+  'list view: push one record onto a 5k-record array': { ms: 60 },
+  'list view: move one record within a 5k-record array (splice out, splice in)': { ms: 60 },
+  'list view: remote field edit, 5k-record array': { ms: 2 },
+  'list view: remote move 200 places (a new position), 2k-record array': { ms: 20 },
+  'db.list: add one record at the end of 5k (the keyed map, no array view)': { ms: 30 },
+  'persistence: remote patches every 5 ms for a second, localStorageOutbox, 1k-task state': { counts: ({ writes }) => writes <= 10 || `${writes} writes, over 10` },
+  'persistence: remote patches every 5 ms for a second, localStorageOutbox, 10k-task state': { counts: ({ writes }) => writes <= 10 || `${writes} writes, over 10` },
+  'persistence: 1000 local ops offline, localStorageOutbox, 1k-task state': { ms: 0.6, counts: ({ bytes }) => bytes <= 2e6 || `${(bytes / 1e6).toFixed(1)} MB written, over 2` },
+  'lazy-watch: assign a 5-field object (a record write), then flush': { ms: 0.03 },
+  'lazy-watch: assign one leaf (a field write), then flush': { ms: 0.01 }
+};
+
+if (args.check) {
+  let failed = 0;
+  console.log('\nguards (median per op; ceiling)');
+  for (const r of results) {
+    const guard = GUARDS[r.name];
+    const problems = [];
+    if (!guard) problems.push('no guard: add one to GUARDS');
+    if (guard?.ms !== undefined && r.perOp / 1000 > guard.ms) problems.push(`${fmt(r.perOp / 1000, 3)} ms per op, over ${guard.ms}`);
+    const counted = guard?.counts?.(r.counts, r.iterations);
+    if (typeof counted === 'string') problems.push(counted);
+    if (problems.length) failed++;
+    const shown = guard?.ms !== undefined ? `${fmt(r.perOp / 1000, 3)} ms (${guard.ms})` : r.note;
+    console.log(`${problems.length ? ' FAIL' : ' ok  '} ${r.name}: ${problems.length ? problems.join('; ') : shown}`);
+  }
+  if (failed) {
+    console.log(`\n${failed} failed`);
+    process.exitCode = 1;
+  }
 }
 await GlobalRegistrator.unregister();

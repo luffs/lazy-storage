@@ -2,6 +2,21 @@
 
 All notable changes to lazy-storage are documented here. The format follows Keep a Changelog; versions follow Semantic Versioning.
 
+## [Unreleased]
+
+### Added
+
+- **A coverage gate and a benchmark guard in CI.** `npm run
+  test:coverage` runs the Node suite under c8 and fails below 96% of
+  lines and statements, 88% of branches or 92% of functions (it covers
+  98%, 90% and 94% now); CI and the publish workflow run it. `npm run
+  bench:check` runs both benchmarks with `--check`, which holds each
+  case to a ceiling about ten times a laptop's median and the client
+  cases' counts exactly: one row render per batch on
+  `useClientSelector`, none for a peer's cursor, at most one state copy
+  for a Vue mount, a handful of outbox writes under remote traffic. CI
+  runs it on every push
+
 ## [0.17.0] - 2026-09-25
 
 A record read from a list view stays that record wherever it moves, by
