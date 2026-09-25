@@ -2,7 +2,20 @@
 
 All notable changes to lazy-storage are documented here. The format follows Keep a Changelog; versions follow Semantic Versioning.
 
-## [Unreleased]
+## [0.19.0] - 2026-09-25
+
+A socket no longer outlives what let it in. `disconnect(filter)` ends
+the sockets of the users it picks, after a logout, a deleted account or
+a changed role; `expiresAt(user, req)` ends each one when its session
+runs out; either way the client reconnects and `authenticate` decides
+again, so a refreshed token carries on and a lapsed session is signed
+out. `revalidate(filter)` judges open stores again after a change to
+who may open them. All three are opt-in and clients need no change: a
+client of any version reconnects on the new close code, 4001. To check
+on upgrade: `socketStats()` gains `disconnected`, `expired` and
+`revoked`, and each `sockets()` entry `expiresAt`, which a test
+comparing them whole will notice. The wire protocol is otherwise
+unchanged, and so is stored data.
 
 ### Added
 
