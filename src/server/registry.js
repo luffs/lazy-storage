@@ -66,10 +66,12 @@ export function createStores(factory, { idle = Infinity, sweepEvery = 60_000, no
      * The live stores' `stats()` rolled up, for a health endpoint or a
      * metrics scrape: how many stores are live and how many of those have
      * no session, and the sums of sessions, replicas, rows, tombstones,
-     * and delta-log entries across them
+     * delta-log entries, and what they have sent (`sent`, by message
+     * type, as a store counts it: since each store was loaded, so a store
+     * released and loaded again starts over)
      */
     stats() {
-      const totals = { stores: live.size, idle: 0, sessions: 0, replicas: 0, rows: 0, tombstones: 0, log: 0 };
+      const totals = { stores: live.size, idle: 0, sessions: 0, replicas: 0, rows: 0, tombstones: 0, log: 0, sent: {} };
       for (const store of live.values()) {
         const s = store.stats();
         if (s.sessions === 0) totals.idle++;
@@ -78,6 +80,11 @@ export function createStores(factory, { idle = Infinity, sweepEvery = 60_000, no
         totals.rows += s.rows;
         totals.tombstones += s.tombstones;
         totals.log += s.log;
+        for (const [type, { messages, bytes }] of Object.entries(s.sent ?? {})) {
+          const entry = totals.sent[type] ??= { messages: 0, bytes: 0 };
+          entry.messages += messages;
+          entry.bytes += bytes;
+        }
       }
       return totals;
     },

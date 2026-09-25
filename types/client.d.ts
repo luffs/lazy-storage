@@ -383,7 +383,7 @@ export interface ClientStats {
   oldestPendingMs: number | null;
   /** The last acknowledgement's round trip: op sent to ack received */
   ackMs: number | null;
-  /** How old the last patch from another replica was when it arrived (clocks agree to within the server's maxSkew) */
+  /** How old the last patch from another replica was when it arrived: staleness, including any time the writer spent offline, on clocks that agree to within the server's maxSkew; ackMs is the one for network latency */
   remoteAgeMs: number | null;
 }
 

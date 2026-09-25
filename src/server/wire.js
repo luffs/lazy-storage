@@ -9,6 +9,12 @@
 // a store id splices the id into the remembered JSON rather than encoding
 // the payload again.
 const JSON_CACHE = Symbol('lazy-storage.json');
+const BYTES_CACHE = Symbol('lazy-storage.bytes');
+
+/** The UTF-8 size of a string: its length for ASCII, more for å, ä, ö and emoji */
+export const utf8Bytes = typeof Buffer === 'function'
+  ? text => Buffer.byteLength(text, 'utf8')
+  : (encoder => text => encoder.encode(text).length)(new TextEncoder());
 
 /**
  * Below this many bytes of state JSON a snapshot goes inline on the socket;
@@ -27,9 +33,19 @@ export function toJSON(message) {
   return json;
 }
 
-/** The length of the message's JSON if something has encoded it (toJSON), else 0: counted without encoding */
-export function encodedLength(message) {
-  return message[JSON_CACHE]?.length ?? 0;
+/**
+ * The UTF-8 size of the message's JSON if something has encoded it
+ * (toJSON), else 0: measured without encoding, once, and remembered
+ */
+export function encodedBytes(message) {
+  const json = message[JSON_CACHE];
+  if (json === undefined) return 0;
+  let bytes = message[BYTES_CACHE];
+  if (bytes === undefined) {
+    bytes = utf8Bytes(json);
+    Object.defineProperty(message, BYTES_CACHE, { value: bytes });
+  }
+  return bytes;
 }
 
 /**

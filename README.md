@@ -917,21 +917,26 @@ server writes out of the registry.
 **Watching a store.** `store.observe('op' | 'refused' | 'session', fn)`
 reports every merged op (`{ replicaId, seq, user, accepted, rejected,
 version, ms }`, `ms` the time from the op reaching the store to its patch
-handed to the sessions: the gates, the merge, the commit, the broadcast),
+handed to the sessions: the gates, the merge, the call that commits it
+to storage, the broadcast; an adapter that writes asynchronously later
+does so outside it),
 every client op turned away (`{ replicaId, seq, user, code,
 message }`), and sessions opening and closing, for logs, audits, and
 metrics; `store.stats()` counts version, sessions, replicas, rows,
 tombstones, and the delta log, plus `sent`, what the store has sent by
 message type (`patch`, `ack`, `snapshot`, `delta`, `presence`,
 `http-snapshot`, …) as `{ messages, bytes }`: deliveries, a broadcast
-once per session it reached, and their bytes of JSON before compression
-(an HTTP snapshot's as served). Bytes are read from the encoding the
-socket sends, never encoded for the count, so a transport that hands on
-objects (the in-memory network of `lazy-storage/testing`) counts
-messages, and bytes only for what the store encodes itself (broadcasts,
-snapshots). `stores.stats()` on a registry rolls
-those up across the live stores, with how many are live and how many
-idle, for a health endpoint. Both adapters list their open sockets:
+once per session it reached, and their size in UTF-8 bytes of JSON,
+before compression (an HTTP snapshot's as served, compressed), so what
+goes over the wire is less. Bytes are read from the encoding the socket
+sends, never encoded for the count, so a transport that hands on objects
+(the in-memory network of `lazy-storage/testing`) counts messages, and
+bytes only for what the store encodes itself (broadcasts, snapshots).
+The counts run from when the store was loaded: a store a registry
+released for being idle starts over when it is loaded again, which a
+counter-based metrics system reads as a reset. `stores.stats()` on a
+registry rolls all of it up across the live stores, `sent` included,
+with how many are live and how many idle, for a health endpoint. Both adapters list their open sockets:
 `server.sockets()` gives each one's `user`, the `stores` it has open,
 `buffered` (bytes queued for it and not yet sent: how far behind it is),
 `idleMs` (since it last sent anything; a client pings every 30 s) and
@@ -1061,7 +1066,7 @@ runs on the synced state and shows in the array view like any other change.
 - `db.isPending(path)` — whether an edit not yet acknowledged writes at, under, or over `path`
 - `db.list(path, { position })` — an ordered list of records: `all()`, `ids()`, `get(id)`, `has(id)`, `add(record, where) → id`, `move(id, where)`, `remove(id)`, `reconcile(ids) → written`, `keyFor(where)`; `where` is `{ before }`, `{ after }`, `{ at }`, or nothing for the end
 - `db.connect()`, `db.disconnect()`, `db.status` (`'offline' | 'connecting' | 'online'` — `online` the moment a snapshot or delta is applied, with `db.state` already current; the batch carrying it to `watch` listeners follows on the microtask, and a snapshot equal to what the client had produces none, so "the store is current" is the status event, not the first `watch`), `db.pending`
-- `db.stats()` — `{ pending, oldestPendingMs, ackMs, remoteAgeMs }`: unacknowledged ops, how long the oldest has waited, the last acknowledgement's round trip, and how old the last patch from another replica was on arrival (the clocks agree to within the server's `maxSkew`); `null` where nothing has happened yet. For a "still saving…" hint, or a status line
+- `db.stats()` — `{ pending, oldestPendingMs, ackMs, remoteAgeMs }`: unacknowledged ops, how long the oldest has waited, the last acknowledgement's round trip, and how old the last patch from another replica was on arrival; `null` where nothing has happened yet. For a "still saving…" hint, or a status line. `remoteAgeMs` is staleness, not network latency: it includes any time the writer spent offline, on clocks the server keeps within `maxSkew` of each other; `ackMs` is the one for latency
 - `db.watch(listener)` — state changes; `meta?.origin === 'remote'` marks the server's
 - `db.on('status' | 'error' | 'sync' | 'presence' | 'peers' | 'closed' | 'history' | 'conflict' | 'rejected' | 'reset', fn)` — lifecycle events; `conflict` carries `{ seq, lost: [{ path, mine, theirs }] }` for an op whose leaves lost, `rejected` `{ seq, code, message, diff }` for one refused, `reset` `{ epoch, previous: { epoch, version, state } }` when the store's storage started over (see [What happened to my edit](#what-happened-to-my-edit)); a refused op is an error with a `code` (`forbidden`, `expired`, `invalid`, `too-large` drop the op; `rate-limited` keeps it and retries; `clock-skew` is handled without one), and so is a snapshot that could not be fetched (`snapshot-fetch`, after which the client asks for it inline); `history` carries `{ canUndo, canRedo }` after a local batch, an undo, a redo, or `clearHistory()`
 - `db.undo()`, `db.redo()`, `db.canUndo`, `db.canRedo`, `db.checkpoint()`, `db.group(fn)`, `db.clearHistory()`

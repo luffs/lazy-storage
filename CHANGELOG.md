@@ -16,18 +16,23 @@ All notable changes to lazy-storage are documented here. The format follows Keep
 - **What a store sends, and how long an op takes.** `store.stats()`
   gains `sent`, by message type (`patch`, `ack`, `snapshot`, `delta`,
   `presence`, `http-snapshot`, …): `{ messages, bytes }`, deliveries (a
-  broadcast once per session it reached) and their bytes of JSON before
-  compression, an HTTP snapshot's as served. Bytes are read from the
-  encoding the socket sends, never encoded for the count, so counting
-  costs nothing; a transport that hands on objects (the in-memory
-  network) counts messages only. `observe('op')`
-  gains `ms`, the time from the op reaching the store to its patch handed
-  to the sessions. The README shows a status endpoint and a `prom-client`
-  setup built on these; lazy-storage depends on neither
+  broadcast once per session it reached) and their UTF-8 bytes of JSON
+  before compression, an HTTP snapshot's as served; counted since the
+  store was loaded, and summed across a registry's live stores by
+  `stores.stats()`. Bytes are read from the encoding the socket sends,
+  measured once per message and never encoded for the count; a
+  transport that hands on objects (the in-memory network) counts
+  messages only. `observe('op')` gains `ms`, the time from the op
+  reaching the store to its patch handed to the sessions (an adapter's
+  later asynchronous write excluded). The README shows a status endpoint
+  and a `prom-client` setup built on these; lazy-storage depends on
+  neither
 - **`db.stats()` on the client**: `{ pending, oldestPendingMs, ackMs,
   remoteAgeMs }`, the ops waiting and for how long, the last
-  acknowledgement's round trip, and how old the last patch from another
-  replica was when it arrived. For a "still saving…" hint or a status line
+  acknowledgement's round trip (latency), and how old the last patch
+  from another replica was when it arrived (staleness, including any
+  time its writer spent offline). For a "still saving…" hint or a status
+  line
 
 ### Fixed
 

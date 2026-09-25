@@ -90,7 +90,7 @@ test('with idle set, a store with no sessions for that long is released by the s
 
 test('stats() rolls up the live stores: how many are live and idle, and the sums across them', async () => {
   const stores = createStores(id => createStore({ initial: INITIAL, storage: memoryStorage() }));
-  assert.deepEqual(stores.stats(), { stores: 0, idle: 0, sessions: 0, replicas: 0, rows: 0, tombstones: 0, log: 0 });
+  assert.deepEqual(stores.stats(), { stores: 0, idle: 0, sessions: 0, replicas: 0, rows: 0, tombstones: 0, log: 0, sent: {} });
   const a = stores.get('a');
   const b = stores.get('b');
   a.patch({ tasks: { x: { id: 'x', title: 'one' } } });
@@ -105,9 +105,23 @@ test('stats() rolls up the live stores: how many are live and idle, and the sums
   assert.equal(s.sessions, 1);
   assert.ok(s.tombstones >= 1, 'the deleted task');
   for (const key of ['replicas', 'rows', 'tombstones', 'log']) assert.equal(s[key], a.stats()[key] + b.stats()[key], key);
+  // What they sent, summed by type: a store with a session has sent something
+  const netB = createNetwork(b);
+  const other = netB.client({ replicaId: 'd', initial: INITIAL });
+  await netB.settle();
+  const both = stores.stats().sent;
+  const [sa, sb] = [a.stats().sent, b.stats().sent];
+  assert.ok(sa.snapshot && sb.snapshot, 'each answered a hello');
+  for (const type of new Set([...Object.keys(sa), ...Object.keys(sb)])) {
+    assert.deepEqual(both[type], {
+      messages: (sa[type]?.messages ?? 0) + (sb[type]?.messages ?? 0),
+      bytes: (sa[type]?.bytes ?? 0) + (sb[type]?.bytes ?? 0)
+    }, type);
+  }
   client.dispose();
+  other.dispose();
   stores.dispose();
-  assert.deepEqual(stores.stats(), { stores: 0, idle: 0, sessions: 0, replicas: 0, rows: 0, tombstones: 0, log: 0 });
+  assert.deepEqual(stores.stats(), { stores: 0, idle: 0, sessions: 0, replicas: 0, rows: 0, tombstones: 0, log: 0, sent: {} });
 });
 
 test('a writer holding a store the sweep released is told so, and what to do', () => {

@@ -72,8 +72,8 @@ test("stats().sent counts what the store sent, by type, a broadcast once per ses
   const b = store.session({ send: m => heard.b.push(m) });
   a.receive({ t: 'hello', replicaId: 'a', ops: [] });
   b.receive({ t: 'hello', replicaId: 'b', ops: [] });
-  a.receive({ t: 'op', op: { replicaId: 'a', seq: 1, ts: [Date.now(), 0, 'a'], diff: { tasks: { t1: { id: 't1', title: 'x' } } } } });
-  store.patch({ tasks: { t2: { id: 't2' } } });
+  a.receive({ t: 'op', op: { replicaId: 'a', seq: 1, ts: [Date.now(), 0, 'a'], diff: { tasks: { t1: { id: 't1', title: 'räksmörgås 🙂' } } } } });
+  store.patch({ tasks: { t2: { id: 't2', title: 'åäö' } } });
   a.receive({ t: 'nonsense' });
 
   // Every delivery counted; bytes where a transport encoded, and where the
@@ -83,7 +83,7 @@ test("stats().sent counts what the store sent, by type, a broadcast once per ses
   const count = (m, encoded) => {
     const entry = expected[m.t] ??= { messages: 0, bytes: 0 };
     entry.messages++;
-    if (encoded || m.t === 'patch' || m.t === 'snapshot') entry.bytes += toJSON(m).length;
+    if (encoded || m.t === 'patch' || m.t === 'snapshot') entry.bytes += Buffer.byteLength(toJSON(m));   // UTF-8: å is two bytes, 🙂 four
   };
   for (const m of heard.a) count(m, true);
   for (const m of heard.b) count(m, false);

@@ -206,7 +206,7 @@ export interface OpEvent {
   /** Leaves the op lost */
   rejected: number;
   version: number;
-  /** Milliseconds from the op reaching the store to its patch handed to the sessions: the gates, the merge, the commit, the broadcast */
+  /** Milliseconds from the op reaching the store to its patch handed to the sessions: the gates, the merge, the commit call, the broadcast (not an adapter's later asynchronous write) */
   ms: number;
 }
 
@@ -243,13 +243,13 @@ export interface StoreStats {
   tombstones: number;
   log: number;
   /**
-   * What the store has sent, by message type ('patch', 'ack', 'snapshot',
-   * 'delta', 'presence', 'http-snapshot', …): deliveries, a broadcast once
-   * per session it reached, and their bytes of JSON before compression
-   * (an HTTP snapshot's as served, compressed). Bytes come from the
-   * encoding the transport sends; a transport that hands on objects
-   * counts messages only (bytes for broadcasts and snapshots, which the
-   * store encodes itself)
+   * What the store has sent since it was loaded, by message type ('patch',
+   * 'ack', 'snapshot', 'delta', 'presence', 'http-snapshot', …):
+   * deliveries, a broadcast once per session it reached, and their UTF-8
+   * bytes of JSON before compression (an HTTP snapshot's as served,
+   * compressed). Bytes come from the encoding the transport sends; a
+   * transport that hands on objects counts messages only (bytes for
+   * broadcasts and snapshots, which the store encodes itself)
    */
   sent: Record<string, { messages: number; bytes: number }>;
 }
@@ -327,7 +327,8 @@ export interface StoreRegistry<S extends object = any> {
   has(id: string): boolean;
   ids(): string[];
   /** The live stores' stats rolled up: how many are live and idle (no session), and the sums across them */
-  stats(): { stores: number; idle: number; sessions: number; replicas: number; rows: number; tombstones: number; log: number };
+  /** The live stores' stats summed; `sent` by message type, each store counting since it was loaded */
+  stats(): { stores: number; idle: number; sessions: number; replicas: number; rows: number; tombstones: number; log: number; sent: Record<string, { messages: number; bytes: number }> };
   /**
    * Put `doc` in the store's storage in place of what it holds, while the
    * server runs: the store ends, its sessions say hello again, and the next

@@ -88,7 +88,7 @@ import { leaves, assertModel, rebuild, expandRegisters, replacingRegisters } fro
 import { mergeOp, compactTombstones } from '../core/merge.js';
 import { ClockMap } from '../core/clocks.js';
 import { memoryStorage, assertDocument } from './storage.js';
-import { toJSON, presetJSON, encodedLength, SNAPSHOT_THRESHOLD, TALLY } from './wire.js';
+import { toJSON, presetJSON, encodedBytes, SNAPSHOT_THRESHOLD, TALLY } from './wire.js';
 import { randomId } from '../core/ids.js';
 
 const { Utils } = LazyWatch;
@@ -283,8 +283,8 @@ export function createStore({
   // encoding the transport made (the adapters encode every message once,
   // see wire.js), never encoded for the count: a transport that sends
   // objects (the in-memory network) counts messages only. A broadcast
-  // counts once per session it reaches; the length is the size in bytes
-  // for ASCII
+  // counts once per session it reaches. Bytes are UTF-8, measured once
+  // per message
   const sent = {};
   function tally(type, count, bytes) {
     const entry = sent[type] ??= { messages: 0, bytes: 0 };
@@ -341,7 +341,8 @@ export function createStore({
 
   function broadcast(message) {
     if (sessions.size === 0) return;
-    const bytes = toJSON(message).length;  // encoded once, however many sessions there are
+    toJSON(message);  // encoded once, however many sessions there are
+    const bytes = encodedBytes(message);
     tally(String(message.t), sessions.size, sessions.size * bytes);
     // A session whose transport can fan out (Bun's topic publish, which
     // compresses once) hears it through one publish, which reaches every
@@ -815,7 +816,7 @@ export function createStore({
     /** Send to this session alone, counted (see `sent`) from the encoding the transport made */
     const send = message => {
       transportSend(message);
-      tally(String(message.t), 1, encodedLength(message));
+      tally(String(message.t), 1, encodedBytes(message));
     };
     const s = {
       send,

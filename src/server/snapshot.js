@@ -13,7 +13,7 @@
 // client lays the ones newer than the snapshot it fetched on top of it.
 import { gzipSync, brotliCompressSync, constants } from 'node:zlib';
 import { isStoreId } from './registry.js';
-import { SNAPSHOT_THRESHOLD, TALLY } from './wire.js';
+import { SNAPSHOT_THRESHOLD, TALLY, utf8Bytes } from './wire.js';
 
 // Brotli at quality 5 packs this JSON some 15% tighter than gzip in the
 // same time (a 1 MB snapshot in about 10 ms); the higher qualities buy a
@@ -134,7 +134,7 @@ export function snapshotResponse(store, request, { origins = '*' } = {}) {
     headers['content-encoding'] = encoding;
     payload = body[encoding] ??= compress[encoding](body.plain);
   }
-  store[TALLY]?.('http-snapshot', 1, request.method === 'HEAD' ? 0 : payload.length);
+  store[TALLY]?.('http-snapshot', 1, request.method === 'HEAD' ? 0 : typeof payload === 'string' ? utf8Bytes(payload) : payload.length);
   return new Response(request.method === 'HEAD' ? null : payload, { status: 200, headers });
 }
 
