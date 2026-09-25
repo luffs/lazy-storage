@@ -2,7 +2,13 @@
 
 All notable changes to lazy-storage are documented here. The format follows Keep a Changelog; versions follow Semantic Versioning.
 
-## [Unreleased]
+## [0.17.1] - 2026-09-25
+
+Small fixes, and CI that holds the line: lazy-watch 7.0.2 stores
+`undefined` inside a written value as JSON carries it, `presence.every`
+runs on the store's clock, and CI now fails on a drop in test coverage
+or a benchmark over its ceiling. Nothing to change on upgrade; the wire
+protocol and stored data are unchanged.
 
 ### Added
 
