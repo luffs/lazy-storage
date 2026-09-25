@@ -733,22 +733,6 @@ export function createStore({
   }
 
   /**
-   * Attach a session. `send` receives message objects; feed the session
-   * parsed client messages with `receive`, and `close` it when the
-   * connection ends. `user` is whatever the transport authenticated
-   * (counted in presence when present, and handed to `validate`). A
-   * transport that can reach every session on the store at once (see the
-   * hub and the Bun adapter) hands in `broadcast`: this session then hears
-   * the patch fan-out through one call of it, made for every session that
-   * offered one, so any of them must reach all of them; a session without
-   * one is sent to on its own. `onEvict` is called after `closeSessions`
-   * closed this session, so the transport can drop the socket or the hub
-   * its entry. A transport that serves snapshots over HTTP (see
-   * snapshot.js) hands in `httpSnapshot: { url, threshold }`: a client
-   * that says in its hello it can fetch is then pointed at `url` in place
-   * of a snapshot of `threshold` bytes or more.
-   */
-  /**
    * Whether a session may speak for `replicaId`: null when it may, else the
    * error to send. The server's own id is reserved; a session keeps the id
    * it first spoke for (its hello's, or its first op's); and a replica
@@ -794,6 +778,22 @@ export function createStore({
   /** What a replica's user is told apart by, as a string: presence's key when set, else the default */
   const ownerKey = user => (user === undefined ? undefined : String((pres?.key ?? defaultPresenceKey)(user)));
 
+  /**
+   * Attach a session. `send` receives message objects; feed the session
+   * parsed client messages with `receive`, and `close` it when the
+   * connection ends. `user` is whatever the transport authenticated
+   * (counted in presence when present, and handed to `validate`). A
+   * transport that can reach every session on the store at once (see the
+   * hub and the Bun adapter) hands in `broadcast`: this session then hears
+   * the patch fan-out through one call of it, made for every session that
+   * offered one, so any of them must reach all of them; a session without
+   * one is sent to on its own. `onEvict` is called after `closeSessions`
+   * closed this session, so the transport can drop the socket or the hub
+   * its entry. A transport that serves snapshots over HTTP (see
+   * snapshot.js) hands in `httpSnapshot: { url, threshold }`: a client
+   * that says in its hello it can fetch is then pointed at `url` in place
+   * of a snapshot of `threshold` bytes or more.
+   */
   function session({ send, user, onEvict, broadcast: publish, httpSnapshot } = {}) {
     if (typeof send !== 'function') throw new TypeError('A session needs a send function');
     const s = {

@@ -38,12 +38,6 @@ export function presetJSON(message, json) {
 }
 
 /**
- * `{ ...message, store }`, keeping the payload's remembered JSON: the id
- * is spliced in as the first key instead of re-encoding everything. A
- * lazy property of the message (a snapshot's `state`, decoded only when
- * something reads it) is copied as the getter it is, not invoked.
- */
-/**
  * The adapters' `perMessageDeflate` option, sorted: null when off, else
  * the `threshold` below which a message goes plain (default 1024 bytes,
  * where compressing costs more than it saves) and `runtime`, the rest of
@@ -69,6 +63,12 @@ export function closeUnauthorized(ws) {
   ws.close(4401, 'Unauthorized');
 }
 
+/**
+ * `{ ...message, store }`, keeping the payload's remembered JSON: the id
+ * is spliced in as the first key instead of re-encoding everything. A
+ * lazy property of the message (a snapshot's `state`, decoded only when
+ * something reads it) is copied as the getter it is, not invoked.
+ */
 export function tagStore(message, store) {
   const tagged = {};
   for (const key of Object.keys(message)) Object.defineProperty(tagged, key, Object.getOwnPropertyDescriptor(message, key));
