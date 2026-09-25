@@ -925,7 +925,11 @@ tombstones, and the delta log, plus `sent`, what the store has sent by
 message type (`patch`, `ack`, `snapshot`, `delta`, `presence`,
 `http-snapshot`, …) as `{ messages, bytes }`: deliveries, a broadcast
 once per session it reached, and their bytes of JSON before compression
-(an HTTP snapshot's as served), and `stores.stats()` on a registry rolls
+(an HTTP snapshot's as served). Bytes are read from the encoding the
+socket sends, never encoded for the count, so a transport that hands on
+objects (the in-memory network of `lazy-storage/testing`) counts
+messages, and bytes only for what the store encodes itself (broadcasts,
+snapshots). `stores.stats()` on a registry rolls
 those up across the live stores, with how many are live and how many
 idle, for a health endpoint. Both adapters list their open sockets:
 `server.sockets()` gives each one's `user`, the `stores` it has open,

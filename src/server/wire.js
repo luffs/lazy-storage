@@ -27,6 +27,11 @@ export function toJSON(message) {
   return json;
 }
 
+/** The length of the message's JSON if something has encoded it (toJSON), else 0: counted without encoding */
+export function encodedLength(message) {
+  return message[JSON_CACHE]?.length ?? 0;
+}
+
 /**
  * Remember `json` as the message's encoding, for a message assembled from
  * parts already encoded (a snapshot splices in the cached state) so that
@@ -90,17 +95,19 @@ export function rollUpSockets(sockets, cutOff) {
 }
 
 /**
- * `{ ...message, store }`, keeping the payload's remembered JSON: the id
- * is spliced in as the first key instead of re-encoding everything. A
- * lazy property of the message (a snapshot's `state`, decoded only when
- * something reads it) is copied as the getter it is, not invoked.
+ * `{ ...message, store }`, keeping the payload's JSON: the payload is
+ * encoded (once, and remembered on it, where the store counts its size)
+ * and the id spliced in as the first key. A lazy property of the message
+ * (a snapshot's `state`, decoded only when something reads it) is copied
+ * as the getter it is, not invoked.
  */
 export function tagStore(message, store) {
   const tagged = {};
   for (const key of Object.keys(message)) Object.defineProperty(tagged, key, Object.getOwnPropertyDescriptor(message, key));
   tagged.store = store;
-  const inner = message[JSON_CACHE];
-  if (inner !== undefined && inner.length > 2 && !Object.hasOwn(message, 'store')) {
+  if (Object.hasOwn(message, 'store')) return tagged;
+  const inner = toJSON(message);
+  if (inner.length > 2) {
     Object.defineProperty(tagged, JSON_CACHE, { value: `{"store":${JSON.stringify(store)},${inner.slice(1)}` });
   }
   return tagged;

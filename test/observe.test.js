@@ -64,10 +64,11 @@ test('stats counts what the store holds', async () => {
   assert.equal(sent.ack.messages, 2, 'two ops acknowledged');
 });
 
-test('stats().sent counts what the store sent, by type, a broadcast once per session it reaches', async () => {
+test("stats().sent counts what the store sent, by type, a broadcast once per session it reaches, bytes from the transport's own encoding", async () => {
   const store = createStore({ initial: INITIAL });
   const heard = { a: [], b: [] };
-  const a = store.session({ send: m => heard.a.push(m) });
+  // a's transport encodes what it sends, as the adapters do; b's hands on objects, as the in-memory network does
+  const a = store.session({ send: m => { toJSON(m); heard.a.push(m); } });
   const b = store.session({ send: m => heard.b.push(m) });
   a.receive({ t: 'hello', replicaId: 'a', ops: [] });
   b.receive({ t: 'hello', replicaId: 'b', ops: [] });
@@ -75,12 +76,17 @@ test('stats().sent counts what the store sent, by type, a broadcast once per ses
   store.patch({ tasks: { t2: { id: 't2' } } });
   a.receive({ t: 'nonsense' });
 
+  // Every delivery counted; bytes where a transport encoded, and where the
+  // store encodes itself (a broadcast once for all sessions, a snapshot from
+  // its cached state); nothing encoded for the count
   const expected = {};
-  for (const m of [...heard.a, ...heard.b]) {
+  const count = (m, encoded) => {
     const entry = expected[m.t] ??= { messages: 0, bytes: 0 };
     entry.messages++;
-    entry.bytes += toJSON(m).length;
-  }
+    if (encoded || m.t === 'patch' || m.t === 'snapshot') entry.bytes += toJSON(m).length;
+  };
+  for (const m of heard.a) count(m, true);
+  for (const m of heard.b) count(m, false);
   assert.deepEqual(store.stats().sent, expected);
   assert.equal(expected.patch.messages, 4, 'two patches, each to both sessions');
   assert.ok(expected.ack && expected.snapshot && expected.error, JSON.stringify(Object.keys(expected)));

@@ -315,6 +315,12 @@ test('sockets() shows how far behind each socket is; one that stopped reading is
   assert.deepEqual(ann.stores, ['main']);
   assert.equal(ann.buffered, 0);
   assert.ok(ann.idleMs >= 0 && ann.openMs >= ann.idleMs, 'times since heard and since opened');
+  // Through the hub, a message to one socket is counted with its bytes too:
+  // the encoding the socket sends is the one the store counts
+  a.state.blob = 'mine';
+  await until(() => store.stats().sent.ack?.messages === 1, 'acknowledged');
+  const counted = store.stats().sent;
+  assert.ok(counted.ack.bytes > 0 && counted.snapshot.bytes > 0, JSON.stringify(counted));
 
   // A patch at a time, as a live store sends them: a healthy socket drains
   // between them, the stalled one only piles up

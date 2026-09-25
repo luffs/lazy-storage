@@ -17,8 +17,10 @@ All notable changes to lazy-storage are documented here. The format follows Keep
   gains `sent`, by message type (`patch`, `ack`, `snapshot`, `delta`,
   `presence`, `http-snapshot`, …): `{ messages, bytes }`, deliveries (a
   broadcast once per session it reached) and their bytes of JSON before
-  compression, an HTTP snapshot's as served. The adapters encode every
-  message once already, so counting costs nothing there. `observe('op')`
+  compression, an HTTP snapshot's as served. Bytes are read from the
+  encoding the socket sends, never encoded for the count, so counting
+  costs nothing; a transport that hands on objects (the in-memory
+  network) counts messages only. `observe('op')`
   gains `ms`, the time from the op reaching the store to its patch handed
   to the sessions. The README shows a status endpoint and a `prom-client`
   setup built on these; lazy-storage depends on neither

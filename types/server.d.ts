@@ -246,7 +246,10 @@ export interface StoreStats {
    * What the store has sent, by message type ('patch', 'ack', 'snapshot',
    * 'delta', 'presence', 'http-snapshot', …): deliveries, a broadcast once
    * per session it reached, and their bytes of JSON before compression
-   * (an HTTP snapshot's as served, compressed)
+   * (an HTTP snapshot's as served, compressed). Bytes come from the
+   * encoding the transport sends; a transport that hands on objects
+   * counts messages only (bytes for broadcasts and snapshots, which the
+   * store encodes itself)
    */
   sent: Record<string, { messages: number; bytes: number }>;
 }
