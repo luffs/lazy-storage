@@ -6,7 +6,11 @@
 // socket is told so and closed (see closeUnauthorized in wire.js), a plain
 // request gets a 401. `authorize(user, storeId, store)` runs per store, before its session
 // exists, and a refusal reaches the client as a `closed` message with code
-// 'forbidden' for that store alone. Both may return promises.
+// 'forbidden' for that store alone. Both may return promises. A socket
+// keeps its user until it closes: `expiresAt(user, req)` says when that
+// session runs out, `disconnect(filter)` ends it now, and either way the
+// client reconnects and authenticates afresh; `revalidate(filter)` judges
+// its open stores again.
 //
 // `createHandlers` returns the pieces to mount inside your own Bun.serve
 // (call `upgrade` from your fetch; pass `websocket` through); `serve` is
@@ -20,7 +24,7 @@
 // `shutdown()` that does this and then stops the server.
 import { LazyWatch } from 'lazy-watch';
 import { createHub } from './hub.js';
-import { toJSON, closeUnauthorized, deflateOptions, TOO_FAR_BEHIND, REAUTHENTICATE, rollUpSockets } from './wire.js';
+import { toJSON, closeUnauthorized, deflateOptions, TOO_FAR_BEHIND, REAUTHENTICATE, MIN_SESSION_MS, expiryOf, runAt, rollUpSockets } from './wire.js';
 import { snapshotOptions, snapshotId, serveSnapshot } from './snapshot.js';
 
 /**
@@ -39,6 +43,16 @@ import { snapshotOptions, snapshotId, serveSnapshot } from './snapshot.js';
  *   check that needs only the user and the id
  * @param {(user: any, storeId: string, store: Object) => boolean|Promise<boolean>} [options.authorize]
  *   the same, judged once the store is loaded, for a check that needs it
+ * @param {(user: any, req: Request) => number|Date|null|undefined|Promise<number|Date|null|undefined>} [options.expiresAt]
+ *   when the session `authenticate` let in runs out (ms since the epoch, or
+ *   a Date; nothing for never), read at upgrade. The socket is closed then
+ *   with code 4001, as `disconnect` does, and the client reconnects and
+ *   authenticates afresh with whatever credentials it has by then. A
+ *   session with less than `minSession` left is turned away as unauthorized
+ * @param {number} [options.minSession=30000] - the shortest session (ms)
+ *   an `expiresAt` may leave: a token that runs out sooner would have its
+ *   socket closed again in a moment, over and over. Lower it for tokens
+ *   that live about a minute
  * @param {number} [options.maxPayload=4194304] - the largest message (bytes)
  *   a socket may send; Bun closes a socket that exceeds it. A hello carries
  *   at most 1000 ops, so a long offline spell stays well under 4 MB
@@ -75,9 +89,9 @@ import { snapshotOptions, snapshotId, serveSnapshot } from './snapshot.js';
  *   `upgrade` resolves to null when the URL is not ours, undefined after a
  *   successful upgrade, or a Response (the snapshot route's, or an error);
  *   `close` is the graceful shutdown described above. `sockets()` lists
- *   the open sockets, each `{ user, stores, buffered, idleMs, openMs }`
- *   (bytes unsent, time since it last sent something, time since it
- *   opened), and `socketStats()` rolls them up (see rollUpSockets in
+ *   the open sockets, each `{ user, stores, buffered, idleMs, openMs,
+ *   expiresAt }` (bytes unsent, time since it last sent something, time
+ *   since it opened, when its session runs out or null), and `socketStats()` rolls them up (see rollUpSockets in
  *   wire.js). `disconnect(filter)` closes the sockets of the users it
  *   picks, which reconnect and authenticate afresh (after a logout, a
  *   changed role, a deleted account); `revalidate(filter)` runs the
@@ -90,6 +104,8 @@ export function createHandlers({
   authenticate,
   authorizeId,
   authorize,
+  expiresAt,
+  minSession = MIN_SESSION_MS,
   maxPayload = 4 * 1024 * 1024,
   perMessageDeflate = true,
   httpSnapshots = true,
@@ -110,10 +126,11 @@ export function createHandlers({
     ws.send(json, deflate !== null && json.length >= deflate.threshold);
   };
   const hubs = new Map();
-  const seen = new Map();   // socket -> { opened, heard }: when it opened, when it last sent something
+  const seen = new Map();   // socket -> { opened, heard, expires, cancel }: when it opened, last sent something, runs out; the expiry's timer
   let closing = false;
   let cutOff = 0;           // sockets closed for falling behind
   let disconnected = 0;     // sockets closed by disconnect()
+  let expired = 0;          // sockets closed as their session ran out
   let revoked = 0;          // store sessions closed by revalidate()
   /** Close a socket over maxBuffered; true when it was (1013: the client reconnects and asks for what it missed) */
   const behind = ws => {
@@ -144,16 +161,17 @@ export function createHandlers({
         return new Response('Something went wrong', { status: 500 });
       }
     }
+    // A handshake is completed only to be told why it was turned away (see
+    // closeUnauthorized); a plain request gets the 401 itself
+    const turnAway = () => (server.upgrade(req, { data: { unauthorized: true } }) ? undefined : new Response('Unauthorized', { status: 401 }));
     let user;
     if (authenticate) {
       user = await authenticate(req);
-      if (user === null || user === undefined) {
-        // A handshake is completed only to be told why it was turned away
-        // (see closeUnauthorized); a plain request gets the 401 itself
-        return server.upgrade(req, { data: { unauthorized: true } }) ? undefined : new Response('Unauthorized', { status: 401 });
-      }
+      if (user === null || user === undefined) return turnAway();
     }
-    return server.upgrade(req, { data: { user } }) ? undefined : new Response('WebSocket upgrade failed', { status: 400 });
+    const expires = expiresAt ? expiryOf(await expiresAt(user, req)) : null;
+    if (expires !== null && expires - Date.now() < minSession) return turnAway();
+    return server.upgrade(req, { data: { user, expires } }) ? undefined : new Response('WebSocket upgrade failed', { status: 400 });
   }
 
   const websocket = {
@@ -172,7 +190,15 @@ export function createHandlers({
         publish: (id, message) => { const json = toJSON(message); bunServer.publish(topic(id), json, shouldCompress(json)); }
       };
       hubs.set(ws, createHub(resolveStore, { send: message => send(ws, message), user: ws.data.user, authorizeId, authorize, channel, httpSnapshots: snapshotRoute, onError }));
-      seen.set(ws, { opened: Date.now(), heard: Date.now() });
+      const times = { opened: Date.now(), heard: Date.now(), expires: ws.data.expires ?? null, cancel: null };
+      seen.set(ws, times);
+      if (times.expires !== null) {
+        times.cancel = runAt(times.expires, () => {
+          if (closing || !hubs.has(ws)) return;
+          expired++;
+          reauthenticate(ws);
+        });
+      }
     },
     message(ws, raw) {
       const times = seen.get(ws);
@@ -195,6 +221,7 @@ export function createHandlers({
     close(ws) {
       hubs.get(ws)?.close();
       hubs.delete(ws);
+      seen.get(ws)?.cancel?.();
       seen.delete(ws);
     }
   };
@@ -208,6 +235,7 @@ export function createHandlers({
   async function close({ reason = 'Server shutting down' } = {}) {
     closing = true;
     clearInterval(sweeper);
+    for (const times of seen.values()) times.cancel?.();
     const sockets = [...hubs.keys()];
     const gone = Promise.all(sockets.map(ws => new Promise(resolve => {
       const hub = hubs.get(ws);
@@ -238,14 +266,20 @@ export function createHandlers({
     let count = 0;
     for (const [ws, hub] of [...hubs]) {
       if (filter && !filter(hub.user)) continue;
-      hub.close();
-      hubs.delete(ws);
-      seen.delete(ws);
-      ws.close(...REAUTHENTICATE);
+      reauthenticate(ws);
       count++;
     }
     disconnected += count;
     return count;
+  }
+
+  /** End a socket's sessions now and close it for the client to authenticate afresh */
+  function reauthenticate(ws) {
+    hubs.get(ws)?.close();
+    hubs.delete(ws);
+    seen.get(ws)?.cancel?.();
+    seen.delete(ws);
+    ws.close(...REAUTHENTICATE);
   }
 
   /**
@@ -267,12 +301,12 @@ export function createHandlers({
     for (const [ws, hub] of hubs) {
       const times = seen.get(ws);
       if (!times) continue;   // a handshake completed only to be refused
-      out.push({ user: hub.user, stores: hub.stores, buffered: ws.getBufferedAmount(), idleMs: now - times.heard, openMs: now - times.opened });
+      out.push({ user: hub.user, stores: hub.stores, buffered: ws.getBufferedAmount(), idleMs: now - times.heard, openMs: now - times.opened, expiresAt: times.expires });
     }
     return out;
   }
 
-  return { upgrade, websocket, close, get closing() { return closing; }, sockets, socketStats: () => rollUpSockets(sockets(), { cutOff, disconnected, revoked }), disconnect, revalidate };
+  return { upgrade, websocket, close, get closing() { return closing; }, sockets, socketStats: () => rollUpSockets(sockets(), { cutOff, disconnected, expired, revoked }), disconnect, revalidate };
 }
 
 /**

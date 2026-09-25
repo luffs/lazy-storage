@@ -98,28 +98,67 @@ export const TALLY = Symbol('lazy-storage.tally');
 export const TOO_FAR_BEHIND = [1013, 'Too far behind'];
 
 /**
- * The close code and reason for a socket the app disconnected: not final,
- * unlike 4401, so the client reconnects (with its usual backoff) and the
- * upgrade authenticates it afresh. Whether it gets back in is then
+ * The close code and reason for a socket the app disconnected, or whose
+ * session expired: not final, unlike 4401, so the client reconnects (with
+ * its usual backoff) and the upgrade authenticates it afresh. Whether it gets back in is then
  * `authenticate`'s call, and every store it asks for is authorized again
  */
 export const REAUTHENTICATE = [4001, 'Reauthenticate'];
 
 /**
+ * The shortest session an expiry may leave, by default (the adapters' `minSession`):
+ * a socket whose credentials run out sooner is turned away as
+ * unauthorized, rather than let in to be closed again in a moment, over
+ * and over while an app keeps handing over a token that is about to lapse
+ */
+export const MIN_SESSION_MS = 30_000;
+
+/**
+ * The time the adapters' `expiresAt` hook gave, in ms since the epoch:
+ * it may answer with a number or a Date, and null or undefined for a
+ * session that does not expire
+ */
+export function expiryOf(value) {
+  if (value === null || value === undefined) return null;
+  const at = value instanceof Date ? value.getTime() : value;
+  if (typeof at !== 'number' || Number.isNaN(at)) throw new TypeError('expiresAt must give a time in ms, a Date, or nothing');
+  return at;
+}
+
+// setTimeout fires at once past this (some 24.8 days)
+const LONGEST_TIMER = 2 ** 31 - 1;
+
+/**
+ * Run `fn` at `at` (ms since the epoch), however far off: a longer wait
+ * than one timer can hold is taken in steps. Returns a cancel function
+ */
+export function runAt(at, fn) {
+  let timer = null;
+  const step = () => {
+    const wait = at - Date.now();
+    if (wait <= 0) return fn();
+    timer = setTimeout(step, Math.min(wait, LONGEST_TIMER));
+    if (typeof timer.unref === 'function') timer.unref();
+  };
+  step();
+  return () => clearTimeout(timer);
+}
+
+/**
  * The adapters' `socketStats()`: how many sockets are open, the bytes
  * they hold unsent in total and at most, and since the server started,
- * how many were cut off for falling behind, disconnected by the app, and
- * store sessions closed by `revalidate`. `sockets` is their `sockets()`
- * list
+ * how many were cut off for falling behind, disconnected by the app,
+ * closed as their session expired, and store sessions closed by
+ * `revalidate`. `sockets` is their `sockets()` list
  */
-export function rollUpSockets(sockets, { cutOff, disconnected, revoked }) {
+export function rollUpSockets(sockets, { cutOff, disconnected, expired, revoked }) {
   let buffered = 0;
   let largest = 0;
   for (const s of sockets) {
     buffered += s.buffered;
     if (s.buffered > largest) largest = s.buffered;
   }
-  return { sockets: sockets.length, buffered, largest, cutOff, disconnected, revoked };
+  return { sockets: sockets.length, buffered, largest, cutOff, disconnected, expired, revoked };
 }
 
 /**

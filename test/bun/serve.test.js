@@ -379,6 +379,54 @@ test('disconnect() has a user authenticate again: back in while the session hold
   await authServer.shutdown();
 });
 
+test('expiresAt closes a socket when its session runs out: a client with fresh credentials is back at once, one without is signed out, and a session about to lapse is not let in', async () => {
+  const tokens = new Map();   // token -> { user, expires }
+  const store = createStore({ initial: INITIAL, storage: memoryStorage() });
+  const expiring = serve({
+    port: 0,
+    stores: () => store,
+    minSession: 100,
+    authenticate: req => tokens.get(new URL(req.url).searchParams.get('token'))?.user ?? null,
+    expiresAt: (user, req) => tokens.get(new URL(req.url).searchParams.get('token')).expires
+  });
+  const soon = Date.now() + 400;
+  tokens.set('first', { user: { id: 'u1' }, expires: soon });
+  let token = 'first';
+  const connection = createConnection({ transport: webSocketTransport(() => `ws://localhost:${expiring.port}/ws?token=${token}`), reconnect: { min: 20, max: 50 }, keepalive: false });
+  const a = attach(connection, 'main', 'a');
+  await until(() => a.status === 'online', 'online');
+  assert.equal(expiring.sockets()[0].expiresAt, soon);
+
+  tokens.set('fresh', { user: { id: 'u1' }, expires: new Date(Date.now() + 3_600_000) });
+  token = 'fresh';
+  let drops = 0;
+  connection.on('status', status => { if (status === 'offline') drops++; });
+  await until(() => drops === 1 && a.status === 'online', 'closed at expiry and back');
+  assert.ok(Date.now() >= soon, 'not before its time');
+  assert.equal(expiring.sockets()[0].expiresAt, tokens.get('fresh').expires.getTime());
+  a.collection('tasks').add({ id: 'x', title: 'after the refresh' });
+  await until(() => store.state.tasks.x, 'writes land');
+
+  tokens.set('stale', { user: { id: 'u1' }, expires: Date.now() + 50 });
+  tokens.set('past', { user: { id: 'u1' }, expires: Date.now() - 1000 });
+  for (const t of ['stale', 'past']) {
+    const raw = new WebSocket(`ws://localhost:${expiring.port}/ws?token=${t}`);
+    const code = await new Promise(resolve => { raw.onclose = e => resolve(e.code); });
+    assert.equal(code, 4401, t);
+  }
+
+  tokens.set('last', { user: { id: 'u1' }, expires: Date.now() + 300 });
+  token = 'last';
+  expiring.disconnect();
+  await until(() => a.status === 'online' && expiring.sockets()[0]?.expiresAt === tokens.get('last').expires, 'on the short token');
+  tokens.delete('last');
+  await until(() => a.closed?.code === 'unauthorized', 'signed out once it ran out');
+  const { expired, disconnected } = expiring.socketStats();
+  assert.deepEqual({ expired, disconnected }, { expired: 2, disconnected: 1 });
+  connection.close();
+  await expiring.shutdown();
+});
+
 afterAll(async () => {
   for (const connection of open) connection.close();
   server.stop(true);

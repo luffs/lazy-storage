@@ -12,6 +12,15 @@ export interface HandlerOptions {
   authorizeId?: AuthorizeId;
   /** The same once the store is loaded, for a check that needs it */
   authorize?: Authorize;
+  /**
+   * When the session `authenticate` let in runs out: ms since the epoch or a
+   * Date, nothing for never; read at upgrade, may return a promise. The
+   * socket is closed then with code 4001 and the client reconnects, to
+   * authenticate afresh with whatever credentials it has by then
+   */
+  expiresAt?(user: unknown, req: Request): number | Date | null | undefined | Promise<number | Date | null | undefined>;
+  /** The shortest session (ms) an `expiresAt` may leave; one running out sooner is turned away as unauthorized. Default 30000 */
+  minSession?: number;
   /** The largest message (bytes) a socket may send; default 4 MB */
   maxPayload?: number;
   /**
@@ -54,6 +63,8 @@ export interface SocketInfo {
   idleMs: number;
   /** Milliseconds since it opened */
   openMs: number;
+  /** When its session runs out (see `expiresAt`), in ms since the epoch; null for never */
+  expiresAt: number | null;
 }
 
 /** The open sockets rolled up, for a status endpoint */
@@ -67,6 +78,8 @@ export interface SocketStats {
   cutOff: number;
   /** Sockets closed by `disconnect()` since the server started */
   disconnected: number;
+  /** Sockets closed as their session ran out (see `expiresAt`) since the server started */
+  expired: number;
   /** Store sessions closed by `revalidate()` since the server started */
   revoked: number;
 }

@@ -18,7 +18,7 @@ import { createServer } from 'node:http';
 import { WebSocketServer } from 'ws';
 import { LazyWatch } from 'lazy-watch';
 import { createHub } from './hub.js';
-import { toJSON, closeUnauthorized, deflateOptions, TOO_FAR_BEHIND, REAUTHENTICATE, rollUpSockets } from './wire.js';
+import { toJSON, closeUnauthorized, deflateOptions, TOO_FAR_BEHIND, REAUTHENTICATE, MIN_SESSION_MS, expiryOf, runAt, rollUpSockets } from './wire.js';
 import { snapshotOptions, snapshotId, serveSnapshot } from './snapshot.js';
 
 /** A Web Request for an incoming Node request, headers included */
@@ -65,6 +65,8 @@ export function createHandlers({
   authenticate,
   authorizeId,
   authorize,
+  expiresAt,
+  minSession = MIN_SESSION_MS,
   maxPayload = 4 * 1024 * 1024,
   perMessageDeflate = true,
   httpSnapshots = true,
@@ -118,9 +120,11 @@ export function createHandlers({
   const hubs = new Map();
   const heard = new Map();   // socket -> when it last sent something, for idleTimeout
   const opened = new Map();  // socket -> when it opened
+  const expiring = new Map(); // socket -> { at, cancel }: when its session runs out, and the timer for it
   let closing = false;
   let cutOff = 0;            // sockets closed for falling behind
   let disconnected = 0;      // sockets closed by disconnect()
+  let expired = 0;           // sockets closed as their session ran out
   let revoked = 0;           // store sessions closed by revalidate()
   const sweeper = idleTimeout ? setInterval(() => {
     const now = Date.now();
@@ -128,7 +132,7 @@ export function createHandlers({
   }, Math.max(100, Math.min(idleTimeout / 4, 30_000))) : null;
   if (typeof sweeper?.unref === 'function') sweeper.unref();
 
-  function open(ws, user) {
+  function open(ws, user, expires) {
     // A broadcast is encoded once for every socket it reaches (see wire.js)
     const hub = createHub(resolveStore, {
       send: message => send(ws, message),
@@ -141,6 +145,16 @@ export function createHandlers({
     hubs.set(ws, hub);
     heard.set(ws, Date.now());
     opened.set(ws, Date.now());
+    if (expires !== null) {
+      expiring.set(ws, {
+        at: expires,
+        cancel: runAt(expires, () => {
+          if (closing || !hubs.has(ws)) return;
+          expired++;
+          reauthenticate(ws);
+        })
+      });
+    }
     ws.on('message', raw => {
       heard.set(ws, Date.now());
       let msg;
@@ -163,6 +177,8 @@ export function createHandlers({
       hubs.delete(ws);
       heard.delete(ws);
       opened.delete(ws);
+      expiring.get(ws)?.cancel();
+      expiring.delete(ws);
     });
     // A socket error (a reset, a message over maxPayload) is the client's
     // affair and is followed by 'close'; the handler only keeps it from
@@ -177,16 +193,20 @@ export function createHandlers({
         refuse(socket, 503, 'Server shutting down');
         return true;
       }
+      // The handshake is completed only to be told why it was turned away (see wire.js)
+      const turnAway = () => {
+        wss.handleUpgrade(req, socket, head, closeUnauthorized);
+        return true;
+      };
+      const asked = authenticate || expiresAt ? toRequest(req) : null;
       let user;
       if (authenticate) {
-        user = await authenticate(toRequest(req));
-        if (user === null || user === undefined) {
-          // The handshake is completed only to be told why it was turned away (see wire.js)
-          wss.handleUpgrade(req, socket, head, closeUnauthorized);
-          return true;
-        }
+        user = await authenticate(asked);
+        if (user === null || user === undefined) return turnAway();
       }
-      wss.handleUpgrade(req, socket, head, ws => open(ws, user));
+      const expires = expiresAt ? expiryOf(await expiresAt(user, asked)) : null;
+      if (expires !== null && expires - Date.now() < minSession) return turnAway();
+      wss.handleUpgrade(req, socket, head, ws => open(ws, user, expires));
     } catch (err) {
       onError(err);
       refuse(socket, 500, 'Upgrade failed');
@@ -221,6 +241,7 @@ export function createHandlers({
   async function close({ reason = 'Server shutting down' } = {}) {
     closing = true;
     clearInterval(sweeper);
+    for (const { cancel } of expiring.values()) cancel();
     const sockets = [...hubs.keys()];
     const gone = Promise.all(sockets.map(ws => new Promise(resolve => {
       if (ws.readyState === ws.CLOSED) return resolve();
@@ -246,15 +267,22 @@ export function createHandlers({
     let count = 0;
     for (const [ws, hub] of [...hubs]) {
       if (filter && !filter(hub.user)) continue;
-      hub.close();
-      hubs.delete(ws);
-      heard.delete(ws);
-      opened.delete(ws);
-      shut(ws, REAUTHENTICATE);
+      reauthenticate(ws);
       count++;
     }
     disconnected += count;
     return count;
+  }
+
+  /** End a socket's sessions now and close it for the client to authenticate afresh */
+  function reauthenticate(ws) {
+    hubs.get(ws)?.close();
+    hubs.delete(ws);
+    heard.delete(ws);
+    opened.delete(ws);
+    expiring.get(ws)?.cancel();
+    expiring.delete(ws);
+    shut(ws, REAUTHENTICATE);
   }
 
   /** Judge the open store sessions again, as the Bun adapter's; resolves to how many were closed */
@@ -274,11 +302,12 @@ export function createHandlers({
       stores: hub.stores,
       buffered: ws.bufferedAmount,
       idleMs: now - heard.get(ws),
-      openMs: now - opened.get(ws)
+      openMs: now - opened.get(ws),
+      expiresAt: expiring.get(ws)?.at ?? null
     }));
   }
 
-  return { upgrade, request, close, get closing() { return closing; }, sockets, socketStats: () => rollUpSockets(sockets(), { cutOff, disconnected, revoked }), disconnect, revalidate, wss };
+  return { upgrade, request, close, get closing() { return closing; }, sockets, socketStats: () => rollUpSockets(sockets(), { cutOff, disconnected, expired, revoked }), disconnect, revalidate, wss };
 }
 
 /**

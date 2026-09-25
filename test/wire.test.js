@@ -1,7 +1,7 @@
 // wire.test.js - One serialization per broadcast, however many sockets
-import { test } from 'node:test';
+import { test, mock } from 'node:test';
 import assert from 'node:assert/strict';
-import { toJSON, tagStore } from '../src/server/wire.js';
+import { toJSON, tagStore, runAt, expiryOf } from '../src/server/wire.js';
 import { createStore, createHub } from '../src/server/index.js';
 
 test('toJSON encodes a message once and tagStore splices the store id in without encoding the payload again', () => {
@@ -90,4 +90,27 @@ test('a snapshot is encoded from the cached state, spliced into the message, and
   } finally {
     JSON.stringify = original;
   }
+});
+
+test('runAt waits past what one timer can hold, and can be cancelled; expiryOf takes a number, a Date or nothing', () => {
+  mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 1_000_000 });
+  try {
+    const DAY = 86_400_000;
+    const fired = [];
+    runAt(Date.now() + 30 * DAY, () => fired.push('late'));   // past setTimeout's 24.8 days
+    const cancel = runAt(Date.now() + DAY, () => fired.push('cancelled'));
+    cancel();
+    mock.timers.tick(2 ** 31 - 1);
+    assert.deepEqual(fired, [], 'a timer capped at 24.8 days did not fire early');
+    mock.timers.tick(30 * DAY - (2 ** 31 - 1));
+    assert.deepEqual(fired, ['late']);
+  } finally {
+    mock.timers.reset();
+  }
+  assert.equal(expiryOf(1234), 1234);
+  assert.equal(expiryOf(new Date(5678)), 5678);
+  assert.equal(expiryOf(null), null);
+  assert.equal(expiryOf(undefined), null);
+  assert.throws(() => expiryOf('tomorrow'), TypeError);
+  assert.throws(() => expiryOf(new Date('nonsense')), TypeError);
 });

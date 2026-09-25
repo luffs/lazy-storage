@@ -708,8 +708,34 @@ async function removeMember(teamId, userId) {
 `revalidate` judges with the user object the socket authenticated with,
 so it sees a change only where the hooks read it from its source (the
 team's members, not a role copied onto the user at upgrade). When what
-changed is the user, `disconnect` them instead. `socketStats()` counts
-both, as `disconnected` and `revoked`.
+changed is the user, `disconnect` them instead.
+
+Credentials that run out get the same treatment on their own with a
+third hook, `expiresAt(user, req)`: when the session `authenticate` let
+in ends (ms since the epoch or a `Date`; nothing for never), read at
+upgrade. The server closes the socket then, as `disconnect` does, and
+the client reconnects with whatever credentials it has by then: a URL
+built by a function carries a refreshed token, a cookie session that
+has lapsed is turned away with `unauthorized`. A session with less than
+`minSession` left (default 30 s) is turned away at once rather than let
+in to be closed again in a moment.
+
+```js
+serve({
+  stores,
+  authenticate: req => sessionFor(req)?.user ?? null,
+  expiresAt: (user, req) => sessionFor(req).expiresAt
+});
+```
+
+How long a session lasts is the app's choice; each end of one costs a
+reconnect, whose hello is answered with a delta (usually empty), and
+the client's `status` passes through `connecting` for that round trip, so
+debounce a "reconnecting" banner rather than show it at once. Where
+expiry is what locks out a revoked user, 5 to 15 minutes is usual; with
+`disconnect` on logout, an hour or more is fine. `socketStats()` counts
+all three, as `disconnected`, `expired` and `revoked`, and `sockets()`
+gives each socket's `expiresAt`.
 
 A replica belongs to the user who first says hello with it (by
 presence's `key`, or the user's `id`), recorded with its progress and
@@ -980,11 +1006,12 @@ registry rolls all of it up across the live stores, `sent` included,
 with how many are live and how many idle, for a health endpoint. Both adapters list their open sockets:
 `server.sockets()` gives each one's `user`, the `stores` it has open,
 `buffered` (bytes queued for it and not yet sent: how far behind it is),
-`idleMs` (since it last sent anything; a client pings every 30 s) and
-`openMs`, and `server.socketStats()` rolls them up (`sockets`,
-`buffered`, `largest`, `cutOff`, the sockets closed for passing
-`maxBuffered`, and `disconnected` and `revoked`, what `disconnect()`
-and `revalidate()` closed; see
+`idleMs` (since it last sent anything; a client pings every 30 s),
+`openMs` and `expiresAt` (when its session runs out, or null), and
+`server.socketStats()` rolls them up (`sockets`, `buffered`, `largest`,
+`cutOff`, the sockets closed for passing `maxBuffered`, and
+`disconnected`, `expired` and `revoked`, what `disconnect()`, session
+expiry and `revalidate()` closed; see
 [Authentication](#authentication-presence-and-eviction)):
 
 ```js
@@ -1142,13 +1169,13 @@ runs on the synced state and shows in the array view like any other change.
 **SQLite** (`lazy-storage/server/sqlite`, Bun): `sqliteStorage(file, { wal, lease: { ttl } | false })` →
 `store(id)` (whose load takes the store's lease, `close()` gives it up, and `replace(doc)` takes a document), `ids()`, `remove(id)`, `backup(file)`, `db`, `close()` (gives up every lease). `memoryStorage()` and `jsonFileStorage(file)` take a document with `replace(doc)` too.
 
-**Bun adapter** (`lazy-storage/server/bun`): `serve({ stores, port, path, fetch, authenticate, authorizeId, authorize, maxPayload, perMessageDeflate, httpSnapshots, maxBuffered, onError })` —
+**Bun adapter** (`lazy-storage/server/bun`): `serve({ stores, port, path, fetch, authenticate, authorizeId, authorize, expiresAt, minSession, maxPayload, perMessageDeflate, httpSnapshots, maxBuffered, onError })` —
 `stores` is a registry or `id => store|null` (for one store, `() => store`); the
 hub listens at `path` and the snapshot route under it; the returned server gains `shutdown({ reason })`, `sockets()`, `socketStats()`, `disconnect(filter)` and `revalidate(filter)`.
-`createHandlers({ stores, path, authenticate, authorizeId, authorize, maxPayload, perMessageDeflate, httpSnapshots, maxBuffered, onError })` →
+`createHandlers({ stores, path, authenticate, authorizeId, authorize, expiresAt, minSession, maxPayload, perMessageDeflate, httpSnapshots, maxBuffered, onError })` →
 `{ upgrade(req, server), websocket, close({ reason }), closing, sockets(), socketStats(), disconnect(filter), revalidate(filter) }` for mounting inside your own `Bun.serve`.
 
-**Node adapter** (`lazy-storage/server/node`, needs `ws`): `serve({ stores, port, host, request, path, authenticate, authorizeId, authorize, maxPayload, perMessageDeflate, httpSnapshots, idleTimeout, maxBuffered, onError })` →
+**Node adapter** (`lazy-storage/server/node`, needs `ws`): `serve({ stores, port, host, request, path, authenticate, authorizeId, authorize, expiresAt, minSession, maxPayload, perMessageDeflate, httpSnapshots, idleTimeout, maxBuffered, onError })` →
 an `http.Server` with `shutdown({ reason })`, `sockets()`, `socketStats()`, `disconnect(filter)` and `revalidate(filter)`; `createHandlers(options)` → `{ upgrade(req, socket, head), request(req, res), close({ reason }), closing, sockets(), socketStats(), disconnect(filter), revalidate(filter), wss }`;
 `toRequest(req)` — the Web `Request` `authenticate` sees. **node:sqlite** (`lazy-storage/server/sqlite-node`): `sqliteStorage(file, { wal })`, as the Bun one.
 
@@ -1251,7 +1278,7 @@ alphabet, or a message without one) each end one store. `unauthorized`
 (`authenticate` returned nothing) ends the socket: it arrives without a
 `store`, and the close that follows carries code 4401 in case the message
 did not make it. A socket closed with code 4001 was disconnected by the
-app (`disconnect()`), which is not final: the client reconnects, and
+app (`disconnect()`) or its session ran out (`expiresAt`), which is not final: the client reconnects, and
 `authenticate` decides again. `replica-taken` ends one store: the hello named a
 replica another user owns (see [Authentication](#authentication-presence-and-eviction)).
 `unavailable` is the one that is not final: the store was

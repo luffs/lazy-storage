@@ -233,7 +233,12 @@ const handlers = createHandlers({
 createHandlers({ stores, authorizeId: (user: unknown, storeId: string, store: object) => true });
 async function bun() {
   await handlers.close({ reason: 'deploy' });
-  const server = serve({ stores, port: 0, maxBuffered: 8 * 1024 * 1024 });
+  const server = serve({ stores, port: 0, maxBuffered: 8 * 1024 * 1024, expiresAt: async (user, req) => new Date(Date.now() + 15 * 60_000), minSession: 10_000 });
+  const expiring: Array<number | null> = server.sockets().map(s => s.expiresAt);
+  const lapsed: number = server.socketStats().expired;
+  // @ts-expect-error an expiry is a time, not a duration string
+  createHandlers({ stores, expiresAt: () => '15m' });
+  void [expiring, lapsed];
   const port: number = server.port;
   const lagging: string[] = server.sockets().filter(s => s.buffered > 64 * 1024 && s.idleMs < 60_000).flatMap(s => s.stores);
   const { sockets: open, buffered, largest, cutOff, disconnected, revoked } = handlers.socketStats();
