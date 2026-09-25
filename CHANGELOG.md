@@ -2,7 +2,18 @@
 
 All notable changes to lazy-storage are documented here. The format follows Keep a Changelog; versions follow Semantic Versioning.
 
-## [Unreleased]
+## [0.17.0] - 2026-09-25
+
+A record read from a list view stays that record wherever it moves, by
+the app's own sort or splice or by another client's move, and so does a
+listener registered on it (lazy-watch 7.0.1). One change to check on
+upgrade: `splice`, `shift` and `pop` on a list return the records'
+own handles, and a write to one before it is put back throws, where 0.16
+wrote to a copy; put it back first, or edit `LazyWatch.snapshot(task)`.
+An app with lazy-watch in its own `package.json` moves it to `^7.0.1`
+too, since a 6.x copy does not recognize 7.x state (its `LazyWatch.on`
+and `snapshot` throw); `LazyWatch` imported from lazy-storage is always
+the matching one. The wire protocol and stored data are unchanged.
 
 ### Fixed
 
