@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createStore } from '../src/server/index.js';
 import { createClient } from '../src/client/index.js';
-import { createNetwork } from './helpers.js';
+import { createNetwork, fakeTime } from './helpers.js';
 
 const INITIAL = { tasks: {} };
 const byReplica = peers => Object.fromEntries(peers.map(p => [p.replicaId, { user: p.user, data: p.data }]));
@@ -244,6 +244,23 @@ test('presence.every batches: changes within the window go out together, a later
   assert.deepEqual(obs.deltas().slice(1), [{ t: 'presence', joined: [{ replicaId: 'b', user: { id: 'u2' }, key: 'u2' }], shared: [{ replicaId: 'a', data: { cursor: 3 } }] }]);
   assert.deepEqual(byReplica(b.peers).a.data, { cursor: 3 });
   assert.throws(() => createStore({ initial: INITIAL, presence: { every: -1 } }), /presence\.every/);
+  store.dispose();
+});
+
+test("presence.every reads the store's clock: once `now` has moved past the window, a change goes out at once", async () => {
+  const now = fakeTime();
+  const store = createStore({ initial: INITIAL, presence: { every: 60_000 }, now });
+  const net = createNetwork(store);
+  const obs = observer(store);
+  await new Promise(resolve => setImmediate(resolve));   // its own join goes out, opening a window
+  obs.reset();
+
+  now.advance(60_000);   // a minute on the store's clock, no time at all on the real one
+  const a = net.client({ replicaId: 'a', initial: INITIAL }, { user: { id: 'u1' } });
+  await net.settle();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(obs.deltas(), [{ t: 'presence', joined: [{ replicaId: 'a', user: { id: 'u1' }, key: 'u1' }] }], "the window closed on the store's clock");
+  a.dispose();
   store.dispose();
 });
 

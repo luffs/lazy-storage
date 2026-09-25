@@ -25,6 +25,14 @@ All notable changes to lazy-storage are documented here. The format follows Keep
   that key in the client's state until the server acknowledged the write;
   it is now left out at once
 
+### Fixed
+
+- **`presence.every` reads the store's clock.** The presence batching
+  window was timed with `Date.now` while everything else in a store runs
+  on the `now` it is given, so a test on `fakeTime()` that moved the
+  clock past the window still waited the window out in real time before
+  presence went out
+
 ## [0.17.0] - 2026-09-25
 
 A record read from a list view stays that record wherever it moves, by

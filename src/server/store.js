@@ -411,7 +411,7 @@ export function createStore({
     if (what === 'leave') Object.assign(entry, { joined: false, shared: false, left: true });
     else entry[what === 'join' ? 'joined' : 'shared'] = true;
     if (cancelFlush) return;
-    const wait = pres.every > 0 ? Math.max(0, flushedAt + pres.every - Date.now()) : 0;
+    const wait = pres.every > 0 ? Math.max(0, flushedAt + pres.every - time()) : 0;
     let timer;
     if (wait > 0) {
       timer = setTimeout(flushPresence, wait);
@@ -429,7 +429,7 @@ export function createStore({
 
   function flushPresence() {
     cancelFlush = null;
-    flushedAt = Date.now();
+    flushedAt = time();
     const changes = pending;
     pending = new Map();
     const joined = [];
