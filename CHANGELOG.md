@@ -17,6 +17,14 @@ All notable changes to lazy-storage are documented here. The format follows Keep
   for a Vue mount, a handful of outbox writes under remote traffic. CI
   runs it on every push
 
+### Changed
+
+- **Requires lazy-watch 7.0.2**, which stores `undefined` inside a
+  written value as JSON carries it. A record written with a key set to
+  `undefined` (`db.state.tasks[id] = { title, note: undefined }`) kept
+  that key in the client's state until the server acknowledged the write;
+  it is now left out at once
+
 ## [0.17.0] - 2026-09-25
 
 A record read from a list view stays that record wherever it moves, by
