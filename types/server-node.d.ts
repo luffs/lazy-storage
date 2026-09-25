@@ -1,9 +1,9 @@
 // Type declarations for `lazy-storage/server/node` (needs the `ws` package)
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import type { Duplex } from 'node:stream';
-import type { CloseOptions, HandlerOptions } from './server-bun.js';
+import type { CloseOptions, HandlerOptions, SocketInfo, SocketStats } from './server-bun.js';
 
-export type { CloseOptions, HandlerOptions } from './server-bun.js';
+export type { CloseOptions, HandlerOptions, SocketInfo, SocketStats } from './server-bun.js';
 
 /** A Web Request for an incoming Node request, headers included; what `authenticate` receives */
 export function toRequest(req: IncomingMessage): Request;
@@ -16,6 +16,10 @@ export interface NodeHandlers {
   /** Refuse new sockets, close the open ones with code 1001, dispose the registry (flushing every store) */
   close(options?: CloseOptions): Promise<void>;
   readonly closing: boolean;
+  /** The open sockets, and how far behind each is */
+  sockets(): SocketInfo[];
+  /** The open sockets rolled up */
+  socketStats(): SocketStats;
   /** The underlying `ws` WebSocketServer */
   readonly wss: any;
 }
@@ -23,8 +27,6 @@ export interface NodeHandlers {
 export interface NodeHandlerOptions extends HandlerOptions {
   /** Close a socket that has sent nothing for this long (ms); default 120000, false keeps quiet sockets */
   idleTimeout?: number | false;
-  /** Close a socket whose unsent output passes this many bytes; default 16 MB, false lets it grow */
-  maxBuffered?: number | false;
 }
 
 export function createHandlers(options: NodeHandlerOptions): NodeHandlers;
@@ -40,6 +42,10 @@ export interface NodeServeOptions extends NodeHandlerOptions {
 export type NodeServer = Server & {
   /** Graceful shutdown (see NodeHandlers.close), then close the server */
   shutdown(options?: CloseOptions): Promise<void>;
+  /** See NodeHandlers.sockets */
+  sockets(): SocketInfo[];
+  /** See NodeHandlers.socketStats */
+  socketStats(): SocketStats;
 };
 
 /** An http server with the handlers mounted; listening has been started */

@@ -2,6 +2,32 @@
 
 All notable changes to lazy-storage are documented here. The format follows Keep a Changelog; versions follow Semantic Versioning.
 
+## [Unreleased]
+
+### Added
+
+- **How far behind each socket is.** Both adapters' servers (and
+  handlers) gain `sockets()`, each open socket's `user`, the `stores` it
+  has open, `buffered` (bytes queued for it and not yet sent), `idleMs`
+  and `openMs`, and `socketStats()`, the same rolled up: `sockets`,
+  `buffered`, `largest`, and `cutOff`, how many sockets were closed for
+  passing `maxBuffered`. Enough for a status endpoint that shows which
+  clients are falling behind
+
+### Fixed
+
+- **A Bun socket that stopped reading stayed open, and lost patches.**
+  Past its buffer limit Bun drops what it cannot queue, and keeps the
+  socket; the client noticed the gap only on a later patch. The Bun
+  adapter now takes `maxBuffered` (default 16 MB) as the Node one does and
+  closes such a socket with code 1013, checked on every send and, for a
+  store's broadcasts, which Bun fans out itself, once a second; the client
+  reconnects and catches up with a delta
+- **A Node socket cut off for falling behind lingered for 30 s.** It was
+  closed with code 1013, but a socket that stopped reading never answers
+  a close, and `ws` waits 30 s for it with the store session (and its
+  presence entry) still attached; it is now dropped after a second
+
 ## [0.17.1] - 2026-09-25
 
 Small fixes, and CI that holds the line: lazy-watch 7.0.2 stores

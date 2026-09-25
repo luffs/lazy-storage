@@ -5,7 +5,8 @@ import { brotliDecompressSync } from 'node:zlib';
 import { createStore, createStores, memoryStorage } from '../../src/server/index.js';
 import { serve } from '../../src/server/bun.js';
 import { createClient, createConnection, webSocketTransport } from '../../src/index.js';
-import { probeFrames } from '../frames.js';
+import { probeFrames, stalledSocket } from '../frames.js';
+import { randomBytes } from 'node:crypto';
 
 const INITIAL = { tasks: {} };
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -46,6 +47,38 @@ const attach = (connection, store, replicaId) => {
   return client;
 };
 const open = [];
+
+test('sockets() shows how far behind each socket is; one that stopped reading is cut off at maxBuffered, broadcasts included, and the rest stay', async () => {
+  const store = createStore({ initial: { blob: '' }, storage: memoryStorage() });
+  const lagServer = serve({ port: 0, stores: () => store, maxBuffered: 1024 * 1024, authenticate: req => ({ id: new URL(req.url).searchParams.get('token') }) });
+  const healthy = createConnection({ transport: webSocketTransport(`ws://localhost:${lagServer.port}/ws?token=ann`), reconnect: false, keepalive: false });
+  const a = createClient({ connection: healthy, store: 'main', initial: { blob: '' }, replicaId: 'a' });
+  a.connect();
+  await until(() => a.status === 'online', 'online');
+  const stalled = await stalledSocket(lagServer.port);
+  await until(() => lagServer.sockets().length === 2 && lagServer.sockets().every(s => s.stores.includes('main')), 'both on the store');
+  const ann = lagServer.sockets().find(s => s.user?.id === 'ann');
+  assert.deepEqual(ann.stores, ['main']);
+  assert.ok(ann.idleMs >= 0 && ann.openMs >= ann.idleMs);
+
+  // Patches reach the sockets as one topic publish, past the adapter's own
+  // send: the sweep is what finds the stalled socket
+  let sent = 0;
+  while (lagServer.socketStats().cutOff === 0 && sent < 400) {
+    store.patch({ blob: randomBytes(96 * 1024).toString('base64') });
+    sent++;
+    await sleep(10);
+  }
+  assert.equal(lagServer.socketStats().cutOff, 1, `cut off after ${sent} patches`);
+  await until(() => lagServer.sockets().length === 1, 'the stalled socket gone');
+  assert.equal(lagServer.sockets()[0].user.id, 'ann', 'the one that stopped reading was cut, not the healthy one');
+  const last = store.state.blob;
+  await until(() => a.state.blob === last, 'the healthy client got every patch');
+  assert.equal(a.status, 'online');
+  stalled.destroy();
+  healthy.close();
+  await lagServer.shutdown();
+});
 
 test('other requests fall through to the app, and a bad token is turned away: 401 for a plain request, a closed message and code 4401 for a socket', async () => {
   assert.equal(await (await fetch(`${http}/health`)).text(), 'ok');

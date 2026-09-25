@@ -18,7 +18,7 @@ import { createServer } from 'node:http';
 import { WebSocketServer } from 'ws';
 import { LazyWatch } from 'lazy-watch';
 import { createHub } from './hub.js';
-import { toJSON, closeUnauthorized, deflateOptions } from './wire.js';
+import { toJSON, closeUnauthorized, deflateOptions, TOO_FAR_BEHIND, rollUpSockets } from './wire.js';
 import { snapshotOptions, snapshotId, serveSnapshot } from './snapshot.js';
 
 /** A Web Request for an incoming Node request, headers included */
@@ -49,10 +49,14 @@ function refuse(socket, status, text) {
  *   whose unsent output passes this many bytes: a client that stopped
  *   reading would otherwise hold every patch in memory. It reconnects and
  *   catches up with a delta. false lets the buffer grow
- * @returns {{ upgrade: (req: import('node:http').IncomingMessage, socket: import('node:stream').Duplex, head: Buffer) => Promise<boolean>, request: (req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => Promise<boolean>, close: (options?: { reason?: string }) => Promise<void>, closing: boolean, wss: WebSocketServer }}
+ * @returns {{ upgrade: (req: import('node:http').IncomingMessage, socket: import('node:stream').Duplex, head: Buffer) => Promise<boolean>, request: (req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => Promise<boolean>, close: (options?: { reason?: string }) => Promise<void>, closing: boolean, sockets: () => Array<Object>, socketStats: () => Object, wss: WebSocketServer }}
  *   `upgrade` resolves to false when the URL is not ours (answer it
  *   yourself), true when it took the socket; `request` likewise for a
- *   plain request, which is ours when it is the snapshot route
+ *   plain request, which is ours when it is the snapshot route.
+ *   `sockets()` lists the open sockets, each `{ user, stores, buffered,
+ *   idleMs, openMs }` (bytes unsent, time since it last sent something,
+ *   time since it opened), and `socketStats()` rolls them up (see
+ *   rollUpSockets in wire.js)
  */
 export function createHandlers({
   stores,
@@ -91,8 +95,14 @@ export function createHandlers({
   const send = (ws, message) => {
     if (ws.readyState !== ws.OPEN) return;
     if (maxBuffered && ws.bufferedAmount > maxBuffered) {
-      // 1013, try again later: the client reconnects and its hello asks for what it missed
-      ws.close(1013, 'Too far behind');
+      // 1013, try again later: the client reconnects and its hello asks for
+      // what it missed. A socket that stopped reading never answers the
+      // close, which ws would wait out for 30 s with the session still
+      // attached: after a second it is dropped
+      cutOff++;
+      ws.close(...TOO_FAR_BEHIND);
+      const drop = setTimeout(() => ws.terminate(), 1000);
+      if (typeof drop.unref === 'function') drop.unref();
       return;
     }
     const json = toJSON(message);
@@ -100,7 +110,9 @@ export function createHandlers({
   };
   const hubs = new Map();
   const heard = new Map();   // socket -> when it last sent something, for idleTimeout
+  const opened = new Map();  // socket -> when it opened
   let closing = false;
+  let cutOff = 0;            // sockets closed for falling behind
   const sweeper = idleTimeout ? setInterval(() => {
     const now = Date.now();
     for (const [ws, at] of heard) if (now - at > idleTimeout) ws.terminate();
@@ -119,6 +131,7 @@ export function createHandlers({
     });
     hubs.set(ws, hub);
     heard.set(ws, Date.now());
+    opened.set(ws, Date.now());
     ws.on('message', raw => {
       heard.set(ws, Date.now());
       let msg;
@@ -140,6 +153,7 @@ export function createHandlers({
       hubs.get(ws)?.close();
       hubs.delete(ws);
       heard.delete(ws);
+      opened.delete(ws);
     });
     // A socket error (a reset, a message over maxPayload) is the client's
     // affair and is followed by 'close'; the handler only keeps it from
@@ -217,7 +231,19 @@ export function createHandlers({
     if (typeof stores.dispose === 'function') stores.dispose();
   }
 
-  return { upgrade, request, close, get closing() { return closing; }, wss };
+  /** The open sockets, how far behind each is (see the returns above) */
+  function sockets() {
+    const now = Date.now();
+    return [...hubs].map(([ws, hub]) => ({
+      user: hub.user,
+      stores: hub.stores,
+      buffered: ws.bufferedAmount,
+      idleMs: now - heard.get(ws),
+      openMs: now - opened.get(ws)
+    }));
+  }
+
+  return { upgrade, request, close, get closing() { return closing; }, sockets, socketStats: () => rollUpSockets(sockets(), cutOff), wss };
 }
 
 /**
@@ -245,6 +271,8 @@ export function serve({ port = 3200, host, request, ...options } = {}) {
   server.on('upgrade', (req, socket, head) => {
     handlers.upgrade(req, socket, head).then(ours => { if (!ours) refuse(socket, 404, 'Not found'); });
   });
+  server.sockets = handlers.sockets;
+  server.socketStats = handlers.socketStats;
   /** Graceful shutdown (see createHandlers' close), then close the server */
   server.shutdown = async closeOptions => {
     await handlers.close(closeOptions);

@@ -63,6 +63,25 @@ export function closeUnauthorized(ws) {
   ws.close(4401, 'Unauthorized');
 }
 
+/** The close code and reason for a socket cut off for falling behind: 1013, try again later */
+export const TOO_FAR_BEHIND = [1013, 'Too far behind'];
+
+/**
+ * The adapters' `socketStats()`: how many sockets are open, the bytes
+ * they hold unsent in total and at most, and how many were cut off for
+ * falling behind since the server started. `sockets` is their
+ * `sockets()` list
+ */
+export function rollUpSockets(sockets, cutOff) {
+  let buffered = 0;
+  let largest = 0;
+  for (const s of sockets) {
+    buffered += s.buffered;
+    if (s.buffered > largest) largest = s.buffered;
+  }
+  return { sockets: sockets.length, buffered, largest, cutOff };
+}
+
 /**
  * `{ ...message, store }`, keeping the payload's remembered JSON: the id
  * is spliced in as the first key instead of re-encoding everything. A

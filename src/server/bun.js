@@ -20,7 +20,7 @@
 // `shutdown()` that does this and then stops the server.
 import { LazyWatch } from 'lazy-watch';
 import { createHub } from './hub.js';
-import { toJSON, closeUnauthorized, deflateOptions } from './wire.js';
+import { toJSON, closeUnauthorized, deflateOptions, TOO_FAR_BEHIND, rollUpSockets } from './wire.js';
 import { snapshotOptions, snapshotId, serveSnapshot } from './snapshot.js';
 
 /**
@@ -62,12 +62,23 @@ import { snapshotOptions, snapshotId, serveSnapshot } from './snapshot.js';
  *   browser withholds cookies under '*'), an array of origins to echo and
  *   no other, or false for no CORS header at all. false turns the route
  *   off; every client then gets its snapshot inline
+ * @param {number|false} [options.maxBuffered=16777216] - close a socket
+ *   whose unsent output passes this many bytes, with code 1013: a client
+ *   that stopped reading would otherwise have Bun drop what it cannot
+ *   buffer (past its own `backpressureLimit`) and keep the socket open. It
+ *   reconnects and catches up with a delta. Checked on every send and,
+ *   for store broadcasts (a topic publish, which Bun fans out itself),
+ *   once a second. false leaves it to Bun, which drops past 16 MB
  * @param {(error: any) => void} [options.onError] - server faults: a
  *   store factory that threw, a bug while handling a message; default console
- * @returns {{ upgrade: (req: Request, server: any) => Promise<Response|undefined|null>, websocket: Object, close: (options?: { reason?: string }) => Promise<void>, get closing(): boolean }}
+ * @returns {{ upgrade: (req: Request, server: any) => Promise<Response|undefined|null>, websocket: Object, close: (options?: { reason?: string }) => Promise<void>, get closing(): boolean, sockets: () => Array<Object>, socketStats: () => Object }}
  *   `upgrade` resolves to null when the URL is not ours, undefined after a
  *   successful upgrade, or a Response (the snapshot route's, or an error);
- *   `close` is the graceful shutdown described above
+ *   `close` is the graceful shutdown described above. `sockets()` lists
+ *   the open sockets, each `{ user, stores, buffered, idleMs, openMs }`
+ *   (bytes unsent, time since it last sent something, time since it
+ *   opened), and `socketStats()` rolls them up (see rollUpSockets in
+ *   wire.js)
  */
 export function createHandlers({
   stores,
@@ -78,6 +89,7 @@ export function createHandlers({
   maxPayload = 4 * 1024 * 1024,
   perMessageDeflate = true,
   httpSnapshots = true,
+  maxBuffered = 16 * 1024 * 1024,
   onError = err => console.error('lazy-storage:', err)
 } = {}) {
   if (!stores) throw new TypeError('createHandlers requires stores (a registry or a resolver function)');
@@ -89,11 +101,25 @@ export function createHandlers({
   // Bun compresses a frame only when asked per send; every message is
   // encoded once (see wire.js) and sent compressed when it is large enough
   const send = (ws, message) => {
+    if (behind(ws)) return;
     const json = toJSON(message);
     ws.send(json, deflate !== null && json.length >= deflate.threshold);
   };
   const hubs = new Map();
+  const seen = new Map();   // socket -> { opened, heard }: when it opened, when it last sent something
   let closing = false;
+  let cutOff = 0;           // sockets closed for falling behind
+  /** Close a socket over maxBuffered; true when it was (1013: the client reconnects and asks for what it missed) */
+  const behind = ws => {
+    if (!maxBuffered || ws.getBufferedAmount() <= maxBuffered) return false;
+    cutOff++;
+    ws.close(...TOO_FAR_BEHIND);
+    return true;
+  };
+  // A store broadcast is one topic publish, fanned out by Bun past the
+  // send above, so every socket is also looked at once a second
+  const sweeper = maxBuffered ? setInterval(() => { for (const ws of hubs.keys()) behind(ws); }, 1000) : null;
+  if (typeof sweeper?.unref === 'function') sweeper.unref();
   let bunServer = null;   // captured at the first upgrade, for topic broadcasts
   const topic = id => `lz:${id}`;
   const shouldCompress = json => deflate !== null && json.length >= deflate.threshold;
@@ -127,6 +153,9 @@ export function createHandlers({
   const websocket = {
     maxPayloadLength: maxPayload,
     perMessageDeflate: deflate === null ? false : deflate.runtime,
+    // Bun drops what a socket cannot buffer past this; above maxBuffered,
+    // so the socket is closed (and the client catches up) before it would
+    ...(maxBuffered ? { backpressureLimit: maxBuffered * 2 } : {}),
     open(ws) {
       if (ws.data.unauthorized) return closeUnauthorized(ws);
       // Each socket subscribes per store; a broadcast goes out once as a topic
@@ -137,8 +166,11 @@ export function createHandlers({
         publish: (id, message) => { const json = toJSON(message); bunServer.publish(topic(id), json, shouldCompress(json)); }
       };
       hubs.set(ws, createHub(resolveStore, { send: message => send(ws, message), user: ws.data.user, authorizeId, authorize, channel, httpSnapshots: snapshotRoute, onError }));
+      seen.set(ws, { opened: Date.now(), heard: Date.now() });
     },
     message(ws, raw) {
+      const times = seen.get(ws);
+      if (times) times.heard = Date.now();
       let msg;
       try {
         msg = JSON.parse(typeof raw === 'string' ? raw : new TextDecoder().decode(raw));
@@ -157,6 +189,7 @@ export function createHandlers({
     close(ws) {
       hubs.get(ws)?.close();
       hubs.delete(ws);
+      seen.delete(ws);
     }
   };
 
@@ -168,6 +201,7 @@ export function createHandlers({
    */
   async function close({ reason = 'Server shutting down' } = {}) {
     closing = true;
+    clearInterval(sweeper);
     const sockets = [...hubs.keys()];
     const gone = Promise.all(sockets.map(ws => new Promise(resolve => {
       const hub = hubs.get(ws);
@@ -187,7 +221,19 @@ export function createHandlers({
     if (typeof stores.dispose === 'function') stores.dispose();
   }
 
-  return { upgrade, websocket, close, get closing() { return closing; } };
+  /** The open sockets, how far behind each is (see the returns above) */
+  function sockets() {
+    const now = Date.now();
+    const out = [];
+    for (const [ws, hub] of hubs) {
+      const times = seen.get(ws);
+      if (!times) continue;   // a handshake completed only to be refused
+      out.push({ user: hub.user, stores: hub.stores, buffered: ws.getBufferedAmount(), idleMs: now - times.heard, openMs: now - times.opened });
+    }
+    return out;
+  }
+
+  return { upgrade, websocket, close, get closing() { return closing; }, sockets, socketStats: () => rollUpSockets(sockets(), cutOff) };
 }
 
 /**
@@ -212,6 +258,8 @@ export function serve({ port = 3200, fetch: fetchHandler, ...options } = {}) {
     },
     websocket: handlers.websocket
   });
+  server.sockets = handlers.sockets;
+  server.socketStats = handlers.socketStats;
   /** Graceful shutdown (see createHandlers' close), then stop the server */
   server.shutdown = async options => {
     await handlers.close(options);

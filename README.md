@@ -843,6 +843,18 @@ A public server needs a few ceilings, all on by default:
   grows with the listeners, so a big write to a big audience is bandwidth
   the uplink has to carry; splitting a large value into records, so a
   patch carries only what changed, is what keeps it small.
+- **Slow sockets.** A patch to a store is queued for every socket on it,
+  and a client that stops reading (a phone gone underground, a stalled
+  tab) holds everything queued for it. `maxBuffered` on either adapter
+  (default 16 MB) closes a socket whose unsent output passes it, with
+  code 1013; the client reconnects and its hello catches up with a delta,
+  so nothing is lost. A socket that never answers the close is dropped a
+  second later. On Bun the check runs on every send and, since a store's
+  patch goes out as one topic publish Bun fans out itself, once a second
+  over every socket; `false` turns it off, leaving Bun to drop what it
+  cannot buffer (the client then notices the gap and catches up the same
+  way, on its next patch). `sockets()` and `socketStats()` show how far
+  behind the sockets are (see below).
 - **Snapshots over HTTP.** A hello answered with a large snapshot costs
   the wire a compression of the whole state per socket (about 5 ms per
   megabyte) and a copy of it into that socket's send buffer. Both adapters
@@ -909,7 +921,23 @@ message }`), and sessions opening and closing, for logs, audits, and
 metrics; `store.stats()` counts version, sessions, replicas, rows,
 tombstones, and the delta log, and `stores.stats()` on a registry rolls
 those up across the live stores, with how many are live and how many
-idle, for a health endpoint. Server faults that are nobody's request
+idle, for a health endpoint. Both adapters list their open sockets:
+`server.sockets()` gives each one's `user`, the `stores` it has open,
+`buffered` (bytes queued for it and not yet sent: how far behind it is),
+`idleMs` (since it last sent anything; a client pings every 30 s) and
+`openMs`, and `server.socketStats()` rolls them up (`sockets`,
+`buffered`, `largest`, and `cutOff`, the sockets closed for passing
+`maxBuffered`):
+
+```js
+app.get('/status', (req, res) => res.json({
+  stores: stores.stats(),
+  sockets: server.socketStats(),
+  lagging: server.sockets().filter(s => s.buffered > 64 * 1024)
+}));
+```
+
+Server faults that are nobody's request
 (a store factory that throws, an observer that throws, a bug while
 handling a message) go to an `onError` option on `createHandlers`,
 `createHub`, and `createStore`, which defaults to the console.
@@ -960,12 +988,11 @@ for (const signal of ['SIGTERM', 'SIGINT']) {
 
 The server runs on Node too, through the `ws` package (an optional peer
 dependency: install it yourself). `lazy-storage/server/node` has the same
-`serve` and `createHandlers`, with the same hooks, limits, and graceful
-`close`, plus two ceilings Bun keeps on its own: `idleTimeout` (default
-120 s) closes a socket that has sent nothing for that long (a client
-pings every 30 s), and `maxBuffered` (default 16 MB) closes one whose
-unsent output grows past it, a client that stopped reading, which then
-reconnects and catches up with a delta; `authenticate` receives a Web `Request` built from the incoming
+`serve` and `createHandlers`, with the same hooks, limits (`maxBuffered`
+included, see [Limits](#limits-memory-and-observability)), socket listing,
+and graceful `close`, plus `idleTimeout` (default 120 s), a ceiling Bun
+keeps on its own: it closes a socket that has sent nothing for that long
+(a client pings every 30 s); `authenticate` receives a Web `Request` built from the incoming
 Node request, so one function serves both runtimes. Storage comes from
 `lazy-storage/server/sqlite-node`, the same adapter on `node:sqlite`.
 
@@ -1045,14 +1072,14 @@ runs on the synced state and shows in the array view like any other change.
 **SQLite** (`lazy-storage/server/sqlite`, Bun): `sqliteStorage(file, { wal, lease: { ttl } | false })` →
 `store(id)` (whose load takes the store's lease, `close()` gives it up, and `replace(doc)` takes a document), `ids()`, `remove(id)`, `backup(file)`, `db`, `close()` (gives up every lease). `memoryStorage()` and `jsonFileStorage(file)` take a document with `replace(doc)` too.
 
-**Bun adapter** (`lazy-storage/server/bun`): `serve({ stores, port, path, fetch, authenticate, authorizeId, authorize, maxPayload, perMessageDeflate, httpSnapshots, onError })` —
+**Bun adapter** (`lazy-storage/server/bun`): `serve({ stores, port, path, fetch, authenticate, authorizeId, authorize, maxPayload, perMessageDeflate, httpSnapshots, maxBuffered, onError })` —
 `stores` is a registry or `id => store|null` (for one store, `() => store`); the
-hub listens at `path` and the snapshot route under it; the returned server gains `shutdown({ reason })`.
-`createHandlers({ stores, path, authenticate, authorizeId, authorize, maxPayload, perMessageDeflate, httpSnapshots, onError })` →
-`{ upgrade(req, server), websocket, close({ reason }), closing }` for mounting inside your own `Bun.serve`.
+hub listens at `path` and the snapshot route under it; the returned server gains `shutdown({ reason })`, `sockets()` and `socketStats()`.
+`createHandlers({ stores, path, authenticate, authorizeId, authorize, maxPayload, perMessageDeflate, httpSnapshots, maxBuffered, onError })` →
+`{ upgrade(req, server), websocket, close({ reason }), closing, sockets(), socketStats() }` for mounting inside your own `Bun.serve`.
 
 **Node adapter** (`lazy-storage/server/node`, needs `ws`): `serve({ stores, port, host, request, path, authenticate, authorizeId, authorize, maxPayload, perMessageDeflate, httpSnapshots, idleTimeout, maxBuffered, onError })` →
-an `http.Server` with `shutdown({ reason })`; `createHandlers(options)` → `{ upgrade(req, socket, head), request(req, res), close({ reason }), closing, wss }`;
+an `http.Server` with `shutdown({ reason })`, `sockets()` and `socketStats()`; `createHandlers(options)` → `{ upgrade(req, socket, head), request(req, res), close({ reason }), closing, sockets(), socketStats(), wss }`;
 `toRequest(req)` — the Web `Request` `authenticate` sees. **node:sqlite** (`lazy-storage/server/sqlite-node`): `sqliteStorage(file, { wal })`, as the Bun one.
 
 **Types**: declarations ship with the package for every entry (`types/`);

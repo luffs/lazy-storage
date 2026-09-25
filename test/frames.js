@@ -92,3 +92,25 @@ export function probeFrames(port, path, messages, { gap = 100, settle = 300, aft
     });
   });
 }
+
+/**
+ * A socket that opens a store and then stops reading, the way a client on
+ * a dead connection does: a raw WebSocket handshake, one masked hello
+ * frame, and no reads after the handshake's answer. Resolves once the
+ * hello is sent; `destroy()` ends it
+ */
+export async function stalledSocket(port, { path = '/ws', store = 'main', replicaId = 'stalled' } = {}) {
+  const net = await import('node:net');
+  const socket = net.connect(port, '127.0.0.1');
+  await new Promise(resolve => socket.once('connect', resolve));
+  socket.write(`GET ${path} HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n`);
+  await new Promise(resolve => socket.once('data', resolve));   // the 101
+  socket.pause();
+  const payload = Buffer.from(JSON.stringify({ t: 'hello', store, replicaId, ops: [] }));
+  const mask = Buffer.from([1, 2, 3, 4]);
+  const header = payload.length < 126
+    ? Buffer.from([0x81, 0x80 | payload.length])
+    : Buffer.from([0x81, 0x80 | 126, payload.length >> 8, payload.length & 0xff]);
+  socket.write(Buffer.concat([header, mask, payload.map((b, i) => b ^ mask[i % 4])]));
+  return { destroy: () => socket.destroy() };
+}

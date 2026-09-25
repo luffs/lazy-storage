@@ -225,8 +225,11 @@ const handlers = createHandlers({
 createHandlers({ stores, authorizeId: (user: unknown, storeId: string, store: object) => true });
 async function bun() {
   await handlers.close({ reason: 'deploy' });
-  const server = serve({ stores, port: 0 });
+  const server = serve({ stores, port: 0, maxBuffered: 8 * 1024 * 1024 });
   const port: number = server.port;
+  const lagging: string[] = server.sockets().filter(s => s.buffered > 64 * 1024 && s.idleMs < 60_000).flatMap(s => s.stores);
+  const { sockets: open, buffered, largest, cutOff } = handlers.socketStats();
+  void [lagging, open + buffered + largest + cutOff];
   await server.shutdown();
   return port;
 }
@@ -242,8 +245,11 @@ import { sqliteStorage as sqliteStorageNode } from 'lazy-storage/server/sqlite-n
 import { createServer } from 'node:http';
 
 async function node() {
-  const nodeServer = serveNode({ stores, port: 0, authenticate: req => new URL(req.url).searchParams.get('token'), request: (req, res) => res.end('app') });
+  const nodeServer = serveNode({ stores, port: 0, maxBuffered: false, authenticate: req => new URL(req.url).searchParams.get('token'), request: (req, res) => res.end('app') });
   const port = (nodeServer.address() as { port: number }).port;
+  const openMs: number[] = nodeServer.sockets().map(s => s.openMs);
+  const cut: number = nodeServer.socketStats().cutOff;
+  void [openMs, cut];
   await nodeServer.shutdown({ reason: 'deploy' });
   const lazy = createNodeHandlers({ stores, path: '/sync', maxPayload: 1024 });
   const http = createServer((req, res) => { const r: Request = toRequest(req); res.end(r.url); });

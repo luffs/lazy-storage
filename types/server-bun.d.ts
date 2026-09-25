@@ -31,8 +31,40 @@ export interface HandlerOptions {
    * upgrade. false turns it off. Default true
    */
   httpSnapshots?: boolean | { threshold?: number; origins?: '*' | false | string[] };
+  /**
+   * Close a socket whose unsent output passes this many bytes, with code
+   * 1013; the client reconnects and catches up with a delta. Default 16 MB.
+   * false lets it grow (on Bun, until Bun's own limit, past which it drops
+   * messages)
+   */
+  maxBuffered?: number | false;
   /** Server faults; default console */
   onError?(error: unknown): void;
+}
+
+/** An open socket, as `sockets()` lists it */
+export interface SocketInfo {
+  /** What `authenticate` returned for it */
+  user: unknown;
+  /** Store ids it has a live session on */
+  stores: string[];
+  /** Bytes queued for it and not yet sent: how far behind it is */
+  buffered: number;
+  /** Milliseconds since it last sent anything (a client pings every 30 s) */
+  idleMs: number;
+  /** Milliseconds since it opened */
+  openMs: number;
+}
+
+/** The open sockets rolled up, for a status endpoint */
+export interface SocketStats {
+  sockets: number;
+  /** Bytes queued and unsent, over every socket */
+  buffered: number;
+  /** The most any one socket has queued */
+  largest: number;
+  /** Sockets closed for passing `maxBuffered` since the server started */
+  cutOff: number;
 }
 
 export interface CloseOptions {
@@ -48,6 +80,10 @@ export interface Handlers {
   /** Refuse new sockets, close the open ones with code 1001, dispose the registry (flushing every store) */
   close(options?: CloseOptions): Promise<void>;
   readonly closing: boolean;
+  /** The open sockets, and how far behind each is */
+  sockets(): SocketInfo[];
+  /** The open sockets rolled up */
+  socketStats(): SocketStats;
 }
 
 export function createHandlers(options: HandlerOptions): Handlers;
@@ -66,6 +102,10 @@ export interface BunServer {
   stop(closeActiveConnections?: boolean): void;
   /** Graceful shutdown (see Handlers.close), then stop the server */
   shutdown(options?: CloseOptions): Promise<void>;
+  /** See Handlers.sockets */
+  sockets(): SocketInfo[];
+  /** See Handlers.socketStats */
+  socketStats(): SocketStats;
   [key: string]: any;
 }
 

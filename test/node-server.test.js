@@ -5,7 +5,8 @@ import { once } from 'node:events';
 import { createStore, createStores, memoryStorage } from '../src/server/index.js';
 import { serve, createHandlers } from '../src/server/node.js';
 import { createClient, createConnection, webSocketTransport } from '../src/index.js';
-import { probeFrames } from './frames.js';
+import { probeFrames, stalledSocket } from './frames.js';
+import { randomBytes } from 'node:crypto';
 
 const INITIAL = { tasks: {} };
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -297,5 +298,42 @@ test('idleTimeout closes a socket that has gone quiet; a client that pings stays
   await sleep(300);
   assert.equal(a.status, 'online', 'pings count as being heard');
   chatty.close();
+  await server.shutdown();
+});
+
+test('sockets() shows how far behind each socket is; one that stopped reading is cut off at maxBuffered, and the rest stay', async () => {
+  const store = createStore({ initial: { blob: '' }, storage: memoryStorage() });
+  const server = serve({ stores: () => store, port: 0, maxBuffered: 1024 * 1024, authenticate: req => ({ id: new URL(req.url).searchParams.get('token') }) });
+  const port = await listening(server);
+  const healthy = createConnection({ transport: webSocketTransport(`ws://localhost:${port}/ws?token=ann`), reconnect: false, keepalive: false });
+  const a = createClient({ connection: healthy, store: 'main', initial: { blob: '' }, replicaId: 'a' });
+  a.connect();
+  await until(() => a.status === 'online', 'online');
+  const stalled = await stalledSocket(port);
+  await until(() => server.sockets().length === 2 && server.sockets().every(s => s.stores.includes('main')), 'both on the store');
+  const ann = server.sockets().find(s => s.user?.id === 'ann');
+  assert.deepEqual(ann.stores, ['main']);
+  assert.equal(ann.buffered, 0);
+  assert.ok(ann.idleMs >= 0 && ann.openMs >= ann.idleMs, 'times since heard and since opened');
+
+  // A patch at a time, as a live store sends them: a healthy socket drains
+  // between them, the stalled one only piles up
+  let sent = 0;
+  while (server.socketStats().cutOff === 0 && sent < 400) {
+    store.patch({ blob: randomBytes(96 * 1024).toString('base64') });   // random: no compression shrinks it
+    sent++;
+    await sleep(10);
+  }
+  assert.equal(server.socketStats().cutOff, 1, `cut off after ${sent} patches`);
+  await until(() => server.sockets().length === 1, 'the stalled socket gone');
+  assert.equal(server.sockets()[0].user.id, 'ann', 'the one that stopped reading was cut, not the healthy one');
+  assert.equal(a.status, 'online');
+  const last = store.state.blob;
+  await until(() => a.state.blob === last, 'the healthy client got every patch');
+  const stats = server.socketStats();
+  assert.equal(stats.sockets, 1);
+  assert.ok(stats.largest < 1024 * 1024, 'nobody left far behind');
+  stalled.destroy();
+  healthy.close();
   await server.shutdown();
 });
