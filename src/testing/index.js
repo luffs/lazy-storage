@@ -61,10 +61,13 @@ export function createNetwork(target) {
     /**
      * A link for one client: a transport factory plus offline/online control.
      * `user` is attached to the sessions this link opens (as an authenticated
-     * transport would); eviction closes the link's connection.
+     * transport would); eviction closes the link's connection, with the
+     * close code and reason the server gives `onEvict`, if any. `stall()`
+     * makes the connections opened from then on hang, neither opening nor
+     * closing (a server that does not answer), until `goOnline()`
      */
     link({ user } = {}) {
-      const link = { online: true, current: null };
+      const link = { online: true, stalled: false, current: null };
       link.factory = () => {
         let session = null;
         const t = { onopen: null, onmessage: null, onclose: null, open: false };
@@ -73,14 +76,28 @@ export function createNetwork(target) {
           const copy = structuredClone(message);
           queue.push(() => { if (t.open) session.receive(copy); });
         };
-        t.close = () => {
+        // Closed by the client (no code), or by the server with one
+        const shut = (code, reason) => {
           if (!t.open) return;
           t.open = false;
           session.close();
           if (link.current === t) link.current = null;
+          queue.push(() => t.onclose?.(code === undefined ? undefined : { code, reason }));
+        };
+        // Closed before it opened: it never does, and says it closed, as a
+        // WebSocket closed while connecting does. `settled`: it opened, or
+        // failed to, or was abandoned so
+        let settled = false;
+        t.close = () => {
+          if (t.open) return shut();
+          if (settled) return;
+          settled = true;
           queue.push(() => t.onclose?.());
         };
+        if (link.stalled) return t;
         queue.push(() => {
+          if (settled) return;
+          settled = true;
           if (!link.online) { t.onclose?.(); return; }
           // Open before the session exists: a real socket can send from the
           // moment the server's open handler runs
@@ -95,7 +112,7 @@ export function createNetwork(target) {
               queue.push(() => t.onmessage?.(copy));
             },
             user,
-            onEvict: () => t.close()
+            onEvict: (code, reason) => shut(code, reason)
           });
           link.current = t;
           t.onopen?.();
@@ -103,7 +120,8 @@ export function createNetwork(target) {
         return t;
       };
       link.goOffline = () => { link.online = false; link.current?.close(); };
-      link.goOnline = () => { link.online = true; };
+      link.goOnline = () => { link.online = true; link.stalled = false; };
+      link.stall = () => { link.stalled = true; };
       return link;
     },
 

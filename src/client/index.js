@@ -52,7 +52,7 @@ const REMOTE = { origin: 'remote' };
 const SNAPSHOT = { origin: 'remote', snapshot: true };
 const RESTORE = { origin: 'restore' };
 const HISTORY = new Set(['undo', 'redo']);
-const EVENTS = ['status', 'error', 'sync', 'closed', 'presence', 'peers', 'history', 'conflict', 'rejected', 'reset'];
+const EVENTS = ['status', 'error', 'sync', 'closed', 'presence', 'peers', 'history', 'conflict', 'rejected', 'reset', 'relay'];
 // A hello carries at most this many ops, so it stays under any payload
 // limit after a long offline spell; the rest go as ops once the answer
 // lands, the way edits made during the hello do
@@ -212,6 +212,7 @@ function build({
   let throttled = false;  // refused for the rate: nothing goes live until that hello, which resends in order
   let helloCut = false;   // the last hello left part of the outbox out: the next hello carries it
   let gapped = false;     // a patch skipped a version: a catch-up hello is out, and patches wait for it
+  let relayed = false;    // the answers come from a relay's copy while the server is away (see 'relay' below)
 
   const persistence = createPersistence({
     storage,
@@ -326,6 +327,18 @@ function build({
     peers = [...peerMap.values()];
     emit('peers', peers);
     if (users) setPresence(usersOf());
+  }
+
+  /**
+   * Whether this store is answered by a relay on its own (lazy-storage/relay,
+   * while the server is away) rather than by the server: the relay says so
+   * after each answer it makes, and an answer from the server itself (it
+   * carries the server's epoch) or a socket gone says otherwise
+   */
+  function setRelayed(next) {
+    if (relayed === next) return;
+    relayed = next;
+    emit('relay', relayed);
   }
 
   /** Offline, or the store ended for us: nobody is there to see */
@@ -501,8 +514,11 @@ function build({
     // What the hello left out goes in the next hello, not as live ops: a
     // backlog sent live would run into the rate limit, and the store stays
     // 'connecting' until it has everything (live sends wait on `synced`,
-    // so nothing overtakes the backlog)
-    const more = helloCut && outbox.length > 0;
+    // so nothing overtakes the backlog). Only a server's answer, under its
+    // epoch, acknowledges the hello's ops: a relay's (epoch null) leaves
+    // them pending, and another hello would carry the same ops again and
+    // be answered alike, for ever, so the rest go out live instead
+    const more = helloCut && outbox.length > 0 && typeof msg.epoch === 'string';
     for (const op of outbox) {
       LazyWatch.patch(state, op.diff, REMOTE);
       if (!more) sendOp(op);
@@ -511,6 +527,7 @@ function build({
     if (more) {
       hello();
       emit('sync');
+      setRelayed(false);
       if (reset) emit('reset', reset);
       for (const conflict of conflicts) emit('conflict', conflict);
       return;
@@ -518,6 +535,8 @@ function build({
     synced = true;
     refreshStatus();
     emit('sync');
+    // The server's own answer: whatever relay passed it on, it answers on its own no longer
+    if (typeof msg.epoch === 'string') setRelayed(false);
     if (reset) emit('reset', reset);
     for (const conflict of conflicts) emit('conflict', conflict);
   }
@@ -661,6 +680,12 @@ function build({
         emit(t, payload);
         return;
       }
+      case 'relay':
+        // A relay says whether it answers this store from its own copy
+        // ('local', the server away) or not; a server never sends it, and a
+        // client that predates it ignores it as it does any unknown message
+        setRelayed(msg.status === 'local');
+        return;
       case 'presence':
         applyPresence(msg);
         return;
@@ -696,6 +721,7 @@ function build({
         if (ownsConnection) connection.close();
         clearPresence();
         refreshStatus();
+        setRelayed(false);
         emit('closed', ended);
         return;
       }
@@ -785,6 +811,7 @@ function build({
       held = null;
       clearPresence();
       refreshStatus();
+      setRelayed(false);
     },
     /** The server turned the whole socket away (not signed in): final for this store too, until connect(); onClose came first */
     onClosed(info) {
@@ -877,6 +904,12 @@ function build({
     },
     /** The store version this client has seen everything up to */
     get version() { return known.v; },
+    /**
+     * True while a relay answers this store from its own copy, the server
+     * being away (lazy-storage/relay): edits reach the others behind the
+     * relay but stay pending until the server has them
+     */
+    get relayed() { return relayed; },
     /** Distinct users with a live session on this store (empty while offline) */
     get presence() { return presence; },
     /** Every live session on this store, `{ replicaId, user, key, data }`, this client's own included (by `replicaId`); `key` is what presence groups users by */
@@ -909,7 +942,7 @@ function build({
      * 'peers' (every session with what it shares), 'closed' ({ code,
      * message }: the server ended this store, or the socket, for us),
      * 'history' ({ canUndo, canRedo }: after a local batch, an undo, a
-     * redo, or clearHistory)
+     * redo, or clearHistory), 'relay' (boolean: `relayed` changed)
      */
     on(event, fn) {
       if (!listeners[event]) throw new TypeError(`Unknown event "${event}"`);

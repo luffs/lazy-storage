@@ -9,12 +9,13 @@ lazy-storage is a self-hosted realtime state store with offline sync, built on [
 ## Development Commands
 
 ```bash
-npm test              # node --test "test/*.test.js": unit and integration tests, plus fixed-seed runs of both fuzzers
+npm test              # node --test "test/*.test.js": unit and integration tests, plus fixed-seed runs of the three fuzzers
 npm run test:bun      # the Bun-only tests in test/bun (bun:sqlite adapters, the Bun server)
 npm run test:types    # tsc over test/types against the declarations in types/
 npm run test:coverage # the Node suite under c8; fails below 96% lines/statements, 88% branches, 92% functions
 npm run fuzz          # a longer convergence campaign: node test/fuzz/run.js [--mode convergence|hostile] [--seed N] [--runs N] [--steps N] [--clients N]
 npm run fuzz:hostile  # the same with an attacker beside honest clients
+node test/fuzz/run.js --mode relay   # displays behind a relay (src/relay) through outages, relay restarts and restores
 npm run bench         # server benchmark (bench/run.js); medians of 5 rounds
 npm run bench:client  # client benchmark (bench/client.js) in happy-dom: React/Vue renders, list views, persistence
 npm run bench:check   # both benchmarks with --check: every case under its ceiling, the client counts within their bounds
@@ -28,6 +29,7 @@ Run one test file with `node --test test/facade.test.js`, one test with `--test-
 - `src/client/` — `index.js` (`createClient`: the mirror, ops, outbox and `supersede`, undo, events), `connection.js` (one socket for many clients: reconnect, backoff), `facade.js` (list paths as plain arrays over keyed maps with positions), `list.js` (`db.list(path)`), `persistence.js` + `storage.js` (document adapters: `localStorageOutbox` etc.), `indexeddb.js` and `sqlite-bun.js` (row adapters), `shared.js` + `port.js` (one socket per browser: a leader tab), `transport.js`
 - `src/server/` — `store.js` (`createStore`: the authority; merges ops, holds state, serves sessions, presence, retention, rate limits), `registry.js` (`createStores`: many stores, idle sweep), `hub.js` (many stores over one socket), `bun.js` / `node.js` (WebSocket servers), `snapshot.js` (the HTTP snapshot route), `storage.js` (memory and JSON-file adapters), `sqlite-shared.js` + `sqlite-bun.js` / `sqlite-node.js` (row-per-leaf SQLite, leases, migrations, backups), `wire.js` (encode once, tag per store)
 - `src/react/`, `src/vue/` — the framework bindings (`useClient`, `useClientSelector`; a shared read-only Vue mirror)
+- `src/relay/` — a relay on the LAN (`lazy-storage/relay`): `index.js` (`createRelay`: clients' sockets passed through to the server under their own credentials while it answers, a copy of each store built from what passes, and answers from the copy while the server is away, acknowledging nothing), `storage.js` (`memoryCopies`, `fileCopies`), `bun.js` (`createRelayHandlers`, `upstreamSocket`: `lazy-storage/relay/bun`)
 - `src/testing/` — `createNetwork` (in-memory network: clients linked to a store without sockets) and `fakeTime`, published as `lazy-storage/testing`
 - `src/index.js` — the client entry; it re-exports `LazyWatch` so apps drive `db.state` with the same copy lazy-storage uses (two copies do not recognize each other's proxies)
 - `types/` — hand-written declarations, one file per export path; `test/types/` checks them

@@ -9,5 +9,5 @@
     "skipLibCheck": false,
     "types": ["node"]
   },
-  "files": ["check.ts"]
+  "files": ["check.ts", "relay.ts"]
 }

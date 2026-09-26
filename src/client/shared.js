@@ -243,7 +243,7 @@ export function sharedConnection({
 
   function lead() {
     if (disposed || relay) return;
-    relay = createRelay({
+    relay = createReplicaRelay({
       tabId, transport, storage, reconnect, keepalive, wake, infos, onError, linger,
       send: (tab, message) => {
         if (tab === tabId) down(structuredClone(message));
@@ -388,7 +388,7 @@ function persistIdentity(adapter, client) {
  * its behalf: a hidden client per store on the real connection, and per
  * follower and store a session that is answered like a server would.
  */
-function createRelay({ tabId, transport, storage, reconnect, keepalive, wake, infos, linger, send, onStatus, onPending, onError }) {
+function createReplicaRelay({ tabId, transport, storage, reconnect, keepalive, wake, infos, linger, send, onStatus, onPending, onError }) {
   const socket = createConnection({ transport, reconnect, keepalive, wake });
   const entries = new Map();   // store -> { client, registers, sessions: Map<tab, session>, queue, stops, timer }
   const clock = createClock(`relay-${tabId}`);
@@ -439,6 +439,8 @@ function createRelay({ tabId, transport, storage, reconnect, keepalive, wake, in
         client.on('rejected', rejected => all({ t: 'rejected', ...rejected })),
         // The store started over (a backup restored): only the replica can tell, by the epoch
         client.on('reset', reset => all({ t: 'reset', ...reset })),
+        // A relay on the way answers on its own (lazy-storage/relay), or no longer does: every tab's to know
+        client.on('relay', relayed => all({ t: 'relay', status: relayed ? 'local' : 'through' })),
         client.on('sync', () => onPending(store, client.pending))
       ];
       client.connect();
@@ -580,6 +582,7 @@ function createRelay({ tabId, transport, storage, reconnect, keepalive, wake, in
           durable(entry, () => {
             if (entry.sessions.get(tab) !== session) return;
             send(tab, { t: 'snapshot', store, state: LazyWatch.snapshot(client.wire), ts: clock.now(), seq: session.lastSeq, registers: entry.registers, v: client.version, epoch: null });
+            if (client.relayed) send(tab, { t: 'relay', store, status: 'local' });
             if (session.presence) send(tab, { t: 'presence', store, peers: client.peers });
           });
           return;

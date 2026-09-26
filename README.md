@@ -638,6 +638,149 @@ carries the browser's replica id, not the tab's. Where Web Locks or
 BroadcastChannel are missing, a tab is its own leader and this is an
 ordinary connection.
 
+## A relay on the LAN
+
+Clients that share a place (the screens in a shop, the tablets in a
+kitchen) should keep working together when the internet goes, and the
+server is on the internet. `lazy-storage/relay` is a process on their
+network that their sockets go through:
+
+- **While the server answers, it is a pipe.** Each client's socket is
+  dialled through to the server with that client's own credentials, and
+  every frame goes up and comes down as it came. The server sees each
+  client as itself (its session, its replica, its presence), judges every
+  op as that client's, and alone acknowledges anything; neither the
+  server nor the clients change. On the way past, the relay builds a copy
+  of every store from the snapshots, deltas and patches it passes on. So
+  that it sees them, it asks for a large snapshot inline rather than over
+  HTTP, and asks for a snapshot rather than a delta where its copy could
+  not use the delta.
+- **When the server has not answered for `grace`** (ten seconds by
+  default: a failed dial, a socket that dropped or went silent; a
+  server's deploy is shorter, and is waited out), or the host says so
+  with `relay.upstreamDown()`, the relay answers on its own. A failure
+  is one socket's word, so the relay asks every other socket it passes
+  through (a ping), and a server that answers any of them is there; a
+  client the server never answered counts for nothing, so one whose own
+  way to the server is broken does not send the rest local. A client's
+  hello is answered from the copy, its ops are merged into the copy
+  last-writer-wins as the server would, and each applied op goes to every
+  client on the store as a patch, so the clients on the network stay in
+  step. Nothing is acknowledged: every answer's `seq` is 0, there is no
+  `ack`, no refusal and no `lost`, so each op stays pending in its
+  author's outbox, persisted there, until the server has it; the relay
+  keeps no queue of anyone's ops. Presence is the clients on the relay,
+  shown as the server showed their users. `db.status` is `online`,
+  `db.relayed` is true (the `relay` event says when it changes), and
+  `db.pending` grows with the edits the server has not had.
+- **When the server answers again** (the relay dials it every
+  `probeEvery`, five seconds, with a client's credentials, or the host
+  says so with `relay.upstreamUp()`), the relay waits a random moment
+  (`jitter`, up to a second, so that many relays do not bring their
+  clients back in one instant) and closes its clients' sockets, and they
+  reconnect through it to the server, each outbox in its own hello, under
+  its own identity: what
+  the server refuses (an access rule, a read-only path) comes back to
+  that client as `rejected` and is reverted, what lost to a newer write
+  raises `conflict`, and every other client is sent a snapshot that
+  reverts whatever it saw of either.
+
+Versions and epochs make that last step exact. While nobody has edited a
+store offline, the relay's answers carry the server's own epoch and
+version, so the way back is a delta, not every client fetching every
+store at once. The first offline edit makes the copy the relay's own: its
+clients are told to say hello again (`closed` 'unavailable', which a
+client does by itself), and from then on the answers carry epoch `null`,
+which asks the server for a snapshot when it is back and raises no
+`reset` either way. A client that saw the server further along than the
+relay did (the relay restarted from copies it had written a moment
+before) is not rolled back: it keeps its state and is sent the offline
+edits alone. A client under an epoch the copy never held (a restore the
+relay missed) may be the newer of the two, so it is not answered and
+waits for the server; one under an epoch the copy moved on from missed a
+restore the relay saw, and hears the `reset` as the server would say it.
+
+What a relay cannot do:
+
+- **Judge an op as the server would.** An edit the server will refuse
+  shows on the network until the server is back and refuses it. The
+  merge's clocks are known from the patches seen since the last snapshot,
+  so an offline write may win where the server would keep a newer one;
+  the server decides again. `validate` lets the host refuse offline what
+  it can tell; a deletion of a top-level container is never applied
+  offline, since the relay does not know the server's skeleton.
+- **Acknowledge.** Offline edits live in their authors' storage until the
+  server has them: a client wiped during an outage loses the edits the
+  others already saw.
+- **Answer what the server never answered.** A store the relay has no
+  copy of, a credential the server never let in through it on that store
+  (`authorizeOffline` decides otherwise), or a replica id the server
+  never answered with that credential: the client waits, `connecting` on
+  its own cache with its edits pending, as it would with no relay. A
+  credential may have several replicas on a store (a device's windows,
+  each a client of its own): the 32 answered last are kept. A socket
+  whose hellos on a store named two replicas has neither recorded, since
+  the server answers one and refuses the other without saying which.
+- **Take a clock's word.** An offline op stamped more than `maxSkew`
+  ahead of the relay's reference time (the server's clock as last heard,
+  carried on by the time elapsed since, or the relay's own if that is
+  later) is not applied, and stays pending: one fast clock would
+  otherwise pull every client's along, and the server would refuse them
+  all. The relay stamps nothing of its own. It writes the server's clock
+  every minute, and a relay restarted in an outage carries it on from
+  there, not counting the time it was off: one off for longer than
+  `maxSkew`, on a machine whose clock is wrong at boot (no clock
+  battery, no network), holds its clients' offline edits back until the
+  server is back.
+- **Be one of two.** Two relays for one store's clients split them into
+  two islands that meet again only at the server.
+
+On Bun, `lazy-storage/relay/bun` mounts a relay as the server's adapter
+mounts a hub. `key(req)` is a fingerprint of the request's credential
+(the relay never reads credentials; they stay in your closure) and
+`upstream(req)` dials the server with that credential and the same path
+and query; `upstreamSocket(url, { headers })` does that on Bun's
+WebSocket, keeping frames as they came:
+
+```js
+import { createRelay, fileCopies } from 'lazy-storage/relay';
+import { createRelayHandlers, upstreamSocket } from 'lazy-storage/relay/bun';
+
+const CENTRAL = 'wss://central.example.com';
+const sha256 = text => new Bun.CryptoHasher('sha256').update(text).digest('hex');
+
+const relay = createRelay({ storage: fileCopies('/data/copies') });   // a relay restarted in an outage answers from these
+const handlers = createRelayHandlers({
+  relay,
+  path: '/sync',
+  maxPayload: 16 * 1024 * 1024,
+  key: req => sha256(req.headers.get('authorization') ?? ''),
+  upstream: req => upstreamSocket(CENTRAL + '/sync' + new URL(req.url).search, {
+    headers: { authorization: req.headers.get('authorization') ?? '', 'user-agent': req.headers.get('user-agent') ?? '' }
+  })
+});
+Bun.serve({
+  port: 36610,
+  fetch: async (req, server) => (await handlers.upgrade(req, server)) ?? new Response('Not found', { status: 404 }),
+  websocket: handlers.websocket
+});
+relay.on('mode', mode => console.log(`relay: ${mode}`));   // 'through' | 'local'
+// The hub's own link to the server, if it has one, can say what it knows:
+// link.on('down', () => relay.upstreamDown()); link.on('up', () => relay.upstreamUp());
+```
+
+The clients connect to the relay as they would to the server, with the
+same credentials (a process on the same machine as well, over 127.0.0.1,
+which the relay answers offline too once the server has let it in). A
+browser's shared connection works through a relay unchanged, and its tabs
+see `db.relayed` as its replica does. The core is transport-agnostic:
+`relay.accept({ send, close, key, upstream })` takes any socket, which is
+also how `createNetwork` runs one in a test (see [Testing](#testing)).
+`relay.copy(id)` shows what the relay holds of a store, `stats()` and
+`sockets()` how it is doing, and `fileCopies(dir)` keeps one JSON file
+per store and one for the credentials, each written whole through a
+rename, at most once a second (`saveDelay`).
+
 ## Authentication, presence, and eviction
 
 Two hooks on the Bun adapter decide who gets a session on which store:
@@ -1124,7 +1267,7 @@ runs on the synced state and shows in the array view like any other change.
 
 **Client** (`lazy-storage`)
 
-- `createClient({ store, connection | transport, initial, registers, lists, position, replicaId, storage, mirror, cache, cacheDelay, undo, undoLimit, reconnect, presence, now })` — `mirror: true` is a follower's defaults: `cache`, `undo` and `presence` off, each still settable; `db.restored` — started from the cached state; `db.version` — the store version this client has seen everything up to; `db.wire` — the synced state under a lists view
+- `createClient({ store, connection | transport, initial, registers, lists, position, replicaId, storage, mirror, cache, cacheDelay, undo, undoLimit, reconnect, presence, now })` — `mirror: true` is a follower's defaults: `cache`, `undo` and `presence` off, each still settable; `db.restored` — started from the cached state; `db.version` — the store version this client has seen everything up to; `db.wire` — the synced state under a lists view; `db.relayed` — true while a relay answers this store on its own, the server away (see [A relay on the LAN](#a-relay-on-the-lan))
 - `openClient(options)` → `Promise<db>` — the same, for a storage adapter whose `load()` returns a promise
 - `createConnection({ transport, reconnect, keepalive, wake })` → `connect()`, `close()`, `status` (`'offline' | 'connecting' | 'online'` — the socket's; a client says `online` only once its store is synced as well), `attached`, `closed` — why the server turned the socket away, or null — `fetch(path)` when the transport can — `on('status' | 'closed', fn)` — a socket shared by clients
 - `sharedConnection({ name, transport, storage, reconnect, keepalive, channel, locks, tabId, linger, sweepEvery, onError })` → the same, plus `leader`, `tabId`, `upstream` — the socket's status — `pending(store)` — the replica's unsent ops — `on('sync', fn)`, `follow(port, stores)` — a page on a MessagePort following the replica for those stores, ended by what it returns — `dispose()` — one socket and one replica per browser, the tabs electing a leader (see [One socket per browser](#one-socket-per-browser))
@@ -1138,7 +1281,7 @@ runs on the synced state and shows in the array view like any other change.
 - `db.connect()`, `db.disconnect()`, `db.status` (`'offline' | 'connecting' | 'online'` — `online` the moment a snapshot or delta is applied, with `db.state` already current; the batch carrying it to `watch` listeners follows on the microtask, and a snapshot equal to what the client had produces none, so "the store is current" is the status event, not the first `watch`), `db.pending`
 - `db.stats()` — `{ pending, oldestPendingMs, ackMs, remoteAgeMs }`: unacknowledged ops, how long the oldest has waited, the last acknowledgement's round trip, and how old the last patch from another replica was on arrival; `null` where nothing has happened yet. For a "still saving…" hint, or a status line. `remoteAgeMs` is staleness, not network latency: it includes any time the writer spent offline, on clocks the server keeps within `maxSkew` of each other; `ackMs` is the one for latency
 - `db.watch(listener)` — state changes; `meta?.origin === 'remote'` marks the server's
-- `db.on('status' | 'error' | 'sync' | 'presence' | 'peers' | 'closed' | 'history' | 'conflict' | 'rejected' | 'reset', fn)` — lifecycle events; `conflict` carries `{ seq, lost: [{ path, mine, theirs }] }` for an op whose leaves lost, `rejected` `{ seq, code, message, diff }` for one refused, `reset` `{ epoch, previous: { epoch, version, state } }` when the store's storage started over (see [What happened to my edit](#what-happened-to-my-edit)); a refused op is an error with a `code` (`forbidden`, `expired`, `invalid`, `too-large` drop the op; `rate-limited` keeps it and retries; `clock-skew` is handled without one), and so is a snapshot that could not be fetched (`snapshot-fetch`, after which the client asks for it inline); `history` carries `{ canUndo, canRedo }` after a local batch, an undo, a redo, or `clearHistory()`
+- `db.on('status' | 'error' | 'sync' | 'presence' | 'peers' | 'closed' | 'history' | 'conflict' | 'rejected' | 'reset' | 'relay', fn)` — lifecycle events; `relay` carries `db.relayed` when it changes; `conflict` carries `{ seq, lost: [{ path, mine, theirs }] }` for an op whose leaves lost, `rejected` `{ seq, code, message, diff }` for one refused, `reset` `{ epoch, previous: { epoch, version, state } }` when the store's storage started over (see [What happened to my edit](#what-happened-to-my-edit)); a refused op is an error with a `code` (`forbidden`, `expired`, `invalid`, `too-large` drop the op; `rate-limited` keeps it and retries; `clock-skew` is handled without one), and so is a snapshot that could not be fetched (`snapshot-fetch`, after which the client asks for it inline); `history` carries `{ canUndo, canRedo }` after a local batch, an undo, a redo, or `clearHistory()`
 - `db.undo()`, `db.redo()`, `db.canUndo`, `db.canRedo`, `db.checkpoint()`, `db.group(fn)`, `db.clearHistory()`
 - `webSocketTransport(url, { WebSocket, fetch })` — `fetch` fetches a large snapshot from the socket's server (the global fetch by default, on the route resolved against the socket URL with its query; your own to add headers; false to keep every snapshot on the socket); `memoryOutbox()`, `localStorageOutbox(key, { onError })` — document adapters (`onError` hears a write that failed, a full quota say, after which offline edits no longer survive a reload): `{ load(), save(outbox), saveState(cache) }`, the built-in ones also `clear()` — forget the store's outbox and cache
 - `indexedDBStorage(name, { onError })` → also `settled()`, `close()`, `destroy()` — a row adapter: `{ load(), commit({ puts, deletes, meta }), replace({ rows, meta }), saveOp(op, meta), removeOp(seq, meta), dropOps(seq, meta) }`, where a delete removes the path and everything under it, `saveOp` also rewrites an op a newer one pruned, `removeOp` takes out one a newer op emptied, and `meta` is `{ replicaId, seq, version, epoch }`
@@ -1149,7 +1292,7 @@ runs on the synced state and shows in the array view like any other change.
 
 **React** (`lazy-storage/react`): `useClient(db)` → `{ state, status, presence, pending, closed, canUndo, canRedo, restored }`, a new object per change, through `useSyncExternalStore`; `useClientSelector(db, select(state, db), isEqual?)` → what `select` picks, as plain data, re-rendering only when it changes (deep equality by default); `trackClient(db)` → the `{ subscribe, getSnapshot, version }` underneath, one per client.
 
-**Testing** (`lazy-storage/testing`): `createNetwork(store | { session })` → `client(options, { user })`, `link({ user })` → `{ factory, goOffline(), goOnline() }`, `settle()`, `pending` — clients and a store linked in memory, see [Testing](#testing); `fakeTime(start)` → a clock with `advance(ms)` and `set(ms)`.
+**Testing** (`lazy-storage/testing`): `createNetwork(store | { session })` → `client(options, { user })`, `link({ user })` → `{ factory, goOffline(), goOnline(), stall() }`, `settle()`, `pending` — clients and a store linked in memory, see [Testing](#testing); a `session` endpoint's `onEvict(code, reason)` closes the link's connection with that close code, and `stall()` makes the link's next connections hang, neither opening nor closing, until `goOnline()`; `fakeTime(start)` → a clock with `advance(ms)` and `set(ms)`.
 
 **Server** (`lazy-storage/server`)
 
@@ -1178,6 +1321,14 @@ hub listens at `path` and the snapshot route under it; the returned server gains
 **Node adapter** (`lazy-storage/server/node`, needs `ws`): `serve({ stores, port, host, request, path, authenticate, authorizeId, authorize, expiresAt, minSession, maxPayload, perMessageDeflate, httpSnapshots, idleTimeout, maxBuffered, onError })` →
 an `http.Server` with `shutdown({ reason })`, `sockets()`, `socketStats()`, `disconnect(filter)` and `revalidate(filter)`; `createHandlers(options)` → `{ upgrade(req, socket, head), request(req, res), close({ reason }), closing, sockets(), socketStats(), disconnect(filter), revalidate(filter), wss }`;
 `toRequest(req)` — the Web `Request` `authenticate` sees. **node:sqlite** (`lazy-storage/server/sqlite-node`): `sqliteStorage(file, { wal })`, as the Bun one.
+
+**Relay** (`lazy-storage/relay`, see [A relay on the LAN](#a-relay-on-the-lan))
+
+- `createRelay({ storage, grace, dialTimeout, probe, probeEvery, keepalive, jitter, maxSkew, maxLeaves, authorizeOffline, validate, saveDelay, forgetAfter, onError, now })` — `storage` is `memoryCopies()` (default) or `fileCopies(dir, { onError })`; `probe` an async `() => boolean`, or false to leave it to `upstreamUp()`; `authorizeOffline(key, storeId)` whether a credential is answered from a copy (default: the server answered it on that store); `validate(diff, { key, replicaId, storeId, state })` an offline op's last gate; `forgetAfter` (30 days) lets go of copies and credentials unused that long
+- `relay.accept({ send, close, key, upstream })` → `{ receive(message), close(), state }` — a client's socket: `send` and `close(code, reason)` reach the client, `key` is a fingerprint of its credential, `upstream` a transport factory dialling the server with it
+- `relay.mode` (`'through' | 'local'`), `relay.on('mode' | 'copy' | 'error', fn)`, `relay.copy(storeId)` → `{ state, v, epoch, live, diverged, local }` or null, `relay.upstreamUp()`, `relay.upstreamDown()` — the host's word on the server, `relay.stats()` → `{ mode, downSince, sockets: { dialing, through, local }, copies, live, diverged, credentials }`, `relay.sockets()` → `[{ key, state, stores, openMs }]`, `relay.flush()`, `relay.sweep()`, `relay.close()`
+
+**Bun relay** (`lazy-storage/relay/bun`): `createRelayHandlers({ relay, upstream, key, path, maxPayload, perMessageDeflate, maxBuffered, onError })` → `{ upgrade(req, server), websocket, close({ reason }), sockets() }` for your own `Bun.serve`; `upstreamSocket(url, { headers, WebSocket })` → a transport factory on a WebSocket with headers, frames kept as they came.
 
 **Types**: declarations ship with the package for every entry (`types/`);
 the Node entry's need `@types/node`. A client's state type comes from
@@ -1245,6 +1396,7 @@ primitives anywhere, of anything at a register path).
 | `error` | `seq?`, `code?`, `message`, `now?`, `ts?`, `retryAfter?` | With `seq`: that op was refused, for the reason in `code` (below). Without: the message itself was bad (not JSON, an unknown type, a hello without a replica id) |
 | `presence` | `peers`, or `left?`, `joined?`, `shared?` | With `peers`: every session as `{ replicaId, user, key, data }`, `key` being what presence groups users by and `data` what the session shares; sent right after the hello is answered. Otherwise a delta, applied in the order `left` (replica ids), `joined` (peers), `shared` (`{ replicaId, data }`), batched per `presence.every`. Only with the store's presence on, and never to a session whose hello opted out |
 | `closed` | `code`, `message` | Final for this store on this socket; the client goes offline for it and does not reconnect on its own. Without a `store`: final for the socket, which the server then closes with code 4401; the connection stops reconnecting and every client on it reports the reason |
+| `relay` | `status` | From a relay, never a server: `'local'` after each answer it makes from its own copy while the server is away, `'through'` (from a browser's shared connection) once its replica is answered by the server again. The client keeps it as `db.relayed`; a client that predates it ignores it, as it does any message it does not know |
 | `pong` | | |
 
 Across these: `ts` is the server's clock on `snapshot`, `delta`, and
@@ -1253,7 +1405,11 @@ Across these: `ts` is the server's clock on `snapshot`, `delta`, and
 can drop acknowledged outbox entries; `registers` are the server's
 register patterns, for the client to check against its own; `v` is the
 store version the message brings the client up to, and `epoch` the life
-of the storage it counts in.
+of the storage it counts in. An answer a relay makes from its own copy
+(a browser's shared connection, or a relay on the LAN once its copy holds
+offline edits) carries `epoch: null` and versions of the relay's own, and
+`seq` 0: it acknowledges nothing, and the next hello the server itself
+answers is answered with a snapshot.
 
 ### Refusal codes
 
@@ -1326,10 +1482,11 @@ write against a field write.
 ## Testing
 
 ```bash
-npm test              # unit and integration tests plus fixed-seed runs of both fuzzers (Node)
-npm run test:bun      # the Bun adapter and the bun:sqlite adapters (Bun; `bun test` runs the same)
+npm test              # unit and integration tests plus fixed-seed runs of the three fuzzers (Node)
+npm run test:bun      # the Bun adapters (the server's and the relay's) and the bun:sqlite adapters (Bun; `bun test` runs the same)
 npm run fuzz          # a longer randomized convergence campaign; a failure prints the seed
 npm run fuzz:hostile  # the same with an attacker beside honest clients
+node test/fuzz/run.js --mode relay   # displays behind a relay, through outages, relay restarts and crashes, and restores
 npm run test:coverage # the Node suite under c8, failing below 96% of lines and statements, 88% of branches, 92% of functions
 npm run bench:check   # both benchmarks, failing when a case is over its ceiling or a count over its bound
 ```
@@ -1349,14 +1506,24 @@ own writes land, no honest client hears an error or diverges, the
 skeleton stands, nothing was loaded that nobody may open, sessions do not
 leak, and at the end that the store on disk equals the store in memory.
 
+The relay fuzzer puts displays behind a relay and, between their edits,
+drops their links, takes the server away and back, backs a store up and
+restores it, and restarts the relay, cleanly or as a crash that loses
+what it had not written, while a device the server let in sends the
+relay anything. Whenever the server is up and everything has settled,
+every display equals the server with nothing pending, and the relay's
+copies follow the server and equal it; while the server is away, every
+display the relay answered with nothing pending equals the relay's copy.
+
 The in-memory network the suite runs on is published as
 `lazy-storage/testing`, for an app's own tests: `createNetwork(store)`
-(or a hub factory) links clients to a store without sockets, `net.client(
-options, { user })` gives a connected client with `client.link.goOffline()`
-and `goOnline()`, and `await net.settle()` delivers everything queued
-until the network is quiet, so a test reads "edit, settle, assert" and
-runs in milliseconds. `fakeTime()` is a wall clock to hand a store and
-its clients as `now`, for tests that decide who wrote later:
+(or a hub factory, or a relay's `accept`) links clients to a store
+without sockets, `net.client(options, { user })` gives a connected client
+with `client.link.goOffline()` and `goOnline()`, and `await net.settle()`
+delivers everything queued until the network is quiet, so a test reads
+"edit, settle, assert" and runs in milliseconds. `fakeTime()` is a wall
+clock to hand a store and its clients as `now`, for tests that decide
+who wrote later:
 
 ```js
 import { createStore } from 'lazy-storage/server';

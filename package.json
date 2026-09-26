@@ -51,6 +51,14 @@
     "./server/sqlite-node": {
       "types": "./types/server-sqlite-node.d.ts",
       "default": "./src/server/sqlite-node.js"
+    },
+    "./relay": {
+      "types": "./types/relay.d.ts",
+      "default": "./src/relay/index.js"
+    },
+    "./relay/bun": {
+      "types": "./types/relay-bun.d.ts",
+      "default": "./src/relay/bun.js"
     }
   },
   "files": [

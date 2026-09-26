@@ -7,20 +7,32 @@ export interface TestLink {
   factory: TransportFactory;
   /** Whether new connections succeed; false also closed the current one */
   online: boolean;
+  /** Whether new connections hang, neither opening nor closing (see stall) */
+  stalled: boolean;
   /** The transport currently open on this link, or null */
   current: Transport | null;
   goOffline(): void;
+  /** New connections succeed again (and no longer hang) */
   goOnline(): void;
+  /** New connections hang, neither opening nor closing, as a server that does not answer, until goOnline() */
+  stall(): void;
 }
 
 export interface TestClient<S extends object = any> extends Client<S> {
   link: TestLink;
 }
 
-/** What a network needs on the server side: a store, or anything with `session()` such as a hub factory */
-export type TestEndpoint<S extends object = any> =
-  | Store<S>
-  | { session(options: { send: (message: object) => void; user?: unknown; onEvict?: () => void }): Session };
+/**
+ * What a network needs on the server side: a store, or anything with
+ * `session()` such as a hub factory or a relay's accept. `onEvict` closes
+ * the link's connection, with a close code and reason if given
+ */
+export type TestEndpoint<S extends object = any> = Store<S> | TestSessions;
+
+/** An endpoint that opens a session per connection: a hub factory, or a relay's accept */
+export interface TestSessions {
+  session(options: { send: (message: object) => void; user?: any; onEvict: (code?: number, reason?: string) => void }): Session | { receive(message: any): void; close(): void };
+}
 
 export interface TestNetwork {
   /** Messages queued and not yet delivered */
@@ -33,7 +45,8 @@ export interface TestNetwork {
   client<S extends object = any>(options?: Partial<ClientOptionsBase<S>>, linkOptions?: { user?: unknown }): TestClient<S>;
 }
 
-export function createNetwork<S extends object = any>(target: TestEndpoint<S>): TestNetwork;
+export function createNetwork<S extends object = any>(target: Store<S>): TestNetwork;
+export function createNetwork(target: TestSessions): TestNetwork;
 
 /** A controllable wall clock: pass it as `now` to a store and its clients */
 export interface FakeTime {

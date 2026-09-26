@@ -356,6 +356,8 @@ export interface ClientEvents {
    * read just before the server's state replaced it
    */
   reset: Reset;
+  /** `relayed` changed: a relay answers on its own (true), or the server does again (false) */
+  relay: boolean;
 }
 
 export interface Reset {
@@ -402,6 +404,8 @@ export interface Client<S extends object = any> {
   stats(): ClientStats;
   /** The store version this client has seen everything up to */
   readonly version: number;
+  /** True while a relay (lazy-storage/relay) answers this store from its own copy, the server being away: edits reach the others behind the relay but stay pending until the server has them */
+  readonly relayed: boolean;
   /** Distinct users with a live session on this store (empty while offline) */
   readonly presence: unknown[];
   /** Every live session on this store, this client's own included (by `replicaId`), with what each shares */

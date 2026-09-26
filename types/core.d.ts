@@ -175,16 +175,22 @@ export interface LostOp {
   paths: string[][];
 }
 
+/**
+ * `epoch` is null in an answer a relay made from its own copy (lazy-storage/relay,
+ * or a browser's shared connection), where versions are the relay's own
+ */
 export type ServerMessage =
-  | { t: 'snapshot'; state: object; fetch?: undefined; ts: Timestamp; seq: number; registers: string[]; v: number; epoch: string; lost?: LostOp[] }
+  | { t: 'snapshot'; state: object; fetch?: undefined; ts: Timestamp; seq: number; registers: string[]; v: number; epoch: string | null; lost?: LostOp[] }
   /** A large snapshot for a client that said it can fetch: where to fetch it (the server's snapshot route) in place of the state */
   | { t: 'snapshot'; fetch: string; state?: undefined; ts: Timestamp; seq: number; registers: string[]; v: number; epoch: string; lost?: LostOp[] }
-  | { t: 'delta'; patches: Diff[]; ts: Timestamp; seq: number; registers: string[]; v: number; epoch: string; lost?: LostOp[] }
+  | { t: 'delta'; patches: Diff[]; ts: Timestamp; seq: number; registers: string[]; v: number; epoch: string | null; lost?: LostOp[] }
   | { t: 'patch'; diff: Diff; ts: Timestamp; v: number }
   | { t: 'ack'; seq: number; ts: Timestamp; correction: Diff | null; lost?: string[][] }
   | { t: 'presence'; peers: Peer[] }
   | { t: 'presence'; peers?: undefined; left?: string[]; joined?: Peer[]; shared?: PeerShare[] }
   | { t: 'closed'; code: ClosedCode; message: string }
+  /** From a relay: whether it answers this store from its own copy ('local', the server away) or passes the server's answers on ('through') */
+  | { t: 'relay'; status: 'local' | 'through' }
   | { t: 'error'; seq?: number; code?: ErrorCode; message: string; now?: number; ts?: Timestamp; retryAfter?: number }
   | { t: 'pong' };
 
