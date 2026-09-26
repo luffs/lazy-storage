@@ -2,7 +2,19 @@
 
 All notable changes to lazy-storage are documented here. The format follows Keep a Changelog; versions follow Semantic Versioning.
 
-## [Unreleased]
+## [0.20.0] - 2026-09-26
+
+Clients on one network can keep working together when the internet
+goes. `lazy-storage/relay` is a process on their LAN that their
+sockets go through: a pipe while the server answers, each client
+dialled through under its own credentials, and the answers from its
+own copies while the server is away, acknowledging nothing, so every
+edit reaches the server as its author's when it is back and is judged
+there. Opt-in: servers and clients that use no relay need no change,
+and a client that predates `db.relayed` ignores the relay's word. The
+wire protocol and stored data are unchanged. Fixed besides: a client
+with more than a hello's worth of pending ops no longer says hello for
+ever to an answer that acknowledges none of them.
 
 ### Added
 
