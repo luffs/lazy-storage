@@ -14,3 +14,7 @@ test('a client that does not play by the protocol cannot pollute, forge, lock ou
 test('displays behind a relay converge with the server through outages, relay restarts and crashes, and restores (fixed seed)', async () => {
   await runRelayFuzz({ seed: 1, runs: 20, steps: 40 });
 });
+
+test('displays behind a fanning-out relay converge the same, through link drops and sign-outs too, beside one passed through (fixed seed)', async () => {
+  await runRelayFuzz({ seed: 1, runs: 20, steps: 40, fanOut: true, clients: 4 });
+});

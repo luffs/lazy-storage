@@ -25,6 +25,13 @@ const relay: Relay = createRelay({
 });
 createRelay();
 createRelay({ storage: memoryCopies(), probe: false });
+// Fan-out: a link of the relay's own, each client vouched for with its credential
+const fanning = createRelay({ link: upstreamSocket('wss://central.example/sync/relay', { headers: { authorization: 'Bearer relay' } }), linger: 20_000, writeIdle: 30_000 });
+fanning.accept({ send: () => {}, close: () => {}, key: 'k', upstream: webSocketTransport('wss://central.example/sync'), credential: { headers: { authorization: 'Bearer display' }, query: '?deviceCode=d' } });
+const linkState: 'down' | 'dialing' | 'open' | 'broken' | 'refused' | undefined = fanning.stats().link?.state;
+void linkState;
+// @ts-expect-error a credential is headers and a query
+fanning.accept({ send: () => {}, close: () => {}, upstream: webSocketTransport('wss://central.example/sync'), credential: 'Bearer display' });
 // @ts-expect-error probe is a function or false
 createRelay({ probe: true });
 
@@ -45,7 +52,7 @@ relay.upstreamUp();
 const stats: RelayStats = relay.stats();
 const through: number = stats.sockets.through;
 const since: number | null = stats.downSince;
-for (const s of relay.sockets()) { const _state: 'dialing' | 'through' | 'local' | 'closed' = s.state; void s.stores; }
+for (const s of relay.sockets()) { const _state: 'dialing' | 'through' | 'local' | 'fan' | 'closed' = s.state; void s.stores; }
 relay.flush();
 relay.sweep();
 void [mode, through, since];
@@ -58,7 +65,7 @@ const session = relay.accept({
   upstream: webSocketTransport('wss://central.example/sync', { fetch: false })
 });
 session.receive({ t: 'hello', store: 'main', replicaId: 'r', ops: [] });
-const state: 'dialing' | 'through' | 'local' | 'closed' = session.state;
+const state: 'dialing' | 'through' | 'local' | 'fan' | 'closed' = session.state;
 session.close();
 void state;
 // @ts-expect-error a socket needs its way to the server

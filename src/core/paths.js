@@ -79,3 +79,33 @@ export function valueAt(root, path) {
   }
   return node;
 }
+
+/**
+ * The values `root` holds at `paths`, as a diff that puts a replica that
+ * wrote otherwise back in line (a correction): a path whose record no
+ * longer exists is corrected at its shallowest missing ancestor with a
+ * deletion, so the replica drops the whole record rather than keeping an
+ * empty shell. `root` is plain (a proxy's target), and what is copied out
+ * of it is only what the paths lead to
+ */
+export function correctionAt(root, paths) {
+  const entries = new Map();
+  for (const path of paths) {
+    let corrected = false;
+    for (let i = 1; i <= path.length; i++) {
+      const sub = path.slice(0, i);
+      const key = pathKey(sub);
+      if (entries.has(key)) { corrected = entries.get(key) === null; if (corrected) break; continue; }
+      if (valueAt(root, sub) === undefined) { entries.set(key, null); corrected = true; break; }
+    }
+    if (!corrected) entries.set(pathKey(path), structuredClone(valueAt(root, path)));
+  }
+  const diff = {};
+  // Shallow entries first so a deletion is not overwritten by a deeper value
+  for (const [key, value] of [...entries].sort((a, b) => a[0].length - b[0].length)) {
+    const path = parsePathKey(key);
+    if (path.slice(0, -1).some((_, i) => entries.get(pathKey(path.slice(0, i + 1))) === null)) continue;
+    setAt(diff, path, value);
+  }
+  return diff;
+}

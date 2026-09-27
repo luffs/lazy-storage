@@ -95,6 +95,8 @@ export interface SessionOptions {
   user?: unknown;
   /** Called after `closeSessions` closed this session */
   onEvict?(): void;
+  /** A relay's own session (see createRelayLink): it hears the store, is nobody's peer, and writes nothing */
+  relay?: boolean;
   /**
    * A transport that reaches every session on the store at once (Bun's
    * topic publish) hands this in: the session then hears the patch fan-out
@@ -220,6 +222,10 @@ export interface RefusedEvent {
 
 export interface SessionEvent {
   event: 'open' | 'close';
+  /** 'client', 'relay' (a relay's own session) or 'peer' (a client a relay serves) */
+  kind: 'client' | 'relay' | 'peer';
+  /** A peer's relay */
+  via?: unknown;
   user: unknown;
   replicaId: string | null;
   /** Live sessions after this one opened or closed */
@@ -274,6 +280,13 @@ export interface Store<S extends object = any> {
    */
   patchFrom(diff: Diff, state: object): ApplyResult;
   session(options: SessionOptions): Session;
+  /**
+   * A client a relay serves the store to: listed in presence, its replica
+   * claimed, its share judged, sent nothing. Throws a RefusedError where a
+   * hello would be refused ('replica-taken', 'forbidden', 'rate-limited',
+   * 'unavailable')
+   */
+  peer(options: PeerOptions): PeerSession;
   /** Evict every session the predicate selects; returns how many */
   closeSessions(predicate: (session: Session) => boolean, message?: string): number;
   /** Distinct users with a live session */
@@ -390,6 +403,69 @@ export interface Hub {
 }
 
 export function createHub(resolveStore: StoreResolver, options: HubOptions): Hub;
+
+export interface PeerOptions {
+  user?: unknown;
+  replicaId: string;
+  /** The relay, for the 'session' observers */
+  via?: unknown;
+  /** Called after `closeSessions` or `dispose` closed it: 'evicted', 'unavailable' */
+  onEvict?(code: string): void;
+}
+
+export interface PeerSession {
+  readonly user: unknown;
+  readonly replicaId: string;
+  /** How presence shows it */
+  readonly peer: Peer;
+  /** Whether the store has presence on at all */
+  readonly presence: boolean;
+  readonly closed: boolean;
+  /** Share with the store's peers, judged as a session's share is; throws a RefusedError */
+  share(data: unknown): void;
+  close(): void;
+}
+
+/** A client's credential as a relay vouches with it: the headers and query its own socket would carry */
+export interface RelayCredential {
+  headers?: Record<string, string>;
+  query?: string;
+}
+
+export interface RelayLinkOptions {
+  send(message: object): void;
+  /** The relay, as the adapter's `relays.authenticate` gave it */
+  relay: unknown;
+  /** Who a credential is, as the client's own socket would have been judged; null turns it away */
+  admit(credential: RelayCredential, relay: unknown): { user: unknown; expires: number | null } | null | Promise<{ user: unknown; expires: number | null } | null>;
+  /** Whether the relay may carry a store at all (judged again by revalidate) */
+  authorizeRelay?(relay: unknown, storeId: string): boolean | Promise<boolean>;
+  authorizeId?: AuthorizeId;
+  authorize?: Authorize;
+  channel?: HubChannel;
+  /** How long (ms) the relay's session on a store outlives its last client (default 30 000) */
+  linger?: number;
+  /** Vouches turned away as unauthorized before every vouch waits (default 100 burst, 10 a second); false disables */
+  rate?: RateLimit | false;
+  onError?(error: unknown): void;
+}
+
+/** The server side of a relay's link (see src/server/relays.js): its own sessions, and the clients it vouches for */
+export interface RelayLink {
+  receive(message: unknown): void;
+  close(): void;
+  readonly relay: unknown;
+  /** Store ids the relay has a session on */
+  readonly stores: string[];
+  /** The clients let in */
+  grants(): Array<{ user: unknown; store: string; socket: string | null; replicaId: string; openedAt: number; expiresAt: number | null }>;
+  /** Judge the clients again, and the relay on each store; resolves to how many clients were revoked */
+  revalidate(filter?: (user: unknown, storeId: string) => boolean): Promise<number>;
+  /** Revoke the clients `filter` picks ('reauthenticate'); returns how many */
+  disconnect(filter?: (user: unknown) => boolean): number;
+}
+
+export function createRelayLink(resolveStore: StoreResolver, options: RelayLinkOptions): RelayLink;
 
 /** A message's JSON, encoded once and remembered on the object, however many sockets it goes to */
 export function toJSON(message: object): string;

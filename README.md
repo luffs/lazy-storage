@@ -591,7 +591,8 @@ leader's tab directly): a follower's edits are applied to the replica at
 once, socket or no socket, so they sit in the browser's persisted outbox
 and go upstream under the browser's replica id, every batch the replica
 sees comes back to every tab as a patch, and presence and peers are
-passed along, so the server sees one session per browser. An edit made
+passed along (the replica hears presence only while one of its followers
+on the store wants it), so the server sees one session per browser. An edit made
 offline in one tab is thus in the others a moment later and survives
 that tab closing, which a tab with a replica of its own could not offer.
 Each tab keeps its own undo history. A tab's `db.status` and `db.pending`
@@ -638,23 +639,43 @@ carries the browser's replica id, not the tab's. Where Web Locks or
 BroadcastChannel are missing, a tab is its own leader and this is an
 ordinary connection.
 
-## A relay on the LAN
+## Relays
 
-Clients that share a place (the screens in a shop, the tablets in a
-kitchen) should keep working together when the internet goes, and the
-server is on the internet. `lazy-storage/relay` is a process on their
-network that their sockets go through:
+`lazy-storage/relay` is a process between clients and the server: the
+clients connect to it as they would to the server, with the same
+credentials, and it keeps a copy of every store they open. It is for two
+things, each alone or both at once:
 
-- **While the server answers, it is a pipe.** Each client's socket is
-  dialled through to the server with that client's own credentials, and
-  every frame goes up and comes down as it came. The server sees each
-  client as itself (its session, its replica, its presence), judges every
-  op as that client's, and alone acknowledges anything; neither the
-  server nor the clients change. On the way past, the relay builds a copy
-  of every store from the snapshots, deltas and patches it passes on. So
-  that it sees them, it asks for a large snapshot inline rather than over
-  HTTP, and asks for a snapshot rather than a delta where its copy could
-  not use the delta.
+- **Working on when the server is away.** Clients that share a place (the
+  screens in a shop, the tablets in a kitchen) keep working together when
+  the internet goes, with a relay on their network: it answers them from
+  its copies meanwhile, and their edits reach the server as their own when
+  it is back (below).
+- **Taking the reads off the server.** Given a `link` of its own to the
+  server, a relay reads each store once for all its clients and passes it
+  on to each of them (see [One read for many clients](#one-read-for-many-clients-fan-out)),
+  so the server holds a socket a relay rather than a socket a client, and
+  writes each change once a relay. Relays in front of the server spread
+  the load of many clients over machines, in a data centre as well as on
+  the clients' own networks (see [Spreading the load](#spreading-the-load)).
+
+The server stays the judge either way: it sees each client as itself (its
+session, its replica, its presence), judges every op as that client's, and
+alone acknowledges anything. A relay never writes as anyone.
+
+- **While the server answers, the relay passes the clients' traffic on.**
+  Without a `link`, it is a pipe: each client's socket is dialled through
+  to the server with that client's own credentials, and every frame goes
+  up and comes down as it came; neither the server nor the clients change.
+  With a `link` it fans each store out instead (see [One read for many
+  clients](#one-read-for-many-clients-fan-out)), and a client's edits still
+  go up a socket of the client's own; a client without a credential, or a
+  link the server turns away, is passed through as without one. On the way
+  past, the relay builds its copy of every store from the snapshots,
+  deltas and patches it passes on (fanned out: from its own session on the
+  store). So that it sees them, it asks for a large snapshot inline rather
+  than over HTTP, and asks for a snapshot rather than a delta where its
+  copy could not use the delta.
 - **When the server has not answered for `grace`** (ten seconds by
   default: a failed dial, a socket that dropped or went silent; a
   server's deploy is shorter, and is waited out), or the host says so
@@ -780,6 +801,171 @@ also how `createNetwork` runs one in a test (see [Testing](#testing)).
 `sockets()` how it is doing, and `fileCopies(dir)` keeps one JSON file
 per store and one for the credentials, each written whole through a
 rename, at most once a second (`saveDelay`).
+
+### One read for many clients (fan-out)
+
+Passed through, every client is a socket of the server's, and every
+change goes to each of them. Many clients behind one relay (a chain's
+thousands of screens, each shop's behind its own relay) are better read
+once: give the relay a `link` of its own to the server, and each store is
+read ONCE, on the relay's own session, and passed on to every client
+behind it. The server stays the judge of who reads what and who wrote
+what:
+
+- **Reads, vouched for.** For each store a client opens, the relay asks
+  the server whether that client may read it (`vouch`, with the client's
+  credential), and the server judges it by the same `authenticate`,
+  `expiresAt`, `authorizeId` and `authorize` as it would the client's own
+  socket (handed `{ relay }` as their last argument, so an app can tell).
+  A client let in is listed in the store's presence as itself, its replica
+  claimed as its own; the relay's session on a store is let in only while
+  some client of it is. The relay answers the client from its copy under
+  the server's epoch and version (a delta out of the copy's log of the
+  server's last 1000 patches where that reaches back, else a snapshot),
+  and passes every patch on to each client in version order, encoded once.
+- **Writes, as their own.** A client's edits never go through the relay's
+  session: its ops (and a hello that carries some) go up a socket of the
+  client's own, dialled with its credential as a pass-through socket is,
+  as a write-only session (see below). The server judges and acknowledges
+  each op as its author's, as ever; the relay could not write as anyone if
+  it tried. An ack is held until the client has heard every patch up to
+  the ack's version, so it lands where it would on a direct socket (one
+  heard after later patches has its correction read from the copy, which
+  is where the server stood by then). The socket up closes once it has
+  had nothing to wait for for `writeIdle`.
+- **Access taken away reaches the clients.** The server's `disconnect(filter)`
+  and a client's expiry end its sessions through the relay as they would
+  its own socket (4001, and it comes back judged afresh), `revalidate`
+  closes a store now refused ('forbidden'), and a store's own eviction
+  closes it ('evicted'). A verdict like that is kept offline too: the
+  relay no longer answers that credential from the copy. A relay the
+  filter picks (`disconnect` is handed the relay as the user) is cut off
+  with its clients, `relays.expiresAt` ends its link as `expiresAt` does
+  a socket, and `revalidate` judges the relay itself on every store it
+  carries (`relays.authorize`).
+- **Offline is as before.** The link failing is the server failing: after
+  `grace` the relay answers on its own, and on the way back every client
+  that sent an op meanwhile, or whose copy took offline edits, says hello
+  again, so its outbox reaches the server in order. A link lost for less
+  than `grace` is not noticed by the clients at all: they are vouched for
+  again and brought along from where they were. A server that answers the
+  clients' own dials but not the link (one without relays, a proxy that
+  refuses the route), or turns the link away (4401, tried again five
+  minutes later or at `upstreamUp()`), has the relay pass every socket
+  through as before until the link answers.
+
+On the server, `relays` turns the route on:
+
+```js
+const handlers = createHandlers({
+  stores, path: '/sync', authenticate, authorizeId,
+  relays: {
+    authenticate: req => relayTokens.get(req.headers.get('authorization')) ?? null,   // the relay, as itself
+    authorize: (relay, storeId) => storeId.startsWith(`${relay.shop}-`)                 // what it may carry at all
+  }
+});
+```
+
+and the relay dials it (`<path>/relay`), saying for each client what the
+server should judge it by: the headers and query its own socket would
+have carried, of which the server takes only `authorization`, `cookie`
+and `user-agent` (and `relays.headers`), never what a proxy or a browser
+vouches for (an origin, a forwarded address), which a relay could make up:
+
+```js
+const relay = createRelay({
+  storage: fileCopies('/data/copies'),
+  link: upstreamSocket(CENTRAL + '/sync/relay', { headers: { authorization: `Bearer ${RELAY_TOKEN}` } })
+});
+const handlers = createRelayHandlers({
+  relay, path: '/sync', key, upstream,
+  credential: req => ({ headers: { authorization: req.headers.get('authorization') ?? '', 'user-agent': req.headers.get('user-agent') ?? '' }, query: new URL(req.url).search })
+});
+```
+
+A client without a credential is passed through as before, beside the
+others. The server's `sockets()` lists a relay's socket with `relay` and
+`grants`, and each client it carries after it with `via`; `socketStats()`
+counts `relays` and `clients`; `relay.stats().link` says how the link is
+(`open`, `down`, `broken`, `refused`) and how many stores and clients are
+on it.
+
+What a relay with many clients spends its time on is writing to their
+sockets: a socket costs a write (a system call, and a TLS record) per send
+however little it carries, and a patch goes to every client. So the Bun
+handlers write what goes to a socket in one turn of the event loop as one
+write (`ws.cork`): the patches and presence the link brought together
+reach each client together, at the price of that turn. A topic would not
+help here, since Bun's `publish` makes the same writes to the same sockets.
+What helps besides is sending fewer messages: when a store's clients all
+come back at once (the relay's link back, a server restarted), every one
+of them joining is a presence change to every other, and `presence.every`
+on the store (say 250 ms) makes that a few messages to each rather than
+one a turn, and so does an app that writes something of each client as
+it comes (a last-seen time) gathering those into one patch. Measured with
+a thousand clients of one store connecting through a relay over TLS, the
+app stamping each one's arrival: the relay's CPU for it went from some
+14 s to 6 s with the writes joined, and to about 1 s with the stamps
+gathered and presence every 250 ms.
+
+### Spreading the load
+
+What a server spends on a store every client follows is a write to each
+socket for each change: `server.publish` fans a patch out without a send
+per socket from JavaScript, but the runtime still writes, and compresses
+past the threshold, once for each subscriber. Relays with a link take that
+off it: the server writes each change once a relay, and each relay once
+for each of its clients. Measured with `npm run bench:fanout` (4000
+clients of one store, the server publishing, one Windows machine, so read
+the proportions rather than the figures): a patch cost the server some
+50–80 ms of CPU with every client a socket of its own, some 4.6 ms through
+200 relays and some 0.5 ms through one; the server was busy at 10–20
+patches a second without relays and at 100–200 with 200 of them, and the
+median patch reached its clients in 11 ms through the 200 against
+40–80 ms without. A server or a relay that falls behind loses nothing:
+what was published meanwhile goes out together, a write a socket, a turn
+later.
+
+A relay also takes the reconnect storm: a client's hello is answered from
+the relay's copy, a delta out of its log where that reaches back, and the
+server sees a vouch (below) rather than a snapshot to send.
+
+What stays with the server:
+
+- **Writes.** A client's ops go up a socket of the client's own, judged and
+  acknowledged by the server as ever; a relay does not spread them.
+- **Who is let in.** Every client is vouched for on every store it opens,
+  by the server's own `authenticate` and `authorize`: the cost of a
+  connect is the server's, the snapshot is not.
+- **Presence.** Every client a relay carries is listed at the server as
+  itself, and a client that hears presence is sent every change of it.
+  A relay's own session hears the store's presence only while a client
+  behind it wants it, so clients that say `presence: false` spare the
+  server and the relays that traffic.
+
+Where the relays go is the host's affair: one on each network of clients
+(a shop's), or a pool in front of the server that clients are spread over
+(DNS, a load balancer). A client needs no particular relay, since each
+socket is vouched for on its own; it keeps its socket's relay for the
+socket's life. A relay reads what its clients read, so it runs where the
+server's operator trusts it, as itself (`relays.authenticate`), carrying
+only the stores `relays.authorize` lets it. One in a data centre that
+should not answer on its own while the server is away says so with
+`authorizeOffline: () => false`: its clients then wait for the server, as
+without a relay. Relays spread over a pool are also each other's islands
+while the server is away (see what a relay cannot do, above): a store's
+clients on two relays see each other's offline edits only once the server
+is back.
+
+Two things the store does for this, which any transport can use. A
+relay's own session (`store.session({ relay: true })`) hears the store and
+its presence, is nobody's peer, and writes nothing. And
+`store.peer({ user, replicaId, via })` is a client a relay serves: listed,
+claimed, judged, sent nothing, and closed by `closeSessions` and `dispose`
+like any session. A hello with `follow: false` is a write-only session,
+answered but hearing no patches or presence after, and unlisted; it is
+heeded only for a replica such a peer holds (anyone else's is closed
+'unavailable'), so nobody reads a store unlisted.
 
 ## Authentication, presence, and eviction
 
@@ -926,7 +1112,14 @@ sessions yourself), which powers two more features:
   pick the public fields here; `validate`, `every`, and `maxShare` are
   below. A client that never reads presence, a mirror say, passes
   `presence: false` to `createClient`: its hello says so and the server
-  sends it none of this, though it may still share.
+  sends it none of this, though it may still share and is still listed
+  in the others'. `db.wantPresence(on)` changes it while the client runs
+  (only an admin's screen reads who is online, say, and a user signs in
+  as one): the client says hello again, answered from where it stands,
+  and one that turns presence on is sent the whole list, as a newcomer
+  is; off, `db.presence` and `db.peers` empty at once. A browser's shared
+  connection hears presence only while one of its tabs wants it, and a
+  relay's own session only while a client behind it does.
 - **Peers.** With presence on, every live session is a peer,
   `{ replicaId, user, key, data }`, where `data` is whatever that client
   chose to share: `db.share({ editing: taskId })` sets it, `null` clears
@@ -1045,11 +1238,17 @@ A public server needs a few ceilings, all on by default:
 - **Fan-out.** A store's patch reaches every session on it, so a write to
   a store with many listeners is the cost that grows first. On the Bun
   adapter each socket subscribes to a topic per store and a patch goes out
-  as one `server.publish`, encoded and compressed once for every
-  subscriber by the runtime, so a large write to thousands of listeners
-  costs a few milliseconds of the event loop rather than a send per
-  socket; a session opened on the store directly, without the adapter, is
-  still sent to on its own. The Node adapter sends per socket. Either way, egress still
+  as one `server.publish`, encoded once and fanned out by the runtime
+  rather than sent per socket from JavaScript; a session opened on the
+  store directly, without the adapter, is still sent to on its own. The
+  runtime still writes to each socket, on the event loop once the publish
+  has returned, and compresses for each one what passes the threshold: on
+  one Windows machine some 12–20 µs a socket for a small patch, and some
+  30 µs more to deflate 4 KB, so a patch to 4000 sockets is some 50–80 ms
+  of the loop. Patches published in one turn go out together, a write a
+  socket (see `npm run bench:fanout`), and a relay in front of each group
+  of clients takes the writes off the server (see [One read for many
+  clients](#one-read-for-many-clients-fan-out)). The Node adapter sends per socket. Either way, egress still
   grows with the listeners, so a big write to a big audience is bandwidth
   the uplink has to carry; splitting a large value into records, so a
   patch carries only what changed, is what keeps it small.
@@ -1267,14 +1466,14 @@ runs on the synced state and shows in the array view like any other change.
 
 **Client** (`lazy-storage`)
 
-- `createClient({ store, connection | transport, initial, registers, lists, position, replicaId, storage, mirror, cache, cacheDelay, undo, undoLimit, reconnect, presence, now })` — `mirror: true` is a follower's defaults: `cache`, `undo` and `presence` off, each still settable; `db.restored` — started from the cached state; `db.version` — the store version this client has seen everything up to; `db.wire` — the synced state under a lists view; `db.relayed` — true while a relay answers this store on its own, the server away (see [A relay on the LAN](#a-relay-on-the-lan))
+- `createClient({ store, connection | transport, initial, registers, lists, position, replicaId, storage, mirror, cache, cacheDelay, undo, undoLimit, reconnect, presence, now })` — `mirror: true` is a follower's defaults: `cache`, `undo` and `presence` off, each still settable; `db.restored` — started from the cached state; `db.version` — the store version this client has seen everything up to; `db.wire` — the synced state under a lists view; `db.relayed` — true while a relay answers this store on its own, the server away (see [Relays](#relays))
 - `openClient(options)` → `Promise<db>` — the same, for a storage adapter whose `load()` returns a promise
 - `createConnection({ transport, reconnect, keepalive, wake })` → `connect()`, `close()`, `status` (`'offline' | 'connecting' | 'online'` — the socket's; a client says `online` only once its store is synced as well), `attached`, `closed` — why the server turned the socket away, or null — `fetch(path)` when the transport can — `on('status' | 'closed', fn)` — a socket shared by clients
 - `sharedConnection({ name, transport, storage, reconnect, keepalive, channel, locks, tabId, linger, sweepEvery, onError })` → the same, plus `leader`, `tabId`, `upstream` — the socket's status — `pending(store)` — the replica's unsent ops — `on('sync', fn)`, `follow(port, stores)` — a page on a MessagePort following the replica for those stores, ended by what it returns — `dispose()` — one socket and one replica per browser, the tabs electing a leader (see [One socket per browser](#one-socket-per-browser))
 - `portConnection(port, { reconnect, keepalive })` → the connection for the other end of `follow`: a client with no socket of its own, whose `upstream` and `pending(store)` are the browser's, as the host says; `messagePortTransport(port)` is the transport underneath, for a plain connection that wants neither
 - `db.state` — the mirror (a lazy-watch proxy). Read and write it directly
 - `db.store`, `db.connection` — the store id and the connection
-- `db.presence` — users with a live session on this store; `db.peers` — every live session as `{ replicaId, user, data }`, this client's own included; `db.share(data)` — what this client shares with them (JSON, `null` clears), read back as `db.shared`; `db.closed` — `{ code, message }` after the server ended this store for us, else null
+- `db.presence` — users with a live session on this store; `db.peers` — every live session as `{ replicaId, user, data }`, this client's own included; `db.wantPresence(on)` — hear presence or stop while the client runs (the `presence` option, read back as `db.wantsPresence`); `db.share(data)` — what this client shares with them (JSON, `null` clears), read back as `db.shared`; `db.closed` — `{ code, message }` after the server ended this store for us, else null
 - `db.collection(name)` — `add(record) → id`, `update(id, fields)`, `remove(id)`, `get(id)`, `has(id)`, `ids()`, `all()`
 - `db.isPending(path)` — whether an edit not yet acknowledged writes at, under, or over `path`
 - `db.list(path, { position })` — an ordered list of records: `all()`, `ids()`, `get(id)`, `has(id)`, `add(record, where) → id`, `move(id, where)`, `remove(id)`, `reconcile(ids) → written`, `keyFor(where)`; `where` is `{ before }`, `{ after }`, `{ at }`, or nothing for the end
@@ -1322,13 +1521,15 @@ hub listens at `path` and the snapshot route under it; the returned server gains
 an `http.Server` with `shutdown({ reason })`, `sockets()`, `socketStats()`, `disconnect(filter)` and `revalidate(filter)`; `createHandlers(options)` → `{ upgrade(req, socket, head), request(req, res), close({ reason }), closing, sockets(), socketStats(), disconnect(filter), revalidate(filter), wss }`;
 `toRequest(req)` — the Web `Request` `authenticate` sees. **node:sqlite** (`lazy-storage/server/sqlite-node`): `sqliteStorage(file, { wal })`, as the Bun one.
 
-**Relay** (`lazy-storage/relay`, see [A relay on the LAN](#a-relay-on-the-lan))
+**Relay** (`lazy-storage/relay`, see [Relays](#relays))
 
-- `createRelay({ storage, grace, dialTimeout, probe, probeEvery, keepalive, jitter, maxSkew, maxLeaves, authorizeOffline, validate, saveDelay, forgetAfter, onError, now })` — `storage` is `memoryCopies()` (default) or `fileCopies(dir, { onError })`; `probe` an async `() => boolean`, or false to leave it to `upstreamUp()`; `authorizeOffline(key, storeId)` whether a credential is answered from a copy (default: the server answered it on that store); `validate(diff, { key, replicaId, storeId, state })` an offline op's last gate; `forgetAfter` (30 days) lets go of copies and credentials unused that long
-- `relay.accept({ send, close, key, upstream })` → `{ receive(message), close(), state }` — a client's socket: `send` and `close(code, reason)` reach the client, `key` is a fingerprint of its credential, `upstream` a transport factory dialling the server with it
-- `relay.mode` (`'through' | 'local'`), `relay.on('mode' | 'copy' | 'error', fn)`, `relay.copy(storeId)` → `{ state, v, epoch, live, diverged, local }` or null, `relay.upstreamUp()`, `relay.upstreamDown()` — the host's word on the server, `relay.stats()` → `{ mode, downSince, sockets: { dialing, through, local }, copies, live, diverged, credentials }`, `relay.sockets()` → `[{ key, state, stores, openMs }]`, `relay.flush()`, `relay.sweep()`, `relay.close()`
+- `createRelay({ storage, grace, dialTimeout, probe, probeEvery, keepalive, jitter, maxSkew, maxLeaves, authorizeOffline, validate, link, linger, writeIdle, saveDelay, forgetAfter, onError, now })` — `storage` is `memoryCopies()` (default) or `fileCopies(dir, { onError })`; `probe` an async `() => boolean`, or false to leave it to `upstreamUp()`; `authorizeOffline(key, storeId)` whether a credential is answered from a copy (default: the server answered it on that store); `validate(diff, { key, replicaId, storeId, state })` an offline op's last gate; `link` a transport factory dialling the server's relay route with the relay's own credential, for fan-out (see [One read for many clients](#one-read-for-many-clients-fan-out)); `linger` (20 s) how long the relay's session on a store outlives its last client; `writeIdle` (30 s) when a client's socket up for its edits closes; `forgetAfter` (30 days) lets go of copies and credentials unused that long
+- `relay.accept({ send, close, key, upstream, credential })` → `{ receive(message), close(), state }` — a client's socket: `send` and `close(code, reason)` reach the client, `key` is a fingerprint of its credential, `upstream` a transport factory dialling the server with it, `credential` (`{ headers, query }`) what the server judges it by when the relay fans out; without one it is passed through
+- `relay.mode` (`'through' | 'local'`), `relay.on('mode' | 'copy' | 'error', fn)`, `relay.copy(storeId)` → `{ state, v, epoch, live, diverged, local }` or null, `relay.upstreamUp()`, `relay.upstreamDown()` — the host's word on the server, `relay.stats()` → `{ mode, downSince, sockets: { dialing, through, local, fan }, copies, live, diverged, credentials, link? }` (`link: { state, shared, clients }` with fan-out), `relay.sockets()` → `[{ key, state, stores, openMs }]`, `relay.flush()`, `relay.sweep()`, `relay.close()`
 
-**Bun relay** (`lazy-storage/relay/bun`): `createRelayHandlers({ relay, upstream, key, path, maxPayload, perMessageDeflate, maxBuffered, onError })` → `{ upgrade(req, server), websocket, close({ reason }), sockets() }` for your own `Bun.serve`; `upstreamSocket(url, { headers, WebSocket })` → a transport factory on a WebSocket with headers, frames kept as they came.
+**Bun relay** (`lazy-storage/relay/bun`): `createRelayHandlers({ relay, upstream, key, credential, path, maxPayload, perMessageDeflate, maxBuffered, onError })` → `{ upgrade(req, server), websocket, close({ reason }), sockets() }` for your own `Bun.serve`; `credential(req)` → `{ headers, query }` for fan-out; `upstreamSocket(url, { headers, WebSocket })` → a transport factory on a WebSocket with headers, frames kept as they came.
+
+**Relays at the server** (`lazy-storage/server`): the adapters' `relays: { authenticate(req), expiresAt(relay, req), authorize(relay, storeId), path, linger, headers, rate }`; `createRelayLink(resolveStore, { send, relay, admit, authorizeRelay, authorizeId, authorize, channel, linger, rate })` → `{ receive, close, relay, stores, grants(), revalidate(filter), disconnect(filter) }`, the server side of a relay's link for a transport of your own; `store.peer({ user, replicaId, via, onEvict })` → `{ user, replicaId, peer, closed, share(data), close() }`, a client a relay serves.
 
 **Types**: declarations ship with the package for every entry (`types/`);
 the Node entry's need `@types/node`. A client's state type comes from
@@ -1379,7 +1580,7 @@ primitives anywhere, of anything at a register path).
 
 | Message | Fields | Meaning |
 |---|---|---|
-| `hello` | `replicaId`, `ops`, `since?`, `epoch?`, `share?`, `presence?`, `fetch?` | Connect or reconnect. `ops` is the outbox (its first 1000 ops); `since` is the store version the client has seen everything up to and `epoch` the storage life it belongs to, asking for a delta; `share` is what this client shares with its peers, restored on reconnect; `presence: false` asks not to be sent presence; `fetch: true` says the client can fetch a large snapshot over HTTP |
+| `hello` | `replicaId`, `ops`, `since?`, `epoch?`, `share?`, `presence?`, `fetch?`, `follow?` | Connect or reconnect. `ops` is the outbox (its first 1000 ops); `since` is the store version the client has seen everything up to and `epoch` the storage life it belongs to, asking for a delta; `share` is what this client shares with its peers, restored on reconnect; `presence: false` asks not to be sent presence, and every hello says it again either way (a later hello without it turns presence back on, and brings the whole list); `fetch: true` says the client can fetch a large snapshot over HTTP; `follow: false` (a relay's, for a client it fans out to) makes a write-only session |
 | `op` | `op` | One batch, live |
 | `leave` | | Close this store's session; the socket stays up |
 | `share` | `data` | What this session shares with every peer, a JSON value within `presence.maxShare` that `presence.validate` lets through; `null` clears it. Presence goes out again if it changed; refused with `forbidden` while the store's presence is off |
@@ -1392,9 +1593,9 @@ primitives anywhere, of anything at a register path).
 | `snapshot` | `state` or `fetch`, `ts`, `seq`, `registers`, `v`, `epoch`, `lost?` | The whole state, to overwrite with. For a client that can fetch, when the state is `httpSnapshots.threshold` bytes or more: `fetch` names the route to fetch `{ v, epoch, state }` from instead, and `v` is only where the store stood at the hello; the fetched document says where it is |
 | `delta` | `patches`, `ts`, `seq`, `registers`, `v`, `epoch`, `lost?` | The accepted diffs since the client's `since`, in order, followed by corrections for what the hello's own ops lost; applied as patches. On either answer, `lost` is `[{ seq, paths }]`: which leaves of which of the hello's ops lost |
 | `patch` | `diff`, `ts`, `v` | An accepted diff from any replica, and the version it made |
-| `ack` | `seq`, `ts`, `correction`, `lost?` | The op was merged; `correction` is a diff with the server's values at the leaves it lost, or null, and `lost` the paths of those leaves |
+| `ack` | `seq`, `ts`, `correction`, `lost?`, `v` | The op was merged; `correction` is a diff with the server's values at the leaves it lost, or null, and `lost` the paths of those leaves; `v` the store's version with the op in it |
 | `error` | `seq?`, `code?`, `message`, `now?`, `ts?`, `retryAfter?` | With `seq`: that op was refused, for the reason in `code` (below). Without: the message itself was bad (not JSON, an unknown type, a hello without a replica id) |
-| `presence` | `peers`, or `left?`, `joined?`, `shared?` | With `peers`: every session as `{ replicaId, user, key, data }`, `key` being what presence groups users by and `data` what the session shares; sent right after the hello is answered. Otherwise a delta, applied in the order `left` (replica ids), `joined` (peers), `shared` (`{ replicaId, data }`), batched per `presence.every`. Only with the store's presence on, and never to a session whose hello opted out |
+| `presence` | `peers`, or `left?`, `joined?`, `shared?` | With `peers`: every session as `{ replicaId, user, key, data }`, `key` being what presence groups users by and `data` what the session shares; sent right after the hello is answered, the first one or a later one that turns presence on. Otherwise a delta, applied in the order `left` (replica ids), `joined` (peers), `shared` (`{ replicaId, data }`), batched per `presence.every`. Only with the store's presence on, and never to a session whose last hello opted out |
 | `closed` | `code`, `message` | Final for this store on this socket; the client goes offline for it and does not reconnect on its own. Without a `store`: final for the socket, which the server then closes with code 4401; the connection stops reconnecting and every client on it reports the reason |
 | `relay` | `status` | From a relay, never a server: `'local'` after each answer it makes from its own copy while the server is away, `'through'` (from a browser's shared connection) once its replica is answered by the server again. The client keeps it as `db.relayed`; a client that predates it ignores it, as it does any message it does not know |
 | `pong` | | |
@@ -1406,7 +1607,7 @@ can drop acknowledged outbox entries; `registers` are the server's
 register patterns, for the client to check against its own; `v` is the
 store version the message brings the client up to, and `epoch` the life
 of the storage it counts in. An answer a relay makes from its own copy
-(a browser's shared connection, or a relay on the LAN once its copy holds
+(a browser's shared connection, or a relay (`lazy-storage/relay`) once its copy holds
 offline edits) carries `epoch: null` and versions of the relay's own, and
 `seq` 0: it acknowledges nothing, and the next hello the server itself
 answers is answered with a snapshot.
@@ -1444,6 +1645,26 @@ process serves it for now (see the lease under
 moment, which loads it afresh; nothing pending is lost and the app hears
 no `closed`.
 
+### A relay's link
+
+A relay that fans out (see [One read for many clients](#one-read-for-many-clients-fan-out))
+speaks the store-tagged messages above on its link for its own session on
+each store (`hello`, `leave`, and what the store sends it), and these:
+
+| Message | Direction | Fields | Meaning |
+|---|---|---|---|
+| `vouch` | relay → server | `grant`, `socket?`, `store`, `replicaId`, `credential` | May this client read this store? `grant` is the relay's name for the client on the store, `socket` for its socket; `credential` is `{ headers?, query? }` |
+| `unvouch` | relay → server | `grant` | The client left |
+| `share` | relay → server | `grant`, `data` | What the client shares, judged as its own |
+| `admitted` | server → relay | `grant`, `store`, `peer`, `presence`, `until` | Yes: how presence shows it, whether the store has presence at all (the relay's own session hears it only while a client behind it wants it, and its hellos say so either way), and when its session runs out (or null) |
+| `refused` | server → relay | `grant`, `store`, `code`, `message`, `retryAfter?` | No: the code its own socket would have heard (`unauthorized`, `forbidden`, `unknown-store`, `replica-taken`), or `rate-limited` / `unavailable`, which are not final |
+| `revoked` | server → relay | `grants`, `code`, `message` | Access taken away: `reauthenticate` (the client's socket is closed with 4001), `forbidden`, `evicted`, `unavailable` (the store unloaded: say hello again) |
+| `error` | server → relay | `grant`, `store`, `code`, `message` | A client's share refused |
+
+The relay's own session on a store is closed `unused` when no client
+behind it is let in to the store (not final: it says hello again once one
+is), and `forbidden` when the relay may not carry the store.
+
 ## Scope
 
 This is last-writer-wins per field with a single merge point. It gives
@@ -1470,6 +1691,17 @@ local op on each kind of storage, a reconnect answered with a snapshot
 versus a delta, and a snapshot compressed per socket versus served by the
 HTTP route. It reports the median of several rounds; compare
 runs on the same machine.
+
+`npm run bench:fanout` (Bun) is how a store that every client follows
+behaves when the server publishes to it: thousands of thin clients over
+real sockets, all but a few admins' without presence, straight to the
+server, behind one relay, or spread over many (`--topologies
+direct,hub,hubs`, `hubs:off` for a store without presence), each part a
+process of its own. It steps the rate up until a patch is late by more
+than two seconds, and reports what each patch took from when it was due
+and from when it went out, and each part's CPU; then 4 KB patches and a
+burst in one turn. `bun bench/fanout/run.js --n 4000` for the defaults'
+size; see the header of `bench/fanout/run.js` for the rest.
 
 `npm run bench:client` times what an app feels in the browser, in a DOM
 from happy-dom: React and Vue components on `useClient` as the store

@@ -10,7 +10,8 @@ import { createClient as createClientAgain } from 'lazy-storage/client';
 import { sqliteClientStorage } from 'lazy-storage/client/sqlite';
 import {
   createStore, createStores, createHub, memoryStorage, jsonFileStorage, isStoreId, toJSON, tagStore,
-  type Store, type ServerStorage, type StorageCommit, type OpEvent, type StoreDocument
+  type Store, type ServerStorage, type StorageCommit, type OpEvent, type StoreDocument,
+  createRelayLink
 } from 'lazy-storage/server';
 import { createHandlers, serve } from 'lazy-storage/server/bun';
 import { sqliteStorage } from 'lazy-storage/server/sqlite';
@@ -55,6 +56,7 @@ const peers: Peer[] = db.peers;
 const mine: Peer | undefined = peers.find(p => p.replicaId === db.replicaId);
 db.on('peers', list => { const _n: number = list.length; });
 void mine;
+db.wantPresence(!db.wantsPresence);
 db.watch((changes, inverse, meta) => { if (meta?.origin === 'remote') return; });
 db.undo(); db.redo(); db.group(() => 1);
 const snapshot: State = LazyWatch.snapshot(db.state);
@@ -231,6 +233,30 @@ const handlers = createHandlers({
 });
 // @ts-expect-error authorizeId has no store to hand
 createHandlers({ stores, authorizeId: (user: unknown, storeId: string, store: object) => true });
+// Relays: a relay's route, the relay judged as itself and each client it vouches for by the same hooks
+const relayed = createHandlers({
+  stores,
+  path: '/sync',
+  authenticate: (req, context) => (context?.relay ? req.headers.get('authorization') : new URL(req.url).searchParams.get('token')),
+  relays: { authenticate: req => (req.headers.get('authorization') === 'Bearer relay' ? { id: 'hub' } : null), authorize: (relay, storeId) => storeId !== 'admin', linger: 30_000, headers: ['x-tenant'] }
+});
+const carried: number = relayed.socketStats().clients + relayed.socketStats().relays;
+const viaRelay: unknown[] = relayed.sockets().filter(s => s.via !== undefined).map(s => s.user);
+// @ts-expect-error relays needs authenticate
+createHandlers({ stores, relays: { path: '/relay' } });
+void [carried, viaRelay];
+const peer = store.peer({ user: { id: 'u1' }, replicaId: 'r1', via: 'hub', onEvict: code => void code });
+peer.share({ at: 1 });
+const listedAs: string = peer.peer.replicaId;
+const gone: boolean = peer.closed;
+peer.close();
+void [listedAs, gone];
+store.observe('session', e => { const kind: 'client' | 'relay' | 'peer' = e.kind; void kind; });
+const link = createRelayLink(id => stores.get(id), { send: m => void m, relay: 'hub', admit: async credential => (credential.headers?.authorization ? { user: 'u1', expires: null } : null), linger: 1000 });
+link.receive({ t: 'vouch', grant: 'g1', store: 'main', replicaId: 'r1', credential: {} });
+const grantsNow: number = link.grants().length;
+const revokedNow: Promise<number> = link.revalidate();
+void [grantsNow, revokedNow];
 async function bun() {
   await handlers.close({ reason: 'deploy' });
   const server = serve({ stores, port: 0, maxBuffered: 8 * 1024 * 1024, expiresAt: async (user, req) => new Date(Date.now() + 15 * 60_000), minSession: 10_000 });

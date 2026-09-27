@@ -12,6 +12,12 @@
 // client reconnects and authenticates afresh; `revalidate(filter)` judges
 // its open stores again.
 //
+// Relays: with `relays`, a relay on a LAN that carries many clients (see
+// src/relay and relays.js) connects at `<path>/relay`, authenticated as
+// itself by `relays.authenticate(req)`, and reads each store once for all
+// its clients, each of whom the server judges by the same hooks as its own
+// socket. `disconnect`, `revalidate` and expiry reach those clients too.
+//
 // `createHandlers` returns the pieces to mount inside your own Bun.serve
 // (call `upgrade` from your fetch; pass `websocket` through); `serve` is
 // the convenience wrapper that does it for you.
@@ -24,6 +30,7 @@
 // `shutdown()` that does this and then stops the server.
 import { LazyWatch } from 'lazy-watch';
 import { createHub } from './hub.js';
+import { createRelayLink, credentialRequest, relaySockets } from './relays.js';
 import { toJSON, closeUnauthorized, deflateOptions, TOO_FAR_BEHIND, REAUTHENTICATE, MIN_SESSION_MS, expiryOf, runAt, rollUpSockets } from './wire.js';
 import { snapshotOptions, snapshotId, serveSnapshot } from './snapshot.js';
 
@@ -76,6 +83,20 @@ import { snapshotOptions, snapshotId, serveSnapshot } from './snapshot.js';
  *   browser withholds cookies under '*'), an array of origins to echo and
  *   no other, or false for no CORS header at all. false turns the route
  *   off; every client then gets its snapshot inline
+ * @param {Object} [options.relays] - let relays carry clients (see relays.js):
+ *   `authenticate(req)` the relay a request is (null turns it away, as for
+ *   a client), `expiresAt(relay, req)` when that runs out (as `expiresAt`),
+ *   `authorize(relay, storeId)` whether it may carry a store at all
+ *   (default: any its clients may read; judged again by `revalidate`),
+ *   `path` (default `<path>/relay`), `linger` (ms its session on a store
+ *   outlives the store's last client there, default 30000), `headers` (more
+ *   names of a client's headers its credential may carry, besides
+ *   authorization, cookie and user-agent), `rate` (vouches turned away as
+ *   unauthorized before every vouch waits: { burst, perSecond }, default
+ *   100 and 10). A client a relay vouches for is judged by `authenticate`
+ *   and `expiresAt` given `{ relay }` as their last argument.
+ *   `disconnect(filter)` cuts off a relay the filter picks (it is handed the
+ *   relay as the user) with its clients
  * @param {number|false} [options.maxBuffered=16777216] - close a socket
  *   whose unsent output passes this many bytes, with code 1013: a client
  *   that stopped reading would otherwise have Bun drop what it cannot
@@ -110,9 +131,12 @@ export function createHandlers({
   perMessageDeflate = true,
   httpSnapshots = true,
   maxBuffered = 16 * 1024 * 1024,
+  relays,
   onError = err => console.error('lazy-storage:', err)
 } = {}) {
   if (!stores) throw new TypeError('createHandlers requires stores (a registry or a resolver function)');
+  if (relays !== undefined && typeof relays?.authenticate !== 'function') throw new TypeError('relays needs authenticate(req): the relay a request is');
+  const relayPath = relays ? relays.path ?? `${path}/relay` : null;
   const resolveStore = typeof stores === 'function' ? stores : id => stores.get(id);
   const deflate = deflateOptions(perMessageDeflate);
   const snapshots = snapshotOptions(httpSnapshots);
@@ -126,6 +150,7 @@ export function createHandlers({
     ws.send(json, deflate !== null && json.length >= deflate.threshold);
   };
   const hubs = new Map();
+  const links = new Map();  // relay sockets -> their link (see relays.js)
   const seen = new Map();   // socket -> { opened, heard, expires, cancel }: when it opened, last sent something, runs out; the expiry's timer
   let closing = false;
   let cutOff = 0;           // sockets closed for falling behind
@@ -141,7 +166,7 @@ export function createHandlers({
   };
   // A store broadcast is one topic publish, fanned out by Bun past the
   // send above, so every socket is also looked at once a second
-  const sweeper = maxBuffered ? setInterval(() => { for (const ws of hubs.keys()) behind(ws); }, 1000) : null;
+  const sweeper = maxBuffered ? setInterval(() => { for (const ws of [...hubs.keys(), ...links.keys()]) behind(ws); }, 1000) : null;
   if (typeof sweeper?.unref === 'function') sweeper.unref();
   let bunServer = null;   // captured at the first upgrade, for topic broadcasts
   const topic = id => `lz:${id}`;
@@ -151,8 +176,16 @@ export function createHandlers({
     bunServer = server;
     const { pathname } = new URL(req.url);
     const snapshotOf = snapshots ? snapshotId(pathname, path) : null;
-    if (pathname !== path && snapshotOf === null) return null;
+    if (pathname !== path && snapshotOf === null && pathname !== relayPath) return null;
     if (closing) return new Response('Server shutting down', { status: 503, headers: { 'retry-after': '1' } });
+    if (pathname === relayPath) {
+      const turnAwayRelay = () => (server.upgrade(req, { data: { unauthorized: true } }) ? undefined : new Response('Unauthorized', { status: 401 }));
+      const relay = await relays.authenticate(req);
+      if (relay === null || relay === undefined) return turnAwayRelay();
+      const expires = relays.expiresAt ? expiryOf(await relays.expiresAt(relay, req)) : null;
+      if (expires !== null && expires - Date.now() < minSession) return turnAwayRelay();
+      return server.upgrade(req, { data: { relay, expires } }) ? undefined : new Response('WebSocket upgrade failed', { status: 400 });
+    }
     if (snapshotOf !== null) {
       try {
         return await serveSnapshot(req, snapshotOf, { resolveStore, authenticate, authorizeId, authorize, onError, origins: snapshots.origins });
@@ -174,6 +207,24 @@ export function createHandlers({
     return server.upgrade(req, { data: { user, expires } }) ? undefined : new Response('WebSocket upgrade failed', { status: 400 });
   }
 
+  /**
+   * Who a client a relay vouches for is, as its own socket would have been
+   * judged: `authenticate` and `expiresAt` over the request it would have
+   * made (see credentialRequest in relays.js), told which relay asks
+   * (`{ relay }`, their last argument); null when turned away
+   */
+  async function admit(credential, relay) {
+    const req = credentialRequest(credential, path, relays.headers ?? []);
+    let user;
+    if (authenticate) {
+      user = await authenticate(req, { relay });
+      if (user === null || user === undefined) return null;
+    }
+    const expires = expiresAt ? expiryOf(await expiresAt(user, req, { relay })) : null;
+    if (expires !== null && expires - Date.now() < minSession) return null;
+    return { user, expires };
+  }
+
   const websocket = {
     maxPayloadLength: maxPayload,
     perMessageDeflate: deflate === null ? false : deflate.runtime,
@@ -183,12 +234,27 @@ export function createHandlers({
     open(ws) {
       if (ws.data.unauthorized) return closeUnauthorized(ws);
       // Each socket subscribes per store; a broadcast goes out once as a topic
-      // publish, which Bun compresses once and fans out, rather than a send per socket
+      // publish, which Bun fans out natively, rather than a send per socket from
+      // JavaScript. Bun still writes (and compresses, past the threshold) per subscriber
       const channel = {
         subscribe: id => ws.subscribe(topic(id)),
         unsubscribe: id => { try { ws.unsubscribe(topic(id)); } catch { /* a closing socket is already gone */ } },
         publish: (id, message) => { const json = toJSON(message); bunServer.publish(topic(id), json, shouldCompress(json)); }
       };
+      if (ws.data.relay !== undefined) {
+        links.set(ws, createRelayLink(resolveStore, { send: message => send(ws, message), relay: ws.data.relay, admit, authorizeRelay: relays.authorize, authorizeId, authorize, channel, linger: relays.linger, rate: relays.rate, onError }));
+        const relayTimes = { opened: Date.now(), heard: Date.now(), expires: ws.data.expires ?? null, cancel: null };
+        seen.set(ws, relayTimes);
+        // A relay's own session runs out as a client's does: closed, and it comes back judged afresh
+        if (relayTimes.expires !== null) {
+          relayTimes.cancel = runAt(relayTimes.expires, () => {
+            if (closing || !links.has(ws)) return;
+            expired++;
+            reauthenticate(ws);
+          });
+        }
+        return;
+      }
       hubs.set(ws, createHub(resolveStore, { send: message => send(ws, message), user: ws.data.user, authorizeId, authorize, channel, httpSnapshots: snapshotRoute, onError }));
       const times = { opened: Date.now(), heard: Date.now(), expires: ws.data.expires ?? null, cancel: null };
       seen.set(ws, times);
@@ -212,7 +278,7 @@ export function createHandlers({
       if (!LazyWatch.Utils.isPlainObject(msg)) return ws.send(JSON.stringify({ t: 'error', message: 'Expected a message object' }));
       // A bug below this point must not take the process down with it
       try {
-        hubs.get(ws)?.receive(msg);
+        (hubs.get(ws) ?? links.get(ws))?.receive(msg);
       } catch (err) {
         onError(err);
         ws.send(JSON.stringify({ t: 'error', store: msg.store, message: 'Something went wrong' }));
@@ -221,6 +287,8 @@ export function createHandlers({
     close(ws) {
       hubs.get(ws)?.close();
       hubs.delete(ws);
+      links.get(ws)?.close();
+      links.delete(ws);
       seen.get(ws)?.cancel?.();
       seen.delete(ws);
     }
@@ -236,10 +304,11 @@ export function createHandlers({
     closing = true;
     clearInterval(sweeper);
     for (const times of seen.values()) times.cancel?.();
-    const sockets = [...hubs.keys()];
+    const sockets = [...hubs.keys(), ...links.keys()];
     const gone = Promise.all(sockets.map(ws => new Promise(resolve => {
-      const hub = hubs.get(ws);
-      hubs.set(ws, { receive() {}, close() { hub?.close(); resolve(); } });
+      const map = hubs.has(ws) ? hubs : links;
+      const hub = map.get(ws);
+      map.set(ws, { receive() {}, close() { hub?.close(); resolve(); } });
     })));
     for (const ws of sockets) {
       try {
@@ -250,8 +319,9 @@ export function createHandlers({
     }
     // A socket that never reports its close (already gone) must not hold the shutdown
     await Promise.race([gone, new Promise(resolve => setTimeout(resolve, 1000))]);
-    for (const hub of hubs.values()) hub.close();
+    for (const hub of [...hubs.values(), ...links.values()]) hub.close();
     hubs.clear();
+    links.clear();
     if (typeof stores.dispose === 'function') stores.dispose();
   }
 
@@ -269,6 +339,17 @@ export function createHandlers({
       reauthenticate(ws);
       count++;
     }
+    // A relay the filter picks is cut off, its clients with it; the others'
+    // clients it picks are revoked, and their relay closes their sockets as
+    // this would have
+    for (const [ws, link] of [...links]) {
+      if (filter && !filter(link.relay)) {
+        count += link.disconnect(filter);
+        continue;
+      }
+      reauthenticate(ws);
+      count++;
+    }
     disconnected += count;
     return count;
   }
@@ -277,6 +358,8 @@ export function createHandlers({
   function reauthenticate(ws) {
     hubs.get(ws)?.close();
     hubs.delete(ws);
+    links.get(ws)?.close();
+    links.delete(ws);
     seen.get(ws)?.cancel?.();
     seen.delete(ws);
     ws.close(...REAUTHENTICATE);
@@ -289,7 +372,7 @@ export function createHandlers({
   async function revalidate(filter) {
     if (closing) return 0;
     let count = 0;
-    for (const closedOnes of await Promise.all([...hubs.values()].map(hub => hub.revalidate(filter)))) count += closedOnes;
+    for (const closedOnes of await Promise.all([...hubs.values(), ...links.values()].map(hub => hub.revalidate(filter)))) count += closedOnes;
     revoked += count;
     return count;
   }
@@ -302,6 +385,10 @@ export function createHandlers({
       const times = seen.get(ws);
       if (!times) continue;   // a handshake completed only to be refused
       out.push({ user: hub.user, stores: hub.stores, buffered: ws.getBufferedAmount(), idleMs: now - times.heard, openMs: now - times.opened, expiresAt: times.expires });
+    }
+    for (const [ws, link] of links) {
+      const times = seen.get(ws);
+      if (times) out.push(...relaySockets(link, { buffered: ws.getBufferedAmount(), idleMs: now - times.heard, openMs: now - times.opened }, now));
     }
     return out;
   }

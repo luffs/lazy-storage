@@ -5,8 +5,14 @@ import type { Unsubscribe } from 'lazy-watch';
 /** 'through' while the server answers, 'local' while the relay answers from its copies */
 export type RelayMode = 'through' | 'local';
 
-/** A client socket's state at the relay: waiting to be dialled through, passed through, or answered from the copies */
-export type RelaySocketState = 'dialing' | 'through' | 'local' | 'closed';
+/** A client socket's state at the relay: waiting to be dialled through, passed through, answered from the copies, or fanned out (read on the relay's link) */
+export type RelaySocketState = 'dialing' | 'through' | 'local' | 'fan' | 'closed';
+
+/** Fan-out: what the server's relay route judges a client by, the headers and query its own socket would carry */
+export interface RelayCredential {
+  headers?: Record<string, string>;
+  query?: string;
+}
 
 /** One store's copy as a document: what `write` is handed and `load` gives back */
 export interface CopyDocument {
@@ -72,6 +78,12 @@ export interface RelayOptions {
   authorizeOffline?(key: string, storeId: string): boolean;
   /** An offline op's last gate: false or a throw leaves it unapplied, and pending. `state` is the copy: read it only */
   validate?(diff: object, context: { key: string | null; replicaId: string; storeId: string; state: object }): boolean | void;
+  /** Fan-out: dials the server's relay route with the relay's own credential; the relay then reads each store once for every client that has a credential */
+  link?: TransportFactory;
+  /** Fan-out: how long (ms) the relay's session on a store outlives the store's last client (default 20 000) */
+  linger?: number;
+  /** Fan-out: a client's socket up for its edits closes once it has had nothing to wait for this long (ms, default 30 000) */
+  writeIdle?: number;
   /** Copies are written at most this often (ms, default 1000), and on flush() and close() */
   saveDelay?: number;
   /** A copy nobody had open, and a credential the server did not answer, for this long (ms, default 30 days) are let go; Infinity keeps them */
@@ -92,6 +104,8 @@ export interface RelaySocketOptions {
   key?: string | null;
   /** Dials the server with the client's credential, and the same path and query */
   upstream: TransportFactory;
+  /** Fan-out: what the server judges the client by; a client without one is passed through */
+  credential?: RelayCredential;
 }
 
 /** A client's socket at the relay: feed it what the client sends, parsed, and close it when the socket closes */
@@ -121,12 +135,19 @@ export interface RelayStats {
   mode: RelayMode;
   /** When the server first failed to answer (the relay's clock), or null */
   downSince: number | null;
-  sockets: { dialing: number; through: number; local: number };
+  sockets: { dialing: number; through: number; local: number; fan: number };
   copies: number;
   live: number;
   diverged: number;
   /** Credentials the server has answered */
   credentials: number;
+  /**
+   * Fan-out: the link's state ('broken': the server answers the clients
+   * and not the link, which are passed through meanwhile; 'refused': the
+   * server turned the relay away), how many stores it reads on it, and how
+   * many clients it has vouched for
+   */
+  link?: { state: 'down' | 'dialing' | 'open' | 'broken' | 'refused'; shared: number; clients: number };
 }
 
 export interface RelaySocketInfo {

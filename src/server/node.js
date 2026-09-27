@@ -18,6 +18,7 @@ import { createServer } from 'node:http';
 import { WebSocketServer } from 'ws';
 import { LazyWatch } from 'lazy-watch';
 import { createHub } from './hub.js';
+import { createRelayLink, credentialRequest, relaySockets } from './relays.js';
 import { toJSON, closeUnauthorized, deflateOptions, TOO_FAR_BEHIND, REAUTHENTICATE, MIN_SESSION_MS, expiryOf, runAt, rollUpSockets } from './wire.js';
 import { snapshotOptions, snapshotId, serveSnapshot } from './snapshot.js';
 
@@ -72,9 +73,12 @@ export function createHandlers({
   httpSnapshots = true,
   idleTimeout = 120_000,
   maxBuffered = 16 * 1024 * 1024,
+  relays,
   onError = err => console.error('lazy-storage:', err)
 } = {}) {
   if (!stores) throw new TypeError('createHandlers requires stores (a registry or a resolver function)');
+  if (relays !== undefined && typeof relays?.authenticate !== 'function') throw new TypeError('relays needs authenticate(req): the relay a request is');
+  const relayPath = relays ? relays.path ?? `${path}/relay` : null;
   const resolveStore = typeof stores === 'function' ? stores : id => stores.get(id);
   const snapshots = snapshotOptions(httpSnapshots);
   const snapshotRoute = snapshots && { threshold: snapshots.threshold, url: id => `${path}/snapshot/${id}` };
@@ -118,6 +122,7 @@ export function createHandlers({
     if (typeof drop.unref === 'function') drop.unref();
   };
   const hubs = new Map();
+  const links = new Map();   // relay sockets -> their link (see relays.js)
   const heard = new Map();   // socket -> when it last sent something, for idleTimeout
   const opened = new Map();  // socket -> when it opened
   const expiring = new Map(); // socket -> { at, cancel }: when its session runs out, and the timer for it
@@ -132,24 +137,39 @@ export function createHandlers({
   }, Math.max(100, Math.min(idleTimeout / 4, 30_000))) : null;
   if (typeof sweeper?.unref === 'function') sweeper.unref();
 
-  function open(ws, user, expires) {
+  /** Who a client a relay vouches for is, as the Bun adapter's admit: its own socket's judgment, over the request it would have made */
+  async function admit(credential, relay) {
+    const req = credentialRequest(credential, path, relays.headers ?? []);
+    let user;
+    if (authenticate) {
+      user = await authenticate(req, { relay });
+      if (user === null || user === undefined) return null;
+    }
+    const expires = expiresAt ? expiryOf(await expiresAt(user, req, { relay })) : null;
+    if (expires !== null && expires - Date.now() < minSession) return null;
+    return { user, expires };
+  }
+
+  function open(ws, user, expires, relay) {
     // A broadcast is encoded once for every socket it reaches (see wire.js)
-    const hub = createHub(resolveStore, {
-      send: message => send(ws, message),
-      user,
-      authorizeId,
-      authorize,
-      httpSnapshots: snapshotRoute,
-      onError
-    });
-    hubs.set(ws, hub);
+    const hub = relay !== undefined
+      ? createRelayLink(resolveStore, { send: message => send(ws, message), relay, admit, authorizeRelay: relays.authorize, authorizeId, authorize, linger: relays.linger, rate: relays.rate, onError })
+      : createHub(resolveStore, {
+        send: message => send(ws, message),
+        user,
+        authorizeId,
+        authorize,
+        httpSnapshots: snapshotRoute,
+        onError
+      });
+    (relay !== undefined ? links : hubs).set(ws, hub);
     heard.set(ws, Date.now());
     opened.set(ws, Date.now());
     if (expires !== null) {
       expiring.set(ws, {
         at: expires,
         cancel: runAt(expires, () => {
-          if (closing || !hubs.has(ws)) return;
+          if (closing || (!hubs.has(ws) && !links.has(ws))) return;
           expired++;
           reauthenticate(ws);
         })
@@ -166,7 +186,7 @@ export function createHandlers({
       if (!LazyWatch.Utils.isPlainObject(msg)) return ws.send(JSON.stringify({ t: 'error', message: 'Expected a message object' }));
       // A bug below this point must not take the process down with it
       try {
-        hubs.get(ws)?.receive(msg);
+        (hubs.get(ws) ?? links.get(ws))?.receive(msg);
       } catch (err) {
         onError(err);
         ws.send(JSON.stringify({ t: 'error', store: msg.store, message: 'Something went wrong' }));
@@ -175,6 +195,8 @@ export function createHandlers({
     ws.on('close', () => {
       hubs.get(ws)?.close();
       hubs.delete(ws);
+      links.get(ws)?.close();
+      links.delete(ws);
       heard.delete(ws);
       opened.delete(ws);
       expiring.get(ws)?.cancel();
@@ -187,7 +209,8 @@ export function createHandlers({
   }
 
   async function upgrade(req, socket, head) {
-    if (new URL(req.url, 'http://localhost').pathname !== path) return false;
+    const pathname = new URL(req.url, 'http://localhost').pathname;
+    if (pathname !== path && pathname !== relayPath) return false;
     try {
       if (closing) {
         refuse(socket, 503, 'Server shutting down');
@@ -198,6 +221,15 @@ export function createHandlers({
         wss.handleUpgrade(req, socket, head, closeUnauthorized);
         return true;
       };
+      if (pathname === relayPath) {
+        const asked = toRequest(req);
+        const relay = await relays.authenticate(asked);
+        if (relay === null || relay === undefined) return turnAway();
+        const expires = relays.expiresAt ? expiryOf(await relays.expiresAt(relay, asked)) : null;
+        if (expires !== null && expires - Date.now() < minSession) return turnAway();
+        wss.handleUpgrade(req, socket, head, ws => open(ws, undefined, expires, relay));
+        return true;
+      }
       const asked = authenticate || expiresAt ? toRequest(req) : null;
       let user;
       if (authenticate) {
@@ -242,7 +274,7 @@ export function createHandlers({
     closing = true;
     clearInterval(sweeper);
     for (const { cancel } of expiring.values()) cancel();
-    const sockets = [...hubs.keys()];
+    const sockets = [...hubs.keys(), ...links.keys()];
     const gone = Promise.all(sockets.map(ws => new Promise(resolve => {
       if (ws.readyState === ws.CLOSED) return resolve();
       ws.once('close', resolve);
@@ -255,8 +287,9 @@ export function createHandlers({
       }
     }
     await Promise.race([gone, new Promise(resolve => setTimeout(resolve, 1000))]);
-    for (const hub of hubs.values()) hub.close();
+    for (const hub of [...hubs.values(), ...links.values()]) hub.close();
     hubs.clear();
+    links.clear();
     wss.close();
     if (typeof stores.dispose === 'function') stores.dispose();
   }
@@ -270,6 +303,17 @@ export function createHandlers({
       reauthenticate(ws);
       count++;
     }
+    // A relay the filter picks is cut off, its clients with it; the others'
+    // clients it picks are revoked, and their relay closes their sockets as
+    // this would have
+    for (const [ws, link] of [...links]) {
+      if (filter && !filter(link.relay)) {
+        count += link.disconnect(filter);
+        continue;
+      }
+      reauthenticate(ws);
+      count++;
+    }
     disconnected += count;
     return count;
   }
@@ -278,6 +322,8 @@ export function createHandlers({
   function reauthenticate(ws) {
     hubs.get(ws)?.close();
     hubs.delete(ws);
+    links.get(ws)?.close();
+    links.delete(ws);
     heard.delete(ws);
     opened.delete(ws);
     expiring.get(ws)?.cancel();
@@ -289,7 +335,7 @@ export function createHandlers({
   async function revalidate(filter) {
     if (closing) return 0;
     let count = 0;
-    for (const closedOnes of await Promise.all([...hubs.values()].map(hub => hub.revalidate(filter)))) count += closedOnes;
+    for (const closedOnes of await Promise.all([...hubs.values(), ...links.values()].map(hub => hub.revalidate(filter)))) count += closedOnes;
     revoked += count;
     return count;
   }
@@ -297,7 +343,7 @@ export function createHandlers({
   /** The open sockets, how far behind each is (see the returns above) */
   function sockets() {
     const now = Date.now();
-    return [...hubs].map(([ws, hub]) => ({
+    const out = [...hubs].map(([ws, hub]) => ({
       user: hub.user,
       stores: hub.stores,
       buffered: ws.bufferedAmount,
@@ -305,6 +351,8 @@ export function createHandlers({
       openMs: now - opened.get(ws),
       expiresAt: expiring.get(ws)?.at ?? null
     }));
+    for (const [ws, link] of links) out.push(...relaySockets(link, { buffered: ws.bufferedAmount, idleMs: now - heard.get(ws), openMs: now - opened.get(ws) }, now));
+    return out;
   }
 
   return { upgrade, request, close, get closing() { return closing; }, sockets, socketStats: () => rollUpSockets(sockets(), { cutOff, disconnected, expired, revoked }), disconnect, revalidate, wss };

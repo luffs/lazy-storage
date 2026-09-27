@@ -1,6 +1,6 @@
 // Type declarations for `lazy-storage/relay/bun`. Hand-written.
 import type { TransportFactory } from './client.js';
-import type { Relay, RelaySocketState } from './relay.js';
+import type { Relay, RelaySocketState, RelayCredential } from './relay.js';
 
 export interface RelayHandlerOptions {
   /** From createRelay */
@@ -9,11 +9,13 @@ export interface RelayHandlerOptions {
   upstream(req: Request): TransportFactory;
   /** A fingerprint of the request's credential; without one (null) the client is passed through and never answered offline */
   key?(req: Request): string | null | Promise<string | null>;
+  /** Fan-out: what the server's relay route judges the client by (see server/relays.js); a client without one is passed through */
+  credential?(req: Request): RelayCredential | null | Promise<RelayCredential | null>;
   /** WebSocket path (default '/ws') */
   path?: string;
   /** The largest message (bytes) a client may send; default 4 MB */
   maxPayload?: number;
-  /** As the server's: messages of `threshold` bytes or more (default 1024) go compressed; false turns it off */
+  /** As the server's: messages of `threshold` bytes or more (default 64 KB here: a relay compresses per client) go compressed; false turns it off */
   perMessageDeflate?: boolean | ({ threshold?: number } & Record<string, unknown>);
   /** Close a socket whose unsent output passes this many bytes (code 1013); default 16 MB */
   maxBuffered?: number | false;

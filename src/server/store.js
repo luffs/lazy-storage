@@ -36,7 +36,10 @@
 // Protocol (client -> server):
 //   { t: 'hello', replicaId, ops: [op...], since? }   connect or reconnect:
 //       the client's whole outbox, and the store version it last saw; the
-//       server merges the ops and replies with what the client is missing
+//       server merges the ops and replies with what the client is missing.
+//       `follow: false` in the first hello makes the session write-only:
+//       no patches or presence after the answer, and not listed (a relay's
+//       way up for a client's edits; see session below)
 //   { t: 'op', op }                           one live batch
 //   { t: 'share', data }                      what this session shares with
 //       every peer (see presence below); null clears it. A hello may carry
@@ -62,8 +65,9 @@
 //       client then holds an edit the server never will
 //   { t: 'patch', diff, ts, v }                 an accepted diff (from any
 //       replica, the receiving one included) and the version it made
-//   { t: 'ack', seq, ts, correction }           `correction` is a diff with
-//       the server's values at the leaves the op lost, or null
+//   { t: 'ack', seq, ts, correction, v }        `correction` is a diff with
+//       the server's values at the leaves the op lost, or null; `v` the
+//       store's version with the op in it
 //   { t: 'presence', peers }                    every session as a peer
 //       { replicaId, user, key, data }: `key` is what presence groups
 //       users by, `data` what the session shares. Sent to a session right
@@ -83,7 +87,7 @@
 //   { t: 'pong' }
 import { LazyWatch } from 'lazy-watch';
 import { createClock, isTimestamp } from '../core/hlc.js';
-import { registerSet, pathKey, parsePathKey, setAt, valueAt } from '../core/paths.js';
+import { registerSet, pathKey, parsePathKey, valueAt, correctionAt } from '../core/paths.js';
 import { leaves, assertModel, rebuild, expandRegisters, replacingRegisters } from '../core/model.js';
 import { mergeOp, compactTombstones } from '../core/merge.js';
 import { ClockMap } from '../core/clocks.js';
@@ -342,15 +346,20 @@ export function createStore({
   }
 
   function broadcast(message) {
-    if (sessions.size === 0) return;
+    let followers = 0;
+    for (const s of sessions) if (s.follows) followers++;
+    if (followers === 0) return;
     toJSON(message);  // encoded once, however many sessions there are
     const bytes = encodedBytes(message);
-    tally(String(message.t), sessions.size, sessions.size * bytes);
-    // A session whose transport can fan out (Bun's topic publish, which
-    // compresses once) hears it through one publish, which reaches every
-    // such session at once; the rest are sent to one by one
+    tally(String(message.t), followers, followers * bytes);
+    // A session whose transport can fan out (Bun's topic publish) hears it
+    // through one publish, which reaches every
+    // such session at once; the rest are sent to one by one. A session that
+    // does not follow the store (a relay's client's peer, a write-only
+    // session: see session and peer below) hears none of it
     let published = false;
     for (const s of sessions) {
+      if (!s.follows) continue;
       if (!s.publish) s.transportSend(message);
       else if (!published) {
         s.publish(message);
@@ -384,7 +393,7 @@ export function createStore({
     const seen = new Map();
     if (!pres) return [];
     for (const s of sessions) {
-      if (s.user === undefined || !s.replicaId) continue;
+      if (s.user === undefined || !s.replicaId || !s.listed) continue;
       const key = pres.key(s.user);
       if (!seen.has(key)) seen.set(key, pres.user(s.user));
     }
@@ -402,11 +411,11 @@ export function createStore({
     return peer;
   }
 
-  /** Every session that has said hello (none while presence is off) */
+  /** Every session that has said hello and is listed (none while presence is off) */
   function peers() {
     const list = [];
     if (!pres) return list;
-    for (const s of sessions) if (s.replicaId) list.push(peerOf(s));
+    for (const s of sessions) if (s.replicaId && s.listed) list.push(peerOf(s));
     return list;
   }
 
@@ -513,27 +522,7 @@ export function createStore({
   function correction(paths) {
     // Read where the paths lead, and copy only that: a copy of the whole
     // state per op that lost a leaf cost the state's size per conflict
-    const raw = LazyWatch.resolveIfProxy(state);
-    const entries = new Map();
-    for (const path of paths) {
-      let corrected = false;
-      for (let i = 1; i <= path.length; i++) {
-        const sub = path.slice(0, i);
-        const key = pathKey(sub);
-        if (entries.has(key)) { corrected = entries.get(key) === null; if (corrected) break; continue; }
-        const value = valueAt(raw, sub);
-        if (value === undefined) { entries.set(key, null); corrected = true; break; }
-      }
-      if (!corrected) entries.set(pathKey(path), structuredClone(valueAt(raw, path)));
-    }
-    const diff = {};
-    // Shallow entries first so a deletion is not overwritten by a deeper value
-    for (const [key, value] of [...entries].sort((a, b) => a[0].length - b[0].length)) {
-      const path = parsePathKey(key);
-      if (path.slice(0, -1).some((_, i) => entries.get(pathKey(path.slice(0, i + 1))) === null)) continue;
-      setAt(diff, path, value);
-    }
-    return diff;
+    return correctionAt(LazyWatch.resolveIfProxy(state), paths);
   }
 
   function assertOp(op) {
@@ -816,8 +805,23 @@ export function createStore({
    * snapshot.js) hands in `httpSnapshot: { url, threshold }`: a client
    * that says in its hello it can fetch is then pointed at `url` in place
    * of a snapshot of `threshold` bytes or more.
+   *
+   * Two kinds of session serve a relay that carries many clients (see
+   * src/relay and src/server/relays.js). `relay: true` is the relay's own
+   * session: it hears the store as any session does, its patches and its
+   * presence, but it is nobody's peer (not in presence, not among the
+   * peers) and writes nothing: its ops and shares are refused, and it
+   * claims no replica. And a hello that says `follow: false` makes a
+   * write-only session, the one a relay dials for a client's edits under
+   * that client's own credentials: answered as any hello is, its ops judged
+   * and acknowledged as the client's, but it hears no patches and no
+   * presence after its answer, shares nothing, and is not listed, since the
+   * client hears the store through the relay and is listed as the relay's
+   * peer (see peer below). Only a replica that has such a peer gets one: a
+   * `follow: false` from anyone else is not heeded, so nobody reads the
+   * store unlisted. What its first hello says holds for the session's life.
    */
-  function session({ send: transportSend, user, onEvict, broadcast: publish, httpSnapshot } = {}) {
+  function session({ send: transportSend, user, onEvict, broadcast: publish, httpSnapshot, relay = false } = {}) {
     if (typeof transportSend !== 'function') throw new TypeError('A session needs a send function');
     /** Send to this session alone, counted (see `sent`) from the encoding the transport made */
     const send = message => {
@@ -829,6 +833,8 @@ export function createStore({
       transportSend,
       user,
       onEvict,
+      kind: relay === true ? 'relay' : 'client',
+      relay: relay === true,
       publish: typeof publish === 'function' ? publish : null,   // hears broadcasts through the transport's fan-out
       httpSnapshot: typeof httpSnapshot?.url === 'string' ? { url: httpSnapshot.url, threshold: httpSnapshot.threshold ?? SNAPSHOT_THRESHOLD } : null,
       fetch: false,          // whether its hello said it can fetch a snapshot over HTTP
@@ -838,6 +844,8 @@ export function createStore({
       shared: undefined,     // what this session shares with its peers, and its JSON
       sharedJson: undefined,
       presence: true,        // whether it wants to hear of its peers (its hello may say no)
+      follows: true,         // whether it hears the store's patches (a write-only session does not)
+      listed: relay !== true, // whether presence lists it
       receive(msg) {
         // A closed session (evicted, refused its replica, or its store
         // unloaded) hears nothing more, whatever still reaches it
@@ -846,7 +854,8 @@ export function createStore({
         switch (msg.t) {
           case 'hello': {
             if (typeof msg.replicaId !== 'string' || !msg.replicaId) return send({ t: 'error', message: 'hello requires a replicaId' });
-            const claim = claimReplica(s, msg.replicaId);
+            // A relay's own session speaks for no replica: it writes nothing
+            const claim = s.relay ? null : claimReplica(s, msg.replicaId);
             if (claim?.code === 'replica-taken') {
               // Final for this store on this connection: the client's replica
               // is someone else's (a browser that signed in as another user
@@ -862,20 +871,46 @@ export function createStore({
             // replay hellos in a loop
             const wait = throttle(bucketOf(s, msg.replicaId));
             if (wait > 0) return send({ t: 'error', code: 'rate-limited', message: `Too many hellos; try again in ${wait} ms`, retryAfter: wait });
-            s.speaksFor = msg.replicaId;
+            // A write-only session (see above) only for a replica a relay
+            // serves the store to (its peer, which presence lists), at every
+            // hello, so that nobody reads the store unlisted. Not final: the
+            // relay lets its client say hello again, vouched for again first
+            const writeOnly = !s.relay && (s.replicaId ? !s.listed : msg.follow === false);
+            if (writeOnly && !servedByRelay(msg.replicaId)) {
+              send({ t: 'closed', code: 'unavailable', message: 'No relay serves this replica the store; say hello to it through one' });
+              s.close();
+              s.onEvict?.();
+              return;
+            }
             s.heldUntil = null;
-            try {
-              takeReplica(s, msg.replicaId);
-            } catch (err) {
-              if (disposed) return;   // the commit failed and the store unloaded (see commit)
-              throw err;
+            if (!s.relay) {
+              s.speaksFor = msg.replicaId;
+              try {
+                takeReplica(s, msg.replicaId);
+              } catch (err) {
+                if (disposed) return;   // the commit failed and the store unloaded (see commit)
+                throw err;
+              }
             }
             const joined = !s.replicaId;
             s.replicaId = msg.replicaId;
-            if (msg.presence === false) s.presence = false;
+            // From its first hello on
+            if (writeOnly && joined) {
+              s.follows = false;
+              s.presence = false;
+              s.listed = false;
+            }
+            // Every hello says whether the session hears presence, either
+            // way: a client may change its mind while it runs (the client's
+            // wantPresence, a relay's session for the clients behind it). A
+            // write-only session never hears it
+            const hadPresence = s.presence;
+            if (s.follows) s.presence = msg.presence !== false;
             s.fetch = msg.fetch === true;
             let shared = false;
-            if (msg.share !== undefined) {
+            if (msg.share !== undefined && !s.listed) {
+              send({ t: 'error', code: 'forbidden', message: s.relay ? 'A relay\'s session shares nothing' : 'A write-only session shares nothing' });
+            } else if (msg.share !== undefined) {
               try {
                 shared = setShared(s, msg.share);
               } catch (err) {
@@ -888,6 +923,7 @@ export function createStore({
             // The client sends its first HELLO_OPS and the rest once this is answered
             for (const op of Array.isArray(msg.ops) ? msg.ops.slice(0, HELLO_OPS) : []) {
               try {
+                if (s.relay) throw readOnlyRelay();
                 const { rejected } = apply(op, s);
                 lost.push(...rejected);
                 if (rejected.length) lostByOp.push({ seq: op.seq, paths: rejected });
@@ -906,17 +942,20 @@ export function createStore({
             send(catchUp(s, msg.since, msg.epoch, refused, corrections, lostByOp));
             // The newcomer gets the whole picture now; everyone else hears
             // of it with the next flush. A re-hello on the same session
-            // changes nothing unless it shares anew
+            // changes nothing unless it shares anew, or turns presence on,
+            // which brings the whole picture as a newcomer's hello does
             if (joined && pres) {
               if (s.presence) send({ t: 'presence', peers: peers() });
-              noteChange(s, 'join');
-            } else if (shared) {
-              noteChange(s, 'share');
+              if (s.listed) noteChange(s, 'join');
+            } else {
+              if (pres && s.presence && !hadPresence) send({ t: 'presence', peers: peers() });
+              if (shared) noteChange(s, 'share');
             }
             return;
           }
           case 'share': {
             try {
+              if (!s.listed) throw new RefusedError('forbidden', s.relay ? 'A relay\'s session shares nothing' : 'A write-only session shares nothing');
               // A share draws on the same bucket as an op, so a client
               // cannot flood the room through presence; the refused one is
               // not lost, since the client's next hello carries its latest
@@ -932,6 +971,7 @@ export function createStore({
           }
           case 'op': {
             try {
+              if (s.relay) throw readOnlyRelay();
               const replica = Utils.isPlainObject(msg.op) ? msg.op.replicaId : undefined;
               // Once an op is refused for the rate, every later live op is
               // too, until the hello that resends them in order: a later op
@@ -946,7 +986,10 @@ export function createStore({
                 throw new RefusedError('rate-limited', `Too many ops; try again in ${wait} ms`, { retryAfter: wait });
               }
               const result = apply(msg.op, s);
-              const ack = { t: 'ack', seq: msg.op.seq, ts: clock.peek(), correction: result.correction };
+              // `v`: the version the store is at with the op in it, so a
+              // relay passing the ack on can hold it until the client has
+              // heard every patch up to there (see src/relay)
+              const ack = { t: 'ack', seq: msg.op.seq, ts: clock.peek(), correction: result.correction, v: version };
               // Which of the op's leaves lost (to a newer write, a tombstone, or the validator), so the client can say so
               if (result.rejected.length) ack.lost = result.rejected;
               return send(ack);
@@ -964,32 +1007,112 @@ export function createStore({
       },
       close() {
         if (!sessions.delete(s)) return;
-        if (s.replicaId) noteChange(s, 'leave');
-        if (observers.session.size) notify('session', { event: 'close', user, replicaId: s.replicaId, sessions: sessions.size });
+        if (s.replicaId && s.listed) noteChange(s, 'leave');
+        if (observers.session.size) notify('session', { event: 'close', kind: s.kind, user, replicaId: s.replicaId, sessions: sessions.size });
       }
     };
     sessions.add(s);
     // Presence goes out once the session has said hello (see presence above)
-    if (observers.session.size) notify('session', { event: 'open', user, replicaId: null, sessions: sessions.size });
+    if (observers.session.size) notify('session', { event: 'open', kind: s.kind, user, replicaId: null, sessions: sessions.size });
     return s;
+  }
+
+  const readOnlyRelay = () => new RefusedError('forbidden', 'A relay\'s session reads the store and writes nothing');
+
+  /** Whether a relay serves the store to this replica now: a peer of it is listed (see peer) */
+  function servedByRelay(replicaId) {
+    for (const s of sessions) if (s.kind === 'peer' && s.replicaId === replicaId) return true;
+    return false;
+  }
+
+  /**
+   * A client that a relay serves the store to (see src/server/relays.js):
+   * a session that hears nothing, since the relay passes the store on to
+   * it, and is the client's in every other way. It is listed in presence
+   * under its user and replica, claims the replica as a hello would (and
+   * is refused one that is another user's), costs a token from its user's
+   * bucket as a hello does, has its shares judged, and is closed by
+   * closeSessions and dispose like any session, `onEvict(code)` telling the
+   * relay's link why ('evicted', 'unavailable'). The client's edits reach
+   * the store on a write-only session of its own (see session above).
+   * Throws a RefusedError where a hello would be refused: 'replica-taken',
+   * 'forbidden' (the store's own replica id), 'rate-limited' (with
+   * `retryAfter`), 'unavailable' (the store could not save the claim).
+   * `via` is the relay, for the 'session' observers
+   */
+  function peer({ user, replicaId, via, onEvict } = {}) {
+    if (typeof replicaId !== 'string' || !replicaId) throw new TypeError('A peer needs a replicaId');
+    const s = {
+      send() {},
+      transportSend() {},
+      user,
+      onEvict,
+      via,
+      kind: 'peer',
+      relay: false,
+      publish: null,
+      replicaId: null,
+      speaksFor: null,
+      heldUntil: null,
+      shared: undefined,
+      sharedJson: undefined,
+      presence: false,
+      follows: false,
+      listed: true,
+      close() {
+        if (!sessions.delete(s)) return;
+        noteChange(s, 'leave');
+        if (observers.session.size) notify('session', { event: 'close', kind: 'peer', via, user, replicaId, sessions: sessions.size });
+      }
+    };
+    const claim = claimReplica(s, replicaId);
+    if (claim) throw new RefusedError(claim.code, claim.message);
+    const wait = throttle(bucketOf(s, replicaId));
+    if (wait > 0) throw new RefusedError('rate-limited', `Too many hellos; try again in ${wait} ms`, { retryAfter: wait });
+    takeReplica(s, replicaId);
+    s.replicaId = s.speaksFor = replicaId;
+    sessions.add(s);
+    if (observers.session.size) notify('session', { event: 'open', kind: 'peer', via, user, replicaId, sessions: sessions.size });
+    noteChange(s, 'join');
+    return {
+      user,
+      replicaId,
+      /** How presence shows it (its replica id alone while presence is off) */
+      get peer() { return pres ? peerOf(s) : { replicaId }; },
+      /** Whether the store has presence on at all */
+      presence: pres !== null,
+      get closed() { return !sessions.has(s); },
+      /** Share data with the store's peers, judged as a session's share is; throws a RefusedError */
+      share(data) {
+        if (!sessions.has(s)) throw new RefusedError('unavailable', 'The client is no longer on the store');
+        const waitFor = throttle(bucketOf(s, replicaId));
+        if (waitFor > 0) throw new RefusedError('rate-limited', `Too many shares; try again in ${waitFor} ms`, { retryAfter: waitFor });
+        if (setShared(s, data)) noteChange(s, 'share');
+      },
+      close: () => s.close()
+    };
   }
 
   /**
    * Evict every session the predicate selects: it receives a `closed`
    * message (code 'evicted') and is closed; its transport is told through
-   * `onEvict`. Returns how many were closed.
+   * `onEvict`. Returns how many were closed. A relay's own session is no
+   * client's and is not asked about: its clients are (as peers), and it
+   * goes when they have (see relays.js)
    * @param {(session: {user: any, replicaId: string|null}) => boolean} predicate
    * @param {string} [message]
    */
   function closeSessions(predicate, message = 'Your session was closed by the server') {
     let closed = 0;
     for (const s of [...sessions]) {
-      if (!predicate(s)) continue;
+      if (s.relay || !predicate(s)) continue;
       try {
         s.send({ t: 'closed', code: 'evicted', message });
       } catch { /* the transport may already be gone */ }
       s.close();
-      s.onEvict?.();
+      // A peer is told why (its relay passes it on); a transport's own callback is called as ever, with nothing
+      if (s.kind === 'peer') s.onEvict?.('evicted');
+      else s.onEvict?.();
       closed++;
     }
     return closed;
@@ -1076,6 +1199,11 @@ export function createStore({
       alive('open a session on');
       return session(options);
     },
+    /** A client a relay serves: listed, claimed, judged, but sent nothing (see peer above) */
+    peer: options => {
+      alive('add a peer to');
+      return peer(options);
+    },
     /** True once dispose() ran (a registry's idle sweep does): the store takes no more writes or sessions */
     get disposed() { return disposed; },
     closeSessions,
@@ -1094,8 +1222,9 @@ export function createStore({
      * 'op' ({ replicaId, seq, user, accepted, rejected, version }) for every
      * op merged, the server's own included; 'refused' ({ replicaId, seq,
      * user, code, message }) for every client op turned away; 'session'
-     * ({ event: 'open' | 'close', user, replicaId, sessions }). Returns an
-     * unsubscribe function
+     * ({ event: 'open' | 'close', kind, user, replicaId, sessions }), `kind`
+     * being 'client', 'relay' (a relay's own session) or 'peer' (a client a
+     * relay serves, with `via`, the relay). Returns an unsubscribe function
      */
     observe(event, fn) {
       if (!observers[event]) throw new TypeError(`Unknown store event "${event}"`);
@@ -1163,7 +1292,8 @@ export function createStore({
           s.send({ t: 'closed', code: 'unavailable', message: 'The store was unloaded; say hello again' });
         } catch { /* the transport may already be gone */ }
         s.close();
-        s.onEvict?.();
+        if (s.kind === 'peer') s.onEvict?.('unavailable');
+        else s.onEvict?.();
       }
       // Nobody is left to tell
       cancelFlush?.();

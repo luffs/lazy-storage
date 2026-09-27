@@ -37,11 +37,11 @@ test('observe reports every op, refusal, and session; a throwing observer goes t
     delete e.ms;
   }
   assert.deepEqual(events, [
-    ['session', { event: 'open', user: { id: 'u1' }, replicaId: null, sessions: 1 }],
+    ['session', { event: 'open', kind: 'client', user: { id: 'u1' }, replicaId: null, sessions: 1 }],
     ['op', { replicaId: 'a', seq: 1, user: { id: 'u1' }, accepted: true, rejected: 0, version: 1 }],
     ['op', { replicaId: 'server', seq: 1, user: undefined, accepted: true, rejected: 0, version: 2 }],
     ['refused', { replicaId: 'a', seq: 2, user: { id: 'u1' }, code: 'forbidden', message: '"locked" is read-only' }],
-    ['session', { event: 'close', user: { id: 'u1' }, replicaId: 'a', sessions: 0 }]
+    ['session', { event: 'close', kind: 'client', user: { id: 'u1' }, replicaId: 'a', sessions: 0 }]
   ]);
   assert.deepEqual(faults, ['observer bug', 'observer bug'], 'once per op, and the other observers still ran');
 

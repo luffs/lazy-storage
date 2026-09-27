@@ -1340,3 +1340,86 @@ test('a socket waiting to be dialled through holds no more than 16 MB of what it
   assert.deepEqual(closes, [1008]);
   relay.close();
 });
+
+test('the known file is written for the server\'s clock once the minute is out, not at every save; a credential newly answered, a jump of the clock, flush() and close() write it at once', t => {
+  t.mock.timers.enable({ apis: ['setInterval', 'setTimeout'] });
+  const storage = memoryCopies();
+  const known = [];   // each write of the known file: its clock and its credentials
+  let copyWrites = 0;
+  const { write, writeKnown } = storage;
+  storage.write = (id, doc) => { copyWrites++; write(id, doc); };
+  storage.writeKnown = doc => { known.push({ centralTs: doc.centralTs, keys: doc.keys.map(([key]) => key) }); writeKnown(doc); };
+  const errors = [];
+  const relay = createRelay({ storage, keepalive: false, grace: 0, jitter: 0, probe: false, onError: err => errors.push(err) });
+  const T = 1_700_000_000_000;
+  const clockMoves = () => { for (const until = performance.now() + 2; performance.now() < until;); };
+  let v = 1;
+  /** A socket passed through, its hello answered by the server */
+  const follow = (key, replicaId) => {
+    const up = manual();
+    const s = relay.accept({ send() {}, close() {}, key, upstream: up });
+    up.opened[0].onopen();
+    s.receive({ t: 'hello', store: 'main', replicaId, ops: [] });
+    up.opened[0].onmessage({ t: 'snapshot', store: 'main', state: relay.copy('main')?.state ?? INITIAL, ts: [T, 0, 'server'], seq: 0, registers: [], v, epoch: 'E' });
+    return up.opened[0];
+  };
+  const up = follow('k', 'r');
+  const patch = () => {
+    v++;
+    up.onmessage({ t: 'patch', store: 'main', diff: { tasks: { [`t${v}`]: { id: `t${v}` } } }, ts: [T + v, 0, 'r'], v });
+  };
+  t.mock.timers.tick(1_000);
+  assert.deepEqual(known.map(w => w.keys), [['k']], 'the credential the server answered, at the first save');
+  assert.equal(copyWrites, 1);
+
+  // A copy that changes every second: written every second, the known file not once in the minute
+  for (let second = 1; second < 59; second++) {
+    patch();
+    t.mock.timers.tick(1_000);
+  }
+  patch();
+  t.mock.timers.tick(999);
+  assert.equal(copyWrites, 59, 'the copy was written every second');
+  assert.equal(known.length, 1, 'fifty-nine seconds of saves, and no write of the known file');
+  assert.equal(relay.copy('main').v, 60);
+  clockMoves();
+  t.mock.timers.tick(2_001);
+  assert.equal(known.length, 2, 'once the minute is out, within saveDelay');
+  assert.ok(known[1].centralTs > known[0].centralTs, 'the clock carried on');
+  assert.deepEqual(known[1].keys, ['k']);
+  for (let second = 0; second < 10; second++) {
+    patch();
+    t.mock.timers.tick(1_000);
+  }
+  assert.equal(known.length, 2, 'and not again in the next minute\'s first seconds');
+
+  // A credential newly answered goes at the next save, whatever the minute
+  follow('k2', 'r2');
+  t.mock.timers.tick(1_000);
+  assert.equal(known.length, 3, 'a new credential is written at the next save');
+  assert.deepEqual(known[2].keys.sort(), ['k', 'k2']);
+
+  // The server's clock heard a little ahead waits for the minute; heard more than a minute and saveDelay ahead, it goes at the next save
+  up.onmessage({ t: 'ack', store: 'main', seq: 1, ts: [Math.ceil(known[2].centralTs) + 30_000, 0, 'server'], v });
+  patch();
+  t.mock.timers.tick(1_000);
+  assert.equal(known.length, 3, 'a stamp half a minute ahead is no reason to write');
+  const jumped = Math.ceil(known[2].centralTs) + 3 * 60_000;
+  up.onmessage({ t: 'ack', store: 'main', seq: 2, ts: [jumped, 0, 'server'], v });
+  patch();
+  t.mock.timers.tick(1_000);
+  assert.equal(known.length, 4, 'a jump of three minutes is written at the next save');
+  assert.ok(known[3].centralTs >= jumped);
+
+  // flush() and close() write the clock, nothing else having changed
+  clockMoves();
+  relay.flush();
+  assert.equal(known.length, 5, 'flush() writes the clock');
+  assert.ok(known[4].centralTs > known[3].centralTs);
+  clockMoves();
+  relay.close();
+  assert.equal(known.length, 6, 'and so does close()');
+  assert.ok(known[5].centralTs > known[4].centralTs);
+  assert.equal(storage.load().known.centralTs, known[5].centralTs, 'what the next relay starts from');
+  assert.deepEqual(errors, []);
+});

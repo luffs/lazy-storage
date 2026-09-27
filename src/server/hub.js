@@ -68,7 +68,7 @@ export function createHub(resolveStore, { send, user, authorizeId, authorize, ch
       send: message => send(tagStore(message, id)),
       user,
       onEvict: () => drop(id),
-      // The transport fans a store's patch out to every subscribed socket at once, tagged and compressed once
+      // The transport fans a store's patch out to every subscribed socket at once, tagged and encoded once
       broadcast: channel ? message => channel.publish(id, tagStore(message, id)) : undefined,
       // Where a client that can fetch gets a large snapshot, when the transport serves the route
       httpSnapshot: httpSnapshots ? { url: httpSnapshots.url(id), threshold: httpSnapshots.threshold } : undefined
@@ -80,7 +80,11 @@ export function createHub(resolveStore, { send, user, authorizeId, authorize, ch
 
   function deliver(id, msg) {
     const { store: _store, ...inner } = msg;
-    sessions.get(id)?.receive(inner);
+    const session = sessions.get(id);
+    if (!session) return;
+    session.receive(inner);
+    // A write-only session (a hello with `follow: false`, see store.js) hears none of the store's broadcasts: the socket leaves its topic
+    if (inner.t === 'hello' && session.follows === false) channel?.unsubscribe(id);
   }
 
   /**

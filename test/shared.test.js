@@ -593,3 +593,270 @@ test('a store put back from a copy reaches every tab as one reset: the replica t
   assert.deepEqual(heard.c[0].previous.state, { tasks: { x: { id: 'x' }, y: { id: 'y' } } });
   assert.equal(heard.a[0].epoch, stores.get('main').epoch);
 });
+
+/**
+ * A network whose server end is watched: every message a socket's hub took
+ * in ('up') or sent ('down'), with the socket's user, the socket's number
+ * and its place on the wire (`at`), in the order they passed. `said` and
+ * `heard` pick a user's messages of a type on a store ('main' unless named)
+ */
+function watchedNetwork(storeOf) {
+  const wire = [];
+  let sockets = 0;
+  const net = createNetwork({
+    session: ({ send, user }) => {
+      const socket = ++sockets;
+      const note = (way, message) => wire.push({ way, socket, user: user?.id, at: wire.length, message: structuredClone(message) });
+      const hub = createHub(storeOf, { send: message => { note('down', message); send(message); }, user });
+      return {
+        receive(message) { note('up', message); hub.receive(message); },
+        close: () => hub.close()
+      };
+    }
+  });
+  const pick = way => (user, type, store = 'main') => wire.filter(w => w.way === way && w.user === user && w.message.t === type && w.message.store === store);
+  return { net, wire, said: pick('up'), heard: pick('down'), get sockets() { return sockets; } };
+}
+
+/** The users a list names, by id, in order: 'u1,u2' */
+const ids = users => users.map(u => u.id).sort().join();
+/** The whole lists among presence messages (the rest are changes) */
+const wholeLists = heard => heard.filter(h => Array.isArray(h.message.peers));
+
+test('a tab that wants no presence: the browser\'s replica says so from its very first hello, the server sends its socket none, and still lists the browser', async t => {
+  const store = createStore({ initial: INITIAL, presence: true });
+  const { net, said, heard } = watchedNetwork(() => store);
+  const z = net.client({ replicaId: 'z', initial: INITIAL }, { user: { id: 'u2', name: 'Bo' } });
+  const b = browser(net);
+  t.after(() => { b.close(); z.dispose(); });
+  const a = b.tab('a', { presence: false });
+  await b.until(() => a.db.status === 'online' && z.status === 'online' && ids(z.presence) === 'u1,u2', 'the tab online, and the other user sees the browser');
+  assert.equal(a.connection.leader, true);
+  const hellos = said('u1', 'hello');
+  assert.equal(hellos.length, 1, 'one hello from the browser');
+  assert.equal(hellos[0].message.presence, false, 'the replica\'s first hello already says no');
+  assert.deepEqual(heard('u1', 'presence'), [], 'no list sent, and no change since');
+  assert.deepEqual(store.peers().map(p => p.user.id).sort(), ['u1', 'u2'], 'the server still lists the browser');
+  assert.equal(store.sessions, 2);
+  assert.deepEqual(a.db.presence, []);
+  assert.deepEqual(a.db.peers, []);
+  assert.equal(a.db.wantsPresence, false);
+
+  // Others come and share: the other user hears all of it, the browser's socket none
+  z.share({ editing: 'x' });
+  const y = net.client({ replicaId: 'y', initial: INITIAL }, { user: { id: 'u3', name: 'Cy' } });
+  t.after(() => y.dispose());
+  await b.until(() => ids(z.presence) === 'u1,u2,u3' && z.peers.some(p => p.data?.editing === 'x'), 'the other user heard the newcomer and its own share');
+  await net.settle();
+  assert.deepEqual(heard('u1', 'presence'), [], 'none of it reached the browser');
+  assert.deepEqual(a.db.presence, []);
+});
+
+test('a second tab that wants presence turns it on for the browser\'s replica: the server sends it the whole list, that tab sees everyone, the other still nobody', async t => {
+  const store = createStore({ initial: INITIAL, presence: true });
+  const { net, said, heard } = watchedNetwork(() => store);
+  const z = net.client({ replicaId: 'z', initial: INITIAL }, { user: { id: 'u2', name: 'Bo' } });
+  const b = browser(net);
+  t.after(() => { b.close(); z.dispose(); });
+  const a = b.tab('a', { presence: false });
+  await b.until(() => a.db.status === 'online' && z.status === 'online' && ids(z.presence) === 'u1,u2', 'online');
+  const quiet = [];
+  a.db.on('peers', peers => quiet.push(['peers', peers]));
+  a.db.on('presence', users => quiet.push(['presence', users]));
+  assert.deepEqual(heard('u1', 'presence'), []);
+
+  const c = b.tab('c');
+  await b.until(() => c.db.status === 'online' && ids(c.db.presence) === 'u1,u2', 'the new tab sees both users');
+  assert.equal(c.connection.leader, false, 'it follows');
+  const hellos = said('u1', 'hello');
+  assert.equal(hellos.length, 2, 'the replica said hello again');
+  assert.equal(hellos[0].message.presence, false);
+  assert.notEqual(hellos[1].message.presence, false, 'wanting presence now');
+  const lists = wholeLists(heard('u1', 'presence'));
+  assert.equal(lists.length, 1, 'the server sent the whole list, as to a newcomer');
+  assert.ok(lists[0].at > hellos[1].at, 'in answer to that hello');
+  assert.deepEqual(lists[0].message.peers.map(p => p.user.id).sort(), ['u1', 'u2']);
+  assert.equal(c.db.peers.length, 2);
+  assert.deepEqual(a.db.presence, [], 'the tab that wants none has none');
+  assert.deepEqual(a.db.peers, []);
+
+  // Changes reach the replica now, and the tab that wants them
+  z.share({ editing: 'x' });
+  await b.until(() => c.db.peers.some(p => p.data?.editing === 'x'), 'the other user\'s share reached the tab that wants presence');
+  assert.ok(heard('u1', 'presence').some(h => h.message.shared), 'through the browser\'s socket');
+  await net.settle();
+  assert.deepEqual(a.db.peers, []);
+  assert.deepEqual(quiet, [], 'the tab that wants none heard nothing of it');
+  assert.equal(store.sessions, 2, 'still one session for the browser');
+  assert.deepEqual(store.peers().map(p => p.user.id).sort(), ['u1', 'u2']);
+});
+
+test('when the last tab that wants presence leaves, the browser\'s replica stops hearing it, and says so again after a reconnect; the browser stays listed', async t => {
+  const store = createStore({ initial: INITIAL, presence: true });
+  const w = watchedNetwork(() => store);
+  const z = w.net.client({ replicaId: 'z', initial: INITIAL }, { user: { id: 'u2', name: 'Bo' } });
+  const b = browser(w.net, { sweepEvery: 20 });
+  t.after(() => { b.close(); z.dispose(); });
+  const a = b.tab('a', { presence: false });
+  const c = b.tab('c');
+  await b.until(() => a.db.status === 'online' && c.db.status === 'online' && ids(c.db.presence) === 'u1,u2', 'the tab that wants presence sees both users');
+  assert.equal(a.connection.leader, true);
+  const before = w.wire.length;
+
+  c.close();
+  await b.until(() => w.said('u1', 'hello').some(h => h.at >= before && h.message.presence === false), 'the replica said hello again, wanting none');
+  const off = w.said('u1', 'hello').find(h => h.at >= before && h.message.presence === false).at;
+  z.share({ editing: 'x' });
+  const y = w.net.client({ replicaId: 'y', initial: INITIAL }, { user: { id: 'u3', name: 'Cy' } });
+  t.after(() => y.dispose());
+  await b.until(() => ids(z.presence) === 'u1,u2,u3' && z.peers.some(p => p.data?.editing === 'x'), 'the other user heard the newcomer and its own share');
+  await w.net.settle();
+  assert.deepEqual(w.heard('u1', 'presence').filter(h => h.at > off), [], 'the browser\'s socket heard none of it');
+  assert.deepEqual(a.db.presence, []);
+  assert.deepEqual(store.peers().map(p => p.user.id).sort(), ['u1', 'u2', 'u3'], 'the browser is still listed');
+
+  // The socket drops and comes back: the replica's hello on the new one still says no
+  const sockets = w.sockets;
+  a.link.goOffline();
+  await b.until(() => a.db.status === 'offline', 'offline');
+  a.link.goOnline();
+  await b.until(() => a.db.status === 'online' && w.said('u1', 'hello').some(h => h.socket > sockets), 'back, and the replica said hello');
+  await b.until(() => ids(z.presence) === 'u1,u2,u3', 'listed again');
+  await w.net.settle();
+  const again = w.said('u1', 'hello').filter(h => h.socket > sockets);
+  assert.ok(again.every(h => h.message.presence === false), 'every hello on the new socket says no');
+  assert.deepEqual(w.heard('u1', 'presence').filter(h => h.socket > sockets), [], 'and the server sent it no list');
+});
+
+test('a replica made for a tab that wants no presence says so in its very first hello: after a handoff, opened from IndexedDB, the server sends the new socket no list', async t => {
+  const store = createStore({ initial: INITIAL, presence: true });
+  const w = watchedNetwork(() => store);
+  const z = w.net.client({ replicaId: 'z', initial: INITIAL }, { user: { id: 'u2', name: 'Bo' } });
+  const name = `idb-${Math.random().toString(36).slice(2)}`;
+  const b = browser(w.net, { storage: s => indexedDBStorage(`${name}-${s}`) });
+  t.after(() => { b.close(); z.dispose(); });
+  const a = b.tab('a');   // leads, and wants presence
+  const c = b.tab('c', { presence: false });
+  await b.until(() => a.db.status === 'online' && c.db.status === 'online' && ids(a.db.presence) === 'u1,u2', 'both online, the leader seeing both users');
+  assert.equal(a.connection.leader, true);
+  assert.equal(wholeLists(w.heard('u1', 'presence')).length, 1, 'the first replica heard the list, for the leader\'s own tab');
+  const first = w.sockets;
+
+  a.close();
+  await b.until(() => c.connection.leader && c.db.status === 'online', 'the tab that wants none leads');
+  await b.until(() => w.said('u1', 'hello').some(h => h.socket > first) && ids(z.presence) === 'u1,u2', 'the new replica said hello, and the browser is listed again');
+  await w.net.settle();
+  const hellos = w.said('u1', 'hello').filter(h => h.socket > first);
+  assert.equal(hellos[0].message.presence, false, 'its first hello already says no');
+  assert.ok(hellos.every(h => h.message.presence === false));
+  assert.deepEqual(w.heard('u1', 'presence').filter(h => h.socket > first), [], 'no list first, nor anything since');
+  assert.deepEqual(c.db.presence, []);
+  assert.deepEqual(store.peers().map(p => p.user.id).sort(), ['u1', 'u2']);
+});
+
+test('a page on a port that wants no presence counts as a tab that wants none: the replica it makes says no, a page that wants it turns it on, and it goes off when that page is let go', async t => {
+  const stores = createStores(() => createStore({ initial: INITIAL, presence: true }));
+  const w = watchedNetwork(id => stores.get(id));
+  const z = w.net.client({ replicaId: 'z', initial: INITIAL }, { user: { id: 'u2', name: 'Bo' } });
+  const b = browser(w.net);
+  t.after(() => { b.close(); z.dispose(); stores.dispose(); });
+  const c = b.tab('c', { store: 'side' });   // leads, with nothing on 'main'
+  const a = b.tab('a', { store: 'side' });   // follows, and hosts the pages
+  await b.until(() => c.db.status === 'online' && a.db.status === 'online' && z.status === 'online', 'online');
+  assert.equal(c.connection.leader, true);
+  assert.deepEqual(w.said('u1', 'hello'), [], 'the browser has nothing on main yet');
+
+  const page = (replicaId, options = {}) => {
+    const { port1, port2 } = new MessageChannel();
+    const stop = a.connection.follow(port1, [{ store: 'main', initial: INITIAL }]);
+    const link = portConnection(port2, { reconnect: { min: 10, max: 50 } });
+    const db = createClient({ connection: link, store: 'main', initial: INITIAL, replicaId, ...options });
+    db.connect();
+    let closed = false;
+    return { db, close() { if (closed) return; closed = true; stop(); db.dispose(); link.close(); port1.close(); port2.close(); } };
+  };
+  const quiet = page('page-1', { presence: false });
+  t.after(() => quiet.close());
+  await b.until(() => quiet.db.status === 'online' && ids(z.presence) === 'u1,u2', 'the page is online, and the browser listed on main');
+  const hellos = w.said('u1', 'hello');
+  assert.equal(hellos[0].message.presence, false, 'the replica the page made says no from its first hello');
+  assert.deepEqual(w.heard('u1', 'presence'), []);
+  assert.deepEqual(quiet.db.presence, []);
+
+  const keen = page('page-2');
+  t.after(() => keen.close());
+  await b.until(() => ids(keen.db.presence) === 'u1,u2', 'the page that wants presence sees both users');
+  const lists = wholeLists(w.heard('u1', 'presence'));
+  assert.equal(lists.length, 1, 'the server sent the replica the whole list');
+  assert.notEqual(w.said('u1', 'hello').at(-1).message.presence, false);
+  assert.deepEqual(quiet.db.presence, [], 'the page that wants none has none');
+  assert.deepEqual(quiet.db.peers, []);
+
+  // The host lets the keen page go: its session leaves the replica, which wants none again
+  const before = w.wire.length;
+  keen.close();
+  await b.until(() => w.said('u1', 'hello').some(h => h.at >= before && h.message.presence === false), 'the replica said hello again, wanting none');
+  const off = w.said('u1', 'hello').find(h => h.at >= before && h.message.presence === false).at;
+  z.share({ editing: 'x' });
+  await b.until(() => z.peers.some(p => p.data?.editing === 'x'), 'the other user heard its own share');
+  await w.net.settle();
+  assert.deepEqual(w.heard('u1', 'presence').filter(h => h.at > off), [], 'the browser\'s socket heard none of it');
+  assert.deepEqual(quiet.db.presence, []);
+  assert.deepEqual(stores.get('main').peers().map(p => p.user.id).sort(), ['u1', 'u2'], 'the browser is still listed');
+  quiet.db.state.tasks.q = { id: 'q' };
+  await b.until(() => stores.get('main').snapshot().tasks.q, 'and the quiet page\'s edits still go up');
+});
+
+test('a tab that changes its mind with wantPresence changes the replica\'s: off, the server stops sending the browser presence; on, it sends the whole list again', async t => {
+  const store = createStore({ initial: INITIAL, presence: true });
+  const w = watchedNetwork(() => store);
+  const z = w.net.client({ replicaId: 'z', initial: INITIAL }, { user: { id: 'u2', name: 'Bo' } });
+  const b = browser(w.net);
+  t.after(() => { b.close(); z.dispose(); });
+  const a = b.tab('a');
+  await b.until(() => a.db.status === 'online' && ids(a.db.presence) === 'u1,u2', 'the tab sees both users');
+  assert.equal(wholeLists(w.heard('u1', 'presence')).length, 1);
+
+  let before = w.wire.length;
+  a.db.wantPresence(false);
+  assert.equal(a.db.wantsPresence, false);
+  assert.deepEqual(a.db.presence, [], 'off at once');
+  assert.deepEqual(a.db.peers, []);
+  await b.until(() => w.said('u1', 'hello').some(h => h.at >= before && h.message.presence === false), 'the replica said hello again, wanting none');
+  const off = w.said('u1', 'hello').find(h => h.at >= before && h.message.presence === false).at;
+  z.share({ editing: 'x' });
+  await b.until(() => z.peers.some(p => p.data?.editing === 'x'), 'the other user heard its own share');
+  await w.net.settle();
+  assert.deepEqual(w.heard('u1', 'presence').filter(h => h.at > off), [], 'the browser\'s socket heard none of it');
+  assert.deepEqual(a.db.presence, []);
+
+  before = w.wire.length;
+  a.db.wantPresence(true);
+  await b.until(() => ids(a.db.presence) === 'u1,u2' && a.db.peers.some(p => p.data?.editing === 'x'), 'the tab sees both users again, the share included');
+  assert.equal(a.db.wantsPresence, true);
+  const hello = w.said('u1', 'hello').find(h => h.at >= before);
+  assert.notEqual(hello.message.presence, false, 'the replica asked again');
+  assert.equal(wholeLists(w.heard('u1', 'presence').filter(h => h.at >= before)).length, 1, 'and the server sent the whole list once');
+  assert.equal(store.sessions, 2);
+});
+
+test('a page let go of a store it never opened makes no replica of it: no hello there, no session on the server', async t => {
+  const stores = createStores(() => createStore({ initial: INITIAL, presence: true }));
+  const w = watchedNetwork(id => stores.get(id));
+  const b = browser(w.net, { linger: 30 });
+  t.after(() => { b.close(); stores.dispose(); });
+  const c = b.tab('c');
+  await b.until(() => c.db.status === 'online', 'online');
+  const { port1, port2 } = new MessageChannel();
+  const stop = c.connection.follow(port1, [{ store: 'main', initial: INITIAL }, { store: 'aux', initial: {} }]);
+  const link = portConnection(port2, { reconnect: { min: 10, max: 50 } });
+  const page = createClient({ connection: link, store: 'main', initial: INITIAL, replicaId: 'page-3' });
+  t.after(() => { page.dispose(); link.close(); port1.close(); port2.close(); });
+  page.connect();
+  await b.until(() => page.status === 'online', 'the page is online on main');
+  stop();
+  await sleep(100);   // well past the linger
+  await w.net.settle();
+  assert.deepEqual(w.said('u1', 'hello', 'aux'), [], 'the replica never said hello on aux');
+  assert.equal(stores.get('aux').sessions, 0, 'and holds no session there');
+});

@@ -7,7 +7,7 @@ export interface HandlerOptions {
   /** WebSocket path (default '/ws') */
   path?: string;
   /** The user for a request, or null/undefined to refuse (401); may return a promise */
-  authenticate?(req: Request): unknown;
+  authenticate?(req: Request, context?: { relay: unknown }): unknown;
   /** Whether the user may open a store, before it is loaded: false closes it 'forbidden' and loads nothing. Prefer it for any check that needs only the user and the id */
   authorizeId?: AuthorizeId;
   /** The same once the store is loaded, for a check that needs it */
@@ -18,7 +18,7 @@ export interface HandlerOptions {
    * socket is closed then with code 4001 and the client reconnects, to
    * authenticate afresh with whatever credentials it has by then
    */
-  expiresAt?(user: unknown, req: Request): number | Date | null | undefined | Promise<number | Date | null | undefined>;
+  expiresAt?(user: unknown, req: Request, context?: { relay: unknown }): number | Date | null | undefined | Promise<number | Date | null | undefined>;
   /** The shortest session (ms) an `expiresAt` may leave; one running out sooner is turned away as unauthorized. Default 30000 */
   minSession?: number;
   /** The largest message (bytes) a socket may send; default 4 MB */
@@ -47,14 +47,48 @@ export interface HandlerOptions {
    * messages)
    */
   maxBuffered?: number | false;
+  /**
+   * Let relays carry clients (see src/relay): a relay connects at `path`
+   * (default `<path>/relay`), is `authenticate`d as itself, and reads each
+   * store once for its clients, each judged by `authenticate` and
+   * `expiresAt` (handed `{ relay }` as their last argument) over the
+   * credential the relay vouches with
+   */
+  relays?: RelaysOptions;
   /** Server faults; default console */
   onError?(error: unknown): void;
 }
 
-/** An open socket, as `sockets()` lists it */
+export interface RelaysOptions {
+  /** The relay a request is, or null/undefined to turn it away */
+  authenticate(req: Request): unknown;
+  /** When that runs out, as `expiresAt` */
+  expiresAt?(relay: unknown, req: Request): number | Date | null | undefined | Promise<number | Date | null | undefined>;
+  /** Whether the relay may carry a store at all (default: any its clients may read); judged again by `revalidate` */
+  authorize?(relay: unknown, storeId: string): boolean | Promise<boolean>;
+  /** The relay route (default `<path>/relay`) */
+  path?: string;
+  /** How long (ms) a relay's session on a store outlives the store's last client there (default 30 000) */
+  linger?: number;
+  /** More names of a client's headers its credential may carry, besides authorization, cookie and user-agent */
+  headers?: string[];
+  /** Vouches turned away as unauthorized before every vouch waits (default 100 burst, 10 a second); false disables */
+  rate?: { burst: number; perSecond: number } | false;
+}
+
+/**
+ * An open socket, as `sockets()` lists it. A relay's socket has `relay`
+ * and `grants`, and each client it carries is listed after it with `via`
+ */
 export interface SocketInfo {
-  /** What `authenticate` returned for it */
-  user: unknown;
+  /** What `authenticate` returned for it (a relay's socket: none) */
+  user?: unknown;
+  /** A relay's socket: the relay */
+  relay?: unknown;
+  /** A relay's socket: how many clients it carries */
+  grants?: number;
+  /** A client a relay carries: the relay */
+  via?: unknown;
   /** Store ids it has a live session on */
   stores: string[];
   /** Bytes queued for it and not yet sent: how far behind it is */
@@ -70,6 +104,10 @@ export interface SocketInfo {
 /** The open sockets rolled up, for a status endpoint */
 export interface SocketStats {
   sockets: number;
+  /** Of them, relays' */
+  relays: number;
+  /** Clients relays carry: no sockets of the server's */
+  clients: number;
   /** Bytes queued and unsent, over every socket */
   buffered: number;
   /** The most any one socket has queued */
@@ -104,7 +142,9 @@ export interface Handlers {
   /**
    * Close the sockets of the users `filter` picks (every socket without one):
    * their clients reconnect, and `authenticate` decides whether they get back
-   * in. For a logout, a changed role, a deleted account. Returns how many
+   * in. For a logout, a changed role, a deleted account. A relay's clients it
+   * picks are revoked alike, and a relay it picks (handed the relay) is cut
+   * off with its clients. Returns how many
    */
   disconnect(filter?: (user: unknown) => boolean): number;
   /**

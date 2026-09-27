@@ -410,6 +410,14 @@ export interface Client<S extends object = any> {
   readonly presence: unknown[];
   /** Every live session on this store, this client's own included (by `replicaId`), with what each shares */
   readonly peers: Peer[];
+  /** Whether this client asks to hear presence (the `presence` option, or what `wantPresence` last said) */
+  readonly wantsPresence: boolean;
+  /**
+   * Hear presence, or stop, while the client runs: the server hears it in a
+   * hello said again, and one that turns presence on is sent the whole list.
+   * Off, `presence` and `peers` are empty at once
+   */
+  wantPresence(on: boolean): void;
   /** What this client shares with its peers, or undefined */
   readonly shared: unknown;
   /**

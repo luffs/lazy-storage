@@ -63,13 +63,14 @@ export function presetJSON(message, json, bytes) {
 
 /**
  * The adapters' `perMessageDeflate` option, sorted: null when off, else
- * the `threshold` below which a message goes plain (default 1024 bytes,
- * where compressing costs more than it saves) and `runtime`, the rest of
- * the object for the runtime's own knobs (true when there is none)
+ * the `threshold` below which a message goes plain (by default
+ * `byDefault`, 1024 bytes on a server, where compressing costs more than
+ * it saves) and `runtime`, the rest of the object for the runtime's own
+ * knobs (true when there is none)
  */
-export function deflateOptions(perMessageDeflate) {
+export function deflateOptions(perMessageDeflate, byDefault = 1024) {
   if (!perMessageDeflate) return null;
-  const { threshold = 1024, ...runtime } = perMessageDeflate === true ? {} : perMessageDeflate;
+  const { threshold = byDefault, ...runtime } = perMessageDeflate === true ? {} : perMessageDeflate;
   if (!(threshold >= 0)) throw new TypeError('perMessageDeflate.threshold must be a number of bytes');
   return { threshold, runtime: Object.keys(runtime).length ? runtime : true };
 }
@@ -145,20 +146,31 @@ export function runAt(at, fn) {
 }
 
 /**
- * The adapters' `socketStats()`: how many sockets are open, the bytes
- * they hold unsent in total and at most, and since the server started,
- * how many were cut off for falling behind, disconnected by the app,
- * closed as their session expired, and store sessions closed by
- * `revalidate`. `sockets` is their `sockets()` list
+ * The adapters' `socketStats()`: how many sockets are open (relays' among
+ * them, counted again as `relays`, and the clients they carry as `clients`,
+ * which are no sockets of the server's), the bytes they hold unsent in
+ * total and at most, and since the server started, how many were cut off
+ * for falling behind, disconnected by the app, closed as their session
+ * expired, and store sessions closed by `revalidate`. `sockets` is their
+ * `sockets()` list
  */
 export function rollUpSockets(sockets, { cutOff, disconnected, expired, revoked }) {
   let buffered = 0;
   let largest = 0;
+  let open = 0;
+  let relays = 0;
+  let clients = 0;
   for (const s of sockets) {
+    if (s.via !== undefined) {
+      clients++;
+      continue;
+    }
+    open++;
+    if (s.relay !== undefined) relays++;
     buffered += s.buffered;
     if (s.buffered > largest) largest = s.buffered;
   }
-  return { sockets: sockets.length, buffered, largest, cutOff, disconnected, expired, revoked };
+  return { sockets: open, relays, clients, buffered, largest, cutOff, disconnected, expired, revoked };
 }
 
 /**

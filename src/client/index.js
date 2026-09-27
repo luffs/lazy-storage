@@ -95,7 +95,8 @@ const HELLO_LIMIT = 1000;
  * @param {boolean} [options.presence=true] - false asks the server (in
  *   the hello) not to send presence to this client, which then never has
  *   peers; a mirror that never reads them spares every change's message.
- *   It may still share
+ *   It may still share, and is still listed in the others' presence.
+ *   `db.wantPresence(on)` changes it while the client runs
  * @param {() => number} [options.now] - wall clock (injectable for tests)
  */
 export function createClient(options = {}) {
@@ -687,7 +688,8 @@ function build({
         setRelayed(msg.status === 'local');
         return;
       case 'presence':
-        applyPresence(msg);
+        // Sent before the server heard this client stop wanting it: not kept
+        if (wantsPresence) applyPresence(msg);
         return;
       case 'closed': {
         if (msg.code === 'unavailable') {
@@ -914,6 +916,25 @@ function build({
     get presence() { return presence; },
     /** Every live session on this store, `{ replicaId, user, key, data }`, this client's own included (by `replicaId`); `key` is what presence groups users by */
     get peers() { return peers; },
+    /** Whether this client asks to hear presence (the `presence` option, or what `wantPresence` last said) */
+    get wantsPresence() { return wantsPresence; },
+    /**
+     * Hear presence, or stop: the `presence` option, changed while the
+     * client runs. The server hears it in a hello said again (answered as a
+     * reconnect's is, from where this client stands; pending ops ride in it
+     * and are dropped there as the duplicates they are), and one that turns
+     * presence on is sent the whole list, as a newcomer is. Off, `presence`
+     * and `peers` are empty at once. Offline, the next hello carries it.
+     * The server (and a relay on the way) must be of this version: one from
+     * before 0.21 turns presence on only for a session made anew
+     */
+    wantPresence(on) {
+      on = Boolean(on);
+      if (on === wantsPresence) return;
+      wantsPresence = on;
+      if (!on) clearPresence();
+      if (linked() && !retryTimer) hello();
+    },
     /** What this client shares with its peers, or undefined */
     get shared() { return shared; },
     /**

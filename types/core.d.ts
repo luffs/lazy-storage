@@ -163,7 +163,7 @@ export interface PeerShare {
 }
 
 export type ClientMessage =
-  | { t: 'hello'; replicaId: string; ops: Op[]; since?: number; epoch?: string | null; share?: unknown; presence?: false; fetch?: true }
+  | { t: 'hello'; replicaId: string; ops: Op[]; since?: number; epoch?: string | null; share?: unknown; presence?: false; fetch?: true; follow?: false }
   | { t: 'op'; op: Op }
   | { t: 'share'; data: unknown }
   | { t: 'ping' }
@@ -185,7 +185,7 @@ export type ServerMessage =
   | { t: 'snapshot'; fetch: string; state?: undefined; ts: Timestamp; seq: number; registers: string[]; v: number; epoch: string; lost?: LostOp[] }
   | { t: 'delta'; patches: Diff[]; ts: Timestamp; seq: number; registers: string[]; v: number; epoch: string | null; lost?: LostOp[] }
   | { t: 'patch'; diff: Diff; ts: Timestamp; v: number }
-  | { t: 'ack'; seq: number; ts: Timestamp; correction: Diff | null; lost?: string[][] }
+  | { t: 'ack'; seq: number; ts: Timestamp; correction: Diff | null; lost?: string[][]; v?: number }
   | { t: 'presence'; peers: Peer[] }
   | { t: 'presence'; peers?: undefined; left?: string[]; joined?: Peer[]; shared?: PeerShare[] }
   | { t: 'closed'; code: ClosedCode; message: string }

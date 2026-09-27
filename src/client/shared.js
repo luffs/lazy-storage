@@ -408,9 +408,12 @@ function createReplicaRelay({ tabId, transport, storage, reconnect, keepalive, w
   /**
    * The replica's client for a store, made on first use. An adapter that
    * loads asynchronously (IndexedDB) makes it a moment later; the tabs'
-   * messages for the store wait in the entry's queue meanwhile
+   * messages for the store wait in the entry's queue meanwhile. It hears
+   * presence only while a follower on the store wants it (see
+   * followPresence), from its first hello on: `presence` is the wish of the
+   * message that made it, a follower's hello
    */
-  function entryFor(store) {
+  function entryFor(store, presence = true) {
     let entry = entries.get(store);
     if (entry) return entry;
     const info = infos.get(store) ?? { initial: {}, registers: [] };
@@ -419,7 +422,7 @@ function createReplicaRelay({ tabId, transport, storage, reconnect, keepalive, w
     entries.set(store, entry);
     const adapter = storage(store);
     entry.adapter = adapter;
-    const options = { connection: socket, store, initial: structuredClone(info.initial), registers: info.registers, undo: false };
+    const options = { connection: socket, store, initial: structuredClone(info.initial), registers: info.registers, undo: false, presence };
     const ready = (saved, client, persisted = true) => {
       if (entries.get(store) !== entry) return void client.dispose();   // let go while it was opening
       if (!saved && persisted) persistIdentity(adapter, client);
@@ -496,10 +499,19 @@ function createReplicaRelay({ tabId, transport, storage, reconnect, keepalive, w
    * and cache stay for the next tab to open the store
    */
   function dropSession(entry, tab) {
-    if (!entry.sessions.delete(tab) || entry.sessions.size > 0) return;
+    if (!entry.sessions.delete(tab)) return;
+    if (entry.sessions.size > 0) return void followPresence(entry);
     clearTimeout(entry.timer);
     entry.timer = setTimeout(() => release(entry.store), linger);
     if (typeof entry.timer.unref === 'function') entry.timer.unref();
+  }
+
+  /** The replica hears presence while some follower on the store wants it, and not otherwise: the server sends none nobody reads */
+  function followPresence(entry) {
+    if (!entry.client || entry.sessions.size === 0) return;
+    let wanted = false;
+    for (const s of entry.sessions.values()) if (s.presence) wanted = true;
+    entry.client.wantPresence(wanted);
   }
 
   function release(store) {
@@ -554,7 +566,9 @@ function createReplicaRelay({ tabId, transport, storage, reconnect, keepalive, w
       if (message.ctl === 'connect') return void relay.wake();
       const { store } = message;
       if (typeof store !== 'string' || !store) return;
-      const entry = entryFor(store);
+      // Let go of a store the replica never opened (a page's port allowed more than it used): nothing to do
+      if (message.t === 'leave' && !entries.has(store)) return;
+      const entry = entryFor(store, !(message.t === 'hello' && message.presence === false));
       if (!entry.client) return void entry.queue.push([tab, message]);
       const { client } = entry;
       let session = entry.sessions.get(tab);
@@ -573,6 +587,7 @@ function createReplicaRelay({ tabId, transport, storage, reconnect, keepalive, w
             session.lastSeq = 0;
           }
           session.presence = message.presence !== false;
+          followPresence(entry);
           // Answered from whatever the replica has, socket or no socket; a store the server had closed for us is tried again
           if (client.closed) client.connect();
           for (const op of Array.isArray(message.ops) ? message.ops : []) apply(entry, session, op);
