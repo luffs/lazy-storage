@@ -2,7 +2,24 @@
 
 All notable changes to lazy-storage are documented here. The format follows Keep a Changelog; versions follow Semantic Versioning.
 
-## [Unreleased]
+## [0.21.0] - 2026-09-27
+
+A relay can read each store once for all its clients. Given a `link` to
+the server's new relay route, it vouches for each client with the
+client's own credential, the server judges it by its own hooks and lists
+it as itself, and each client's edits still go up a socket of its own, so
+the server keeps judging and acknowledging every write as its author's;
+it writes each change once a relay rather than once a client. Presence is
+heard only where it is read: `db.wantPresence(on)` changes a client's
+wish while it runs, and a browser's shared connection and a relay's own
+session ask for it only while someone behind them wants it.
+`npm run bench:fanout` measures what that and the relays save. Opt-in:
+a server without `relays` and a relay without a `link` work as before.
+On upgrading, update the server, the relays and the clients together (a
+hello now says presence either way, and a later one may turn it back
+on); a relay's Bun handlers compress from 64 KB unless given a
+`threshold`; and `socketStats().sockets` no longer counts the clients a
+relay carries (`clients` does).
 
 ### Added
 
