@@ -2,7 +2,14 @@
 
 All notable changes to lazy-storage are documented here. The format follows Keep a Changelog; versions follow Semantic Versioning.
 
-## [Unreleased]
+## [0.22.0] - 2026-09-28
+
+A store the server will not let a fanning-out relay carry is passed
+through to the relay's clients rather than closed to them: each client's
+session there goes up its own socket and is judged by the server as its
+own, so a client that may read the store keeps reading it behind the
+relay, and one that may not hears so from the server. Only the relay
+changes; servers and clients of 0.21 work with it as they are.
 
 ### Changed
 
