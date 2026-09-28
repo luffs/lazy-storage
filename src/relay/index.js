@@ -75,7 +75,12 @@
 // the meantime, or holds a copy's offline edits, to say hello again. A
 // server that answers the clients' own dials but not the link (one without
 // relays, a proxy that refuses the route) has the relay pass every socket
-// through as before, until the link answers again.
+// through as before, until the link answers again. A store the server will
+// not let the relay carry (its session there closed 'forbidden', the
+// server's `authorizeRelay`) is not the client's refusal: each client's
+// session there goes up the client's own socket as a whole session, as a
+// socket passed through does, judged by the server as the client's own, and
+// the relay keeps nothing of the store (for a while: then it asks again).
 //
 // What the relay cannot do: judge an op as the server would (its access
 // rules, its read-only paths, its validator) beyond what it can see, and a
@@ -142,6 +147,8 @@ const TURNED_AWAY_MS = 10_000;
 const RELAY_REPLICA = 'relay';
 /** Fan-out: a link the server turned away is tried again this much later (or at the host's word, upstreamUp) */
 const REFUSED_RETRY = 5 * MINUTE;
+/** Fan-out: how long the clients of a store the server would not let the relay carry are passed through, before the relay asks again */
+const NOT_CARRIED_MS = 10 * MINUTE;
 /** Messages a client may send before its socket is dialled through, and their size (characters of JSON); more closes it */
 const QUEUE_LIMIT = 1000;
 const QUEUE_CHARS = 16 * 1024 * 1024;
@@ -273,6 +280,7 @@ export function createRelay({
   const vouchesOut = new Set();  // grant ids of vouches the server has not answered
   const vouchTimers = new Map(); // grant id -> the timer that lets its vouch go unanswered
   const turnedAway = new Map();  // credential key -> until when the server's 'unauthorized' holds here
+  const notCarried = new Map();  // store id -> until when its clients are passed through: the server would not let the relay carry it (see passOver)
 
   const report = err => {
     try {
@@ -1566,6 +1574,7 @@ export function createRelay({
     if (message.t === 'ping') return deliver(sock, { t: 'pong' });
     const id = message.store;
     if (!isStoreId(id)) return;
+    if (sock.passed.has(id)) return passUp(sock, id, message);
     if (mode === 'local') return fanLocal(sock, id, message);
     switch (message.t) {
       case 'hello': return fanHello(sock, id, message);
@@ -1643,6 +1652,7 @@ export function createRelay({
   function proceed(sock, id, session) {
     const message = session.waiting;
     if (!message || session.answered || session.inFlight || mode !== 'through' || sock.state !== 'fan') return;
+    if (uncarried(id)) return passOver(sock, id, session);
     if (!session.admitted) return vouchFor(sock, id, session);
     const copy = copies.get(id);
     ensureShared(copy);
@@ -1863,7 +1873,7 @@ export function createRelay({
     if (!copy) return;
     clearTimeout(copy.lingerTimer);
     copy.lingerTimer = null;
-    if (linkState !== 'open' || copy.shared || mode !== 'through') return;
+    if (linkState !== 'open' || copy.shared || mode !== 'through' || uncarried(copy.id)) return;
     let admitted = false;
     for (const session of copy.locals.values()) if (session.admitted) admitted = true;
     if (!admitted) return;
@@ -1975,8 +1985,10 @@ export function createRelay({
 
   /**
    * The server closed the relay's session on a store. 'forbidden' is the
-   * relay not being let carry it: its clients there hear so, as from the
-   * server. Anything else ('unused', no client of it let in just then;
+   * relay not being let carry it, which says nothing of its clients: each
+   * is passed through there on its own socket for NOT_CARRIED_MS, judged by
+   * the server as its own (see passOver), and what the relay held of the
+   * store goes. Anything else ('unused', no client of it let in just then;
    * 'unavailable', the store unloaded or served elsewhere for a moment) is
    * the relay's own affair: it says hello again while a client is let in
    */
@@ -1984,7 +1996,12 @@ export function createRelay({
     sharedGone(copy);
     if (!copy.followers.size) copy.live = false;
     if (message.code === 'forbidden') {
-      for (const [sock, session] of [...copy.locals]) if (sock.state === 'fan') endFan(sock, copy.id, session, 'forbidden', message.message, { tell: true });
+      notCarried.set(copy.id, Date.now() + NOT_CARRIED_MS);
+      for (const [sock, session] of [...copy.locals]) if (sock.state === 'fan') passOver(sock, copy.id, session);
+      if (!copy.locals.size && !copy.followers.size && copies.get(copy.id) === copy) {
+        copies.delete(copy.id);
+        persist(copy);
+      }
       return;
     }
     if (copy.sharedRetry) return;
@@ -2007,6 +2024,76 @@ export function createRelay({
       if (!copy.followers.size) copy.live = false;
       copy.usedAt = now();
     }, linger);
+  }
+
+  // --- Fan-out: a store the relay may not carry, passed through --------------------------------------
+
+  /** Whether the server would not let the relay carry the store, a moment ago (see sharedClosed) */
+  function uncarried(id) {
+    const until = notCarried.get(id);
+    if (until === undefined) return false;
+    if (until > Date.now()) return true;
+    notCarried.delete(id);
+    return false;
+  }
+
+  /**
+   * A client's session on a store the relay may not carry goes up its own
+   * socket (the one its edits take) as a whole session, as a socket passed
+   * through does: the server judges it as the client's own, so a client
+   * that may read the store reads it, and one that may not hears so from
+   * the server. The relay keeps nothing of it, and answers it from no copy
+   * offline. A hello that waits for its answer goes up now; a client the
+   * relay answered already says hello again, which goes up
+   */
+  function passOver(sock, id, session) {
+    const waiting = session.answered ? null : session.waiting;
+    const again = session.answered || session.inFlight;
+    // What its write-only session there still has coming is not the client's (see fromPassed)
+    const skip = session.writing && sock.write ? session.awaiting.length : 0;
+    flushHeld(sock, session, copies.get(id));
+    leaveLocal(sock, id);
+    forgetStore(sock.key, id);
+    sock.passed.set(id, { skip });
+    if (again) deliver(sock, { t: 'closed', store: id, code: 'unavailable', message: 'The relay passes this store through; say hello again' });
+    else if (waiting) passUp(sock, id, waiting);
+  }
+
+  /** A client's message on a store passed through: up its own socket as it came (a hello without `fetch`, so its snapshot comes inline) */
+  function passUp(sock, id, message) {
+    if (message.t === 'leave') {
+      sock.passed.delete(id);
+      if (sock.write) writeSend(sock, message);
+      return idleWrite(sock);
+    }
+    if (message.t === 'hello' && message.fetch !== undefined) {
+      const { fetch: _fetch, ...rest } = message;
+      message = rest;
+    }
+    writeSend(sock, message);
+  }
+
+  /** What the server says on a session passed through: down to the client as it came, but the answers owed to the write-only session before it */
+  function fromPassed(sock, id, passed, message) {
+    const answer = message.t === 'snapshot' || message.t === 'delta';
+    if (answer || message.t === 'ack') heardServer(message.ts);
+    if (passed.skip > 0 && (answer || (message.t === 'error' && !Number.isInteger(message.seq)))) {
+      passed.skip--;
+      return;
+    }
+    if (message.t === 'closed') {
+      sock.passed.delete(id);
+      if (FINAL.has(message.code)) forgetStore(sock.key, id);
+      deliver(sock, message);
+      return idleWrite(sock);
+    }
+    deliver(sock, message);
+  }
+
+  /** A client's socket up is gone, or the relay goes local: each of its sessions passed through says hello again, and is judged afresh */
+  function passedGone(sock) {
+    for (const id of [...sock.passed.keys()]) deliver(sock, { t: 'closed', store: id, code: 'unavailable', message: 'The server is out of reach; say hello again' });
+    sock.passed.clear();
   }
 
   // --- Fan-out: vouches -----------------------------------------------------------------------------
@@ -2239,7 +2326,9 @@ export function createRelay({
     for (const sock of [...sockets]) {
       if (sock.state !== 'fan') continue;
       for (const [id, session] of [...sock.locals]) {
-        if (session.answered || session.waiting) vouchFor(sock, id, session);
+        // One waiting on a store the relay may not carry goes up its own socket, without a vouch
+        if (!session.answered && session.waiting && uncarried(id)) proceed(sock, id, session);
+        else if (session.answered || session.waiting) vouchFor(sock, id, session);
       }
     }
   }
@@ -2469,6 +2558,7 @@ export function createRelay({
       return shut(sock, UNAUTHORIZED, info.reason || 'Unauthorized');
     }
     if (info?.code === REAUTHENTICATE) return shut(sock, REAUTHENTICATE, 'Reauthenticate');
+    passedGone(sock);
     for (const [id, session] of [...sock.locals]) {
       const unsure = session.inFlight || session.awaiting.length || session.sent > session.acked || session.held.length;
       session.writing = false;
@@ -2495,16 +2585,16 @@ export function createRelay({
     try { t.close(); } catch (err) { report(err); }
   }
 
-  /** Nothing to wait for up a client's socket: closed `writeIdle` later, unless something goes up meanwhile */
+  /** Nothing to wait for up a client's socket: closed `writeIdle` later, unless something goes up meanwhile. One that carries a session passed through stays */
   function idleWrite(sock) {
     const w = sock.write;
-    if (!w || w.idleTimer) return;
+    if (!w || w.idleTimer || sock.passed.size) return;
     for (const session of sock.locals.values()) {
       if (session.inFlight || session.awaiting.length || session.sent > session.acked || session.held.length) return;
     }
     w.idleTimer = later(() => {
       w.idleTimer = null;
-      if (sock.write !== w) return;
+      if (sock.write !== w || sock.passed.size) return;
       for (const session of sock.locals.values()) {
         if (session.inFlight || session.awaiting.length || session.sent > session.acked || session.held.length) return;
       }
@@ -2536,6 +2626,8 @@ export function createRelay({
       if (message.t === 'closed') forgetKey(sock.key);
       return;
     }
+    const passed = isStoreId(id) ? sock.passed.get(id) : undefined;
+    if (passed) return fromPassed(sock, id, passed, message);
     const session = isStoreId(id) ? sock.locals.get(id) : undefined;
     if (!session) return;
     switch (message.t) {
@@ -2607,6 +2699,8 @@ export function createRelay({
    * the copy if it may be, and one whose hello had gone up says hello again
    */
   function fanToLocal(sock) {
+    // Sessions passed through say hello again: answered by the server once it is back, never from a copy
+    passedGone(sock);
     closeWrite(sock);
     for (const [id, session] of [...sock.locals]) {
       if (sock.locals.get(id) !== session) continue;
@@ -2753,6 +2847,7 @@ export function createRelay({
         stores: new Map(),    // through: store id -> { epoch of its last answer }
         claims: new Map(),    // through: store id -> the replica its hellos there named, or null once they named two (see answered)
         locals: new Map(),    // local: store id -> its session
+        passed: new Map(),    // fan-out: store id -> { skip }, its session passed through up its own socket (see passOver)
         openedAt: performance.now()
       };
       sockets.add(sock);
@@ -2846,8 +2941,11 @@ export function createRelay({
         if (copy.shared === 'open') shared++;
       }
       const stats = { mode, downSince, sockets: counts, copies: copies.size, live, diverged, credentials: known.size };
-      // Fan-out: the link's state ('broken': the server answers the clients, not it), the stores read on it, the clients vouched for
-      if (fanOut) stats.link = { state: linkState === 'refused' ? 'refused' : linkBroken ? 'broken' : linkState, shared, clients: grantsOut.size };
+      // Fan-out: the link's state ('broken': the server answers the clients, not it), the stores read on it, the clients vouched for,
+      // and the clients' sessions passed through on stores the relay may not carry
+      let passed = 0;
+      for (const sock of sockets) passed += sock.passed.size;
+      if (fanOut) stats.link = { state: linkState === 'refused' ? 'refused' : linkBroken ? 'broken' : linkState, shared, clients: grantsOut.size, passed };
       return stats;
     },
 
@@ -2857,7 +2955,7 @@ export function createRelay({
       return [...sockets].map(sock => ({
         key: sock.key,
         state: sock.state,
-        stores: [...(sock.state === 'local' || sock.state === 'fan' ? sock.locals.keys() : sock.stores.keys())],
+        stores: [...(sock.state === 'local' || sock.state === 'fan' ? [...sock.locals.keys(), ...sock.passed.keys()] : sock.stores.keys())],
         openMs: at - sock.openedAt
       }));
     },

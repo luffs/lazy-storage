@@ -198,7 +198,7 @@ test('fan-out: the relay reads each store once for all its displays, and the ser
   assert.equal(env.central.sockets.size, 0, 'nothing dialled for any display: none has written');
   const stats = env.relay.stats();
   assert.equal(stats.sockets.fan, 3);
-  assert.deepEqual(stats.link, { state: 'open', shared: 1, clients: 3 });
+  assert.deepEqual(stats.link, { state: 'open', shared: 1, clients: 3, passed: 0 });
   for (const db of [a, b, c]) {
     const [answer] = env.answers(db);
     assert.equal(answer.epoch, store.epoch, 'answered under the server\'s epoch');
@@ -654,10 +654,15 @@ test('the Node adapter\'s relay route: a relay let in as itself, each client vou
     a.state.tasks.x = { id: 'x' };
     await settle(() => b.state.tasks.x && a.pending === 0, 'crossed');
 
-    // The relay no longer carries the store: its clients there hear forbidden
+    // The relay may no longer carry the store: its clients there are passed through, each on its own socket
     carry = false;
     assert.equal(await server.revalidate(), 2);
-    await settle(() => a.closed?.code === 'forbidden' && b.closed?.code === 'forbidden', 'told');
+    await settle(() => relay.stats().link.passed === 2 && a.status === 'online' && b.status === 'online', 'passed through');
+    assert.ok(!a.closed && !b.closed, 'nobody told the store is closed to it');
+    b.state.tasks.y = { id: 'y' };
+    await settle(() => a.state.tasks.y && b.pending === 0, 'crossed, passed through');
+    const own = server.sockets().filter(s => !s.relay && !s.via && s.stores.includes('main')).map(s => s.user.id).sort();
+    assert.deepEqual(own, ['user-a', 'user-b'], 'each on a socket of its own at the server');
     carry = true;
     // Cut off: the relay's link goes (4001), and it comes back
     assert.equal(server.disconnect(user => user?.id === 'hub'), 1);
@@ -1219,4 +1224,113 @@ test('the link lost for less than grace: a display let in again after the relay\
   assert.deepEqual(ids(b.peers), ids(store.peers()));
   x.close();
   await env.until(() => !b.peers.some(p => p.replicaId === 'r-x') && !a.peers.some(p => p.replicaId === 'r-x'), 'x gone from both');
+});
+
+test('a store the relay may not carry: each display\'s session there goes up its own socket, judged by the server as its own; the relay vouches for nobody there and keeps nothing of it', async t => {
+  const env = fanLan({ link: { authorizeRelay: (relay, id) => id !== 'other' } });
+  t.after(() => env.close());
+  const a = env.display('a');
+  const aOther = env.display('a', { store: 'other', replicaId: 'r-a-other', socket: a.socket });
+  await env.until(() => online(a, aOther)() && env.relay.stats().link.passed === 1, 'a online on both, passed through on the other');
+  const other = env.central.store('other');
+  const hello = clientHellos(env, 'a').find(h => h.store === 'other');
+  assert.notEqual(hello.follow, false, 'a whole session, under a\'s own credential');
+  assert.equal(env.relay.copy('other'), null, 'nothing kept of it');
+  assert.deepEqual(env.relay.stats().link, { state: 'open', shared: 1, clients: 1, passed: 1 });
+  assert.deepEqual(env.relay.sockets()[0].stores.sort(), ['main', 'other']);
+
+  // The store reaches a, and a's edits reach the store as a's
+  const users = [];
+  other.observe('op', e => users.push(e.user?.id));
+  other.patch({ tasks: { s: { id: 's', title: 'from the server' } } });
+  aOther.state.tasks.w = { id: 'w', title: 'from a' };
+  await env.until(() => aOther.state.tasks.s && aOther.pending === 0 && other.snapshot().tasks.w, 'both ways');
+  assert.deepEqual(users.filter(Boolean), ['a'], 'a\'s edit as a\'s (the other op is the server\'s own)');
+
+  // Another display comes: straight up its own socket, with no vouch; one the server refuses the store hears it from the server
+  const vouched = vouches(env, 'other').length;
+  const c = env.display('c', { store: 'other' });
+  env.central.deny.add('b:other');
+  const b = env.display('b', { store: 'other' });
+  await env.until(() => c.status === 'online' && b.closed?.code === 'forbidden', 'c in, b refused');
+  assert.equal(vouches(env, 'other').length, vouched, 'nobody vouched for there');
+  assert.equal(env.relay.stats().link.passed, 2);
+  assert.ok(c.state.tasks.w && c.state.tasks.s);
+  assert.deepEqual(env.central.store().presence().map(u => u.id), ['a'], 'main is fanned out as before');
+
+  // Leaving it ends it up there too, and the socket up closes once nothing else is on it
+  aOther.dispose();
+  c.dispose();
+  await env.until(() => env.relay.stats().link.passed === 0 && env.central.sockets.size === 0, 'let go, and the sockets up closed');
+  assert.equal(a.status, 'online');
+});
+
+test('a store the relay carried and may carry no longer (revalidate): its displays say hello again and are passed through, and the copy goes', async t => {
+  let carry = true;
+  const env = fanLan({ link: { authorizeRelay: () => carry } });
+  t.after(() => env.close());
+  const a = env.display('a');
+  const b = env.display('b');
+  await env.until(online(a, b), 'online');
+  const store = env.central.store();
+  store.patch({ tasks: { x: { id: 'x', title: 'before' } } });
+  await env.until(() => a.state.tasks.x && b.state.tasks.x && env.relay.copy('main'), 'carried');
+  carry = false;
+  for (const endpoint of env.central.endpoints) await endpoint.revalidate();
+  await env.until(() => online(a, b)() && env.relay.stats().link.passed === 2, 'both passed through');
+  assert.ok(!a.closed && !b.closed, 'nobody was told the store is closed to it');
+  await env.until(() => env.relay.copy('main') === null, 'the copy let go');
+  b.state.tasks.y = { id: 'y', title: 'from b' };
+  store.patch({ tasks: { z: { id: 'z' } } });
+  await env.until(() => a.state.tasks.y && a.state.tasks.z && b.state.tasks.z && b.pending === 0, 'crossed');
+  for (const db of [a, b]) assert.deepEqual(JSON.parse(JSON.stringify(db.state)), store.snapshot());
+});
+
+test('a store passed through, the server away: the relay answers it from no copy, and once the server is back it is passed through again', async t => {
+  const env = fanLan({ link: { authorizeRelay: (relay, id) => id !== 'other' } });
+  t.after(() => env.close());
+  const a = env.display('a');
+  const aOther = env.display('a', { store: 'other', replicaId: 'r-a-other', socket: a.socket });
+  await env.until(() => online(a, aOther)() && env.relay.stats().link.passed === 1, 'online');
+  env.central.goDown();
+  await env.until(() => env.relay.mode === 'local' && a.relayed, 'main answered by the relay');
+  await sleep(30);
+  await env.until(() => true, 'settled');
+  assert.notEqual(aOther.status, 'online', 'the other waits for the server');
+  assert.equal(env.relay.stats().link.passed, 0);
+  aOther.state.tasks.q = { id: 'q', title: 'while away' };
+  env.central.goUp();
+  env.relay.upstreamUp();
+  await env.until(() => online(a, aOther)() && !a.relayed && aOther.pending === 0 && env.relay.stats().link.passed === 1, 'through again');
+  assert.equal(env.central.store('other').snapshot().tasks.q.title, 'while away');
+  assert.equal(env.relay.copy('other'), null);
+});
+
+test('a display whose hello with edits went up as a write-only session before the relay heard it may not carry the store: the answer owed to that session is not the display\'s, and its edits land once', async t => {
+  const env = fanLan({ link: { authorizeRelay: (relay, id) => id !== 'other' } });
+  t.after(() => env.close());
+  // The relay hears it may not carry the store while the answer to d's hello, gone up as a write-only session, is still to come
+  const answer = message => message.t === 'snapshot' || message.t === 'delta';
+  env.central.filter = (message, user, via) => !(via === 'link' && message.t === 'closed' && message.store === 'other') && !(via === 'client' && user?.id === 'd' && answer(message));
+  const d = env.display('d', { store: 'other' });
+  d.state.tasks.e = { id: 'e', title: 'pending when d came' };
+  await env.until(() => clientHellos(env, 'd').some(h => h.follow === false && h.ops.length === 1) && env.central.withheld.length === 2, 'd\'s hello up as a write-only session, its answer held back');
+  const other = env.central.store('other');
+  const users = [];
+  other.observe('op', e => users.push(e.user?.id));
+  env.central.filter = null;
+  env.central.release(e => e.via === 'link');
+  await env.until(() => env.relay.stats().link.passed === 1, 'passed through');
+  const from = d.heard.length;
+  env.central.release();
+  await env.until(() => d.status === 'online' && d.pending === 0, 'd online');
+  assert.equal(env.answers(d, from).length, 1, 'the write-only session\'s answer never reached d: only the answer to its hello as a whole session');
+  await env.until(() => d.status === 'online' && d.pending === 0 && env.relay.stats().link.passed === 1, 'd passed through');
+  const hellos = clientHellos(env, 'd');
+  assert.notEqual(hellos.at(-1).follow, false, 'said again, as a whole session');
+  assert.equal(other.snapshot().tasks.e.title, 'pending when d came');
+  assert.ok(users.length <= 1, 'applied once');
+  other.patch({ tasks: { f: { id: 'f' } } });
+  await env.until(() => d.state.tasks.f, 'd follows the store');
+  assert.deepEqual(JSON.parse(JSON.stringify(d.state)), other.snapshot());
 });

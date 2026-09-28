@@ -24,7 +24,10 @@
 // the first is vouched for with its credential, the first is passed
 // through as before, and the steps also take the link alone away and
 // back, and have the server sign a display out (it comes back judged
-// afresh). The same checks hold.
+// afresh). The same checks hold. Every other run the server will not let
+// the relay carry the notes store: each fanned-out display's session there
+// goes up its own socket (see passOver in src/relay), and is answered by
+// the server alone.
 //
 // Deterministic from the seed, apart from the clients' own retry timers
 // (a store unloaded under them says hello again in a moment), which only
@@ -92,9 +95,12 @@ export async function runRelayFuzz({ seed = 1, runs = 20, steps = 30, clients: c
     // Fan-out: the server's relay route, which knows each display by its credential
     const byKey = new Map();
     const relayLinks = new Set();
+    // Every other run the relay may not carry the notes: its fanned-out displays are passed through there
+    const passing = fanOut && run % 2 === 1;
+    const authorizeRelay = passing ? (relay, id) => id !== 'notes' : undefined;
     const linkNet = createNetwork({
       session: ({ send, user }) => {
-        const endpoint = createRelayLink(storeOf, { send, relay: user, admit: credential => (byKey.has(credential?.headers?.authorization) ? { user: byKey.get(credential.headers.authorization), expires: null } : null), rate: false, onError: err => { throw err; } });
+        const endpoint = createRelayLink(storeOf, { send, relay: user, admit: credential => (byKey.has(credential?.headers?.authorization) ? { user: byKey.get(credential.headers.authorization), expires: null } : null), authorizeRelay, rate: false, onError: err => { throw err; } });
         relayLinks.add(endpoint);
         return { receive: m => endpoint.receive(m), close() { relayLinks.delete(endpoint); endpoint.close(); } };
       }
@@ -179,7 +185,9 @@ export async function runRelayFuzz({ seed = 1, runs = 20, steps = 30, clients: c
         const fanned = there.filter(d => d.link.current && d.fan);
         if (fanned.length && stats.link.state !== 'open') throw fail(`the relay's link is ${stats.link.state} ${where}`);
         if (stats.sockets.fan < fanned.length) throw fail(`${stats.sockets.fan} sockets fanned out for ${fanned.length} displays ${where}`);
-        if (fanned.length && stats.link.shared !== 2) throw fail(`the relay reads ${stats.link.shared} stores on its link ${where}`);
+        if (fanned.length && stats.link.shared !== (passing ? 1 : 2)) throw fail(`the relay reads ${stats.link.shared} stores on its link ${where}`);
+        // Each fanned-out display's notes, and mallory's socket's when it said hello there (judged as mallory: its socket up is its own)
+        if (stats.link.passed < (passing ? fanned.length : 0) || stats.link.passed > (passing ? fanned.length + 1 : 0)) throw fail(`the relay passes ${stats.link.passed} sessions through for ${fanned.length} displays ${where}`);
         const listed = new Set(storeOf('main').peers().map(p => p.replicaId));
         for (const d of fanned) if (!listed.has(d.replicaId)) throw fail(`${d.name} is not in the server's presence ${where}`);
         went.fanned = Math.max(went.fanned, fanned.length);
@@ -187,7 +195,9 @@ export async function runRelayFuzz({ seed = 1, runs = 20, steps = 30, clients: c
       // A copy that someone on the LAN has open follows the server, and equals it
       for (const id of Object.keys(stores)) {
         const copy = relay.copy(id);
-        if (there.length && !copy?.live) throw fail(`the relay's copy of ${id} does not follow the server ${where}`);
+        // One the relay may not carry follows through the display passed through as a whole socket, when it is there
+        const follows = passing && id === 'notes' ? there.some(d => !d.fan) : there.length;
+        if (follows && !copy?.live) throw fail(`the relay's copy of ${id} does not follow the server ${where}`);
         if (copy?.live && (canon(copy.state) !== canon(storeOf(id).snapshot()) || copy.epoch !== storeOf(id).epoch || copy.v !== storeOf(id).version)) {
           throw fail(`the relay's copy of ${id} follows the server but differs ${where}\n  server: ${storeOf(id).epoch} v${storeOf(id).version} ${canon(storeOf(id).snapshot())}\n  copy:   ${copy.epoch} v${copy.v} ${canon(copy.state)}`);
         }

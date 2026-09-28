@@ -144,10 +144,11 @@ export interface RelayStats {
   /**
    * Fan-out: the link's state ('broken': the server answers the clients
    * and not the link, which are passed through meanwhile; 'refused': the
-   * server turned the relay away), how many stores it reads on it, and how
-   * many clients it has vouched for
+   * server turned the relay away), how many stores it reads on it, how
+   * many clients it has vouched for, and how many clients' sessions it
+   * passes through on stores the server will not let it carry
    */
-  link?: { state: 'down' | 'dialing' | 'open' | 'broken' | 'refused'; shared: number; clients: number };
+  link?: { state: 'down' | 'dialing' | 'open' | 'broken' | 'refused'; shared: number; clients: number; passed: number };
 }
 
 export interface RelaySocketInfo {

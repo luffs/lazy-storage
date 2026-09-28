@@ -843,6 +843,16 @@ what:
   with its clients, `relays.expiresAt` ends its link as `expiresAt` does
   a socket, and `revalidate` judges the relay itself on every store it
   carries (`relays.authorize`).
+- **A store the relay may not carry is passed through.** Where
+  `relays.authorize` turns the relay's own session down, that says
+  nothing of its clients: each client's session on that store goes up the
+  client's own socket (the one its edits take) as a whole session, as a
+  socket passed through does, and the server judges it as the client's
+  own, so one that may read the store reads it and one that may not hears
+  `forbidden` from the server. The relay keeps nothing of the store and
+  answers it from no copy offline; after ten minutes it asks to carry it
+  again, when a client next opens it. `relay.stats().link.passed` counts
+  those sessions.
 - **Offline is as before.** The link failing is the server failing: after
   `grace` the relay answers on its own, and on the way back every client
   that sent an op meanwhile, or whose copy took offline edits, says hello
@@ -887,8 +897,9 @@ A client without a credential is passed through as before, beside the
 others. The server's `sockets()` lists a relay's socket with `relay` and
 `grants`, and each client it carries after it with `via`; `socketStats()`
 counts `relays` and `clients`; `relay.stats().link` says how the link is
-(`open`, `down`, `broken`, `refused`) and how many stores and clients are
-on it.
+(`open`, `down`, `broken`, `refused`), how many stores and clients are
+on it, and how many clients' sessions it passes through on stores it may
+not carry.
 
 What a relay with many clients spends its time on is writing to their
 sockets: a socket costs a write (a system call, and a TLS record) per send
@@ -1525,7 +1536,7 @@ an `http.Server` with `shutdown({ reason })`, `sockets()`, `socketStats()`, `dis
 
 - `createRelay({ storage, grace, dialTimeout, probe, probeEvery, keepalive, jitter, maxSkew, maxLeaves, authorizeOffline, validate, link, linger, writeIdle, saveDelay, forgetAfter, onError, now })` — `storage` is `memoryCopies()` (default) or `fileCopies(dir, { onError })`; `probe` an async `() => boolean`, or false to leave it to `upstreamUp()`; `authorizeOffline(key, storeId)` whether a credential is answered from a copy (default: the server answered it on that store); `validate(diff, { key, replicaId, storeId, state })` an offline op's last gate; `link` a transport factory dialling the server's relay route with the relay's own credential, for fan-out (see [One read for many clients](#one-read-for-many-clients-fan-out)); `linger` (20 s) how long the relay's session on a store outlives its last client; `writeIdle` (30 s) when a client's socket up for its edits closes; `forgetAfter` (30 days) lets go of copies and credentials unused that long
 - `relay.accept({ send, close, key, upstream, credential })` → `{ receive(message), close(), state }` — a client's socket: `send` and `close(code, reason)` reach the client, `key` is a fingerprint of its credential, `upstream` a transport factory dialling the server with it, `credential` (`{ headers, query }`) what the server judges it by when the relay fans out; without one it is passed through
-- `relay.mode` (`'through' | 'local'`), `relay.on('mode' | 'copy' | 'error', fn)`, `relay.copy(storeId)` → `{ state, v, epoch, live, diverged, local }` or null, `relay.upstreamUp()`, `relay.upstreamDown()` — the host's word on the server, `relay.stats()` → `{ mode, downSince, sockets: { dialing, through, local, fan }, copies, live, diverged, credentials, link? }` (`link: { state, shared, clients }` with fan-out), `relay.sockets()` → `[{ key, state, stores, openMs }]`, `relay.flush()`, `relay.sweep()`, `relay.close()`
+- `relay.mode` (`'through' | 'local'`), `relay.on('mode' | 'copy' | 'error', fn)`, `relay.copy(storeId)` → `{ state, v, epoch, live, diverged, local }` or null, `relay.upstreamUp()`, `relay.upstreamDown()` — the host's word on the server, `relay.stats()` → `{ mode, downSince, sockets: { dialing, through, local, fan }, copies, live, diverged, credentials, link? }` (`link: { state, shared, clients, passed }` with fan-out), `relay.sockets()` → `[{ key, state, stores, openMs }]`, `relay.flush()`, `relay.sweep()`, `relay.close()`
 
 **Bun relay** (`lazy-storage/relay/bun`): `createRelayHandlers({ relay, upstream, key, credential, path, maxPayload, perMessageDeflate, maxBuffered, onError })` → `{ upgrade(req, server), websocket, close({ reason }), sockets() }` for your own `Bun.serve`; `credential(req)` → `{ headers, query }` for fan-out; `upstreamSocket(url, { headers, WebSocket })` → a transport factory on a WebSocket with headers, frames kept as they came.
 
@@ -1663,7 +1674,8 @@ each store (`hello`, `leave`, and what the store sends it), and these:
 
 The relay's own session on a store is closed `unused` when no client
 behind it is let in to the store (not final: it says hello again once one
-is), and `forbidden` when the relay may not carry the store.
+is), and `forbidden` when the relay may not carry the store (its clients
+there are then passed through on their own sockets, see above).
 
 ## Scope
 

@@ -2,6 +2,12 @@
 
 All notable changes to lazy-storage are documented here. The format follows Keep a Changelog; versions follow Semantic Versioning.
 
+## [Unreleased]
+
+### Changed
+
+- **A store the relay may not carry is passed through, not closed to its clients.** Where the server turns a fanning-out relay's own session on a store down (`relays.authorize`, closed 'forbidden'), each client's session there used to hear 'forbidden' as if the client could not read the store, and a client's 'forbidden' is final: it stopped syncing the store without a word, while its own socket would have been let in. Now each client's session on that store goes up the client's own socket (the one its edits take) as a whole session, judged by the server as the client's own: one that may read the store reads and writes it, one that may not hears 'forbidden' from the server. The relay vouches for nobody there, keeps nothing of the store (a copy it held goes), answers it from no copy offline, and asks to carry it again ten minutes later, when a client next opens it. `relay.stats().link.passed` counts those sessions, and `relay.sockets()` lists their stores. The fuzzer's fan-out runs have the relay refused the notes store every other run
+
 ## [0.21.0] - 2026-09-27
 
 A relay can read each store once for all its clients. Given a `link` to
