@@ -14,8 +14,13 @@
 // life. `podman stop` is passed on: the relays close their sockets, the
 // server writes what is pending and closes its file. A process that dies
 // takes the others with it, and podman's restart policy brings them back.
+//
+// PROFILE=<dir> has each process write a CPU profile there when it stops
+// (Bun's --cpu-prof-md: server.md, relay-1.md and on), for finding what a
+// load test (bench/fanout/run.js --url) spends the cores on
 import { randomBytes } from 'node:crypto';
-import { join } from 'node:path';
+import { mkdirSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 
 const RELAYS = Number(process.env.RELAYS ?? 2);
 const env = {
@@ -24,8 +29,13 @@ const env = {
   SERVER_PORT: process.env.SERVER_PORT ?? '3201',
   RELAY_TOKEN: randomBytes(24).toString('hex')
 };
-const spawn = file => Bun.spawn([process.execPath, join(import.meta.dir, file)], { env, stdout: 'inherit', stderr: 'inherit' });
-const children = [spawn('server.js'), ...Array.from({ length: RELAYS }, () => spawn('relay.js'))];
+const PROFILE = process.env.PROFILE ? resolve(process.env.PROFILE) : null;
+if (PROFILE) mkdirSync(PROFILE, { recursive: true });
+const spawn = (file, name) => {
+  const flags = PROFILE ? ['--cpu-prof-md', `--cpu-prof-dir=${PROFILE}`, `--cpu-prof-name=${name}.md`] : [];
+  return Bun.spawn([process.execPath, ...flags, join(import.meta.dir, file)], { env, stdout: 'inherit', stderr: 'inherit' });
+};
+const children = [spawn('server.js', 'server'), ...Array.from({ length: RELAYS }, (_, k) => spawn('relay.js', `relay-${k + 1}`))];
 
 let stopping = false;
 for (const signal of ['SIGTERM', 'SIGINT']) {

@@ -57,7 +57,11 @@
 // machine opens some 16 000 sockets to one address on Windows and 28 000 on
 // Linux before its ports run out (then sockets fail to open): past that, more
 // machines, or a wider range of ports (Windows: netsh int ipv4 set
-// dynamicport tcp start=10000 num=55000)
+// dynamicport tcp start=10000 num=55000). A socket this machine closes keeps
+// its port a minute or two after (TIME_WAIT, the closing side's), so a storm
+// needs ports for twice the clients, and a run straight after another finds
+// the last one's still held: wait two minutes between runs. (A real storm,
+// the server restarting, leaves those on the server's machine.)
 //
 // Every part is a process of its own (the server, each process of relays, each
 // process of clients), so each one's CPU is its own (on Windows its cycle count,
@@ -552,6 +556,9 @@ async function deployment(results, save) {
       const step = { clients: target };
       out.steps.push(step);
       const added = target - total;
+      // The sockets that failed to open before this step, so the step says its own
+      const existing = clients.length;
+      const failedBefore = sum(await all(clients), 'failed');
       const connectStarted = performance.now();
       while (total < target) {
         const n = Math.min(PER_PROC, target - total);
@@ -577,8 +584,13 @@ async function deployment(results, save) {
       }
       step.connectS = (performance.now() - connectStarted) / 1000;
       step.processes = clients.length;
+      const counts = await all(clients);
+      step.failed = sum(counts, 'failed') - failedBefore;
+      // A new process's error first: an older one's may be a step old
+      const error = [...counts.slice(existing), ...counts.slice(0, existing)].find(c => c.firstError)?.firstError;
       const where = STORES.length === 1 ? `the store ${STORES[0]}` : `${STORES.length} stores (${STORES[0]} to ${STORES.at(-1)})`;
-      console.log(`\n${TARGET}: ${total} clients on ${where}, the ${added} new ones answered in ${step.connectS.toFixed(1)} s (${f(added / step.connectS, 0)} a second); ${clients.length} processes on ${CPUS} logical CPUs`);
+      console.log(`\n${TARGET}: ${total} clients on ${where}, the ${added} new ones answered in ${step.connectS.toFixed(1)} s (${f(added / step.connectS, 0)} a second); ${clients.length} processes on ${CPUS} logical CPUs` +
+        (step.failed ? `  FAILED ${step.failed} sockets, dialled again${error ? ` (one: ${error})` : ''}: see the header on this machine's ports` : ''));
       await sleep(3000);
       if (PHASES.has('idle')) step.idle = await idle(spec, parts);
       if (PHASES.has('write')) await writePhases(spec, parts, step);

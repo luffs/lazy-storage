@@ -99,4 +99,8 @@ sysctl is the pod's own, as its network is, and leaves the host's alone.
   its clients took to be answered, how long a write took to reach every
   client of its store, and how long all took to come back when every
   client dropped at once; the repository's README ("Examples and
-  benchmark") says more.
+  benchmark") says more. To see what the cores were spent on, start the
+  container (or `main.js`) with `PROFILE=<dir>`: each process writes a
+  CPU profile there when it stops (`server.md`, `relay-1.md` and on). In
+  the container, put it on the volume, `-e PROFILE=/data/profiles`, so
+  the profiles outlive it.
