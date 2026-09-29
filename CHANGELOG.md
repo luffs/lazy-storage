@@ -4,6 +4,19 @@ All notable changes to lazy-storage are documented here. The format follows Keep
 
 ## [Unreleased]
 
+## [0.23.1] - 2026-09-29
+
+A reconnect storm through fan-out relays no longer costs the server the
+square of its clients: 20 000 clients behind three relays, dropped at
+once, now cost the server's core little more than their vouches, where
+most of it went on finding whether a store still had a client. Beside
+the fix, `examples/podman-caddy` shows a server for as many clients as
+one machine takes (relays on the other cores, Caddy in front, compression
+set hop by hop), and `bench:fanout --url` load-tests such a deployment
+from another machine: connects, writes, and a reconnect storm. Nothing
+changes for code on the server or the clients, on the wire or on disk;
+upgrade the server and its relays in any order.
+
 ### Added
 
 - **`examples/podman-caddy`: a server for as many clients as one machine takes.** A store lives in one process and uses one core, and each change costs a write to every socket that hears it, so the clients connect to relays rather than to the server: `main.js` starts the server alone on 127.0.0.1 and `RELAYS` relays that share the public port (`reusePort`: on Linux the kernel spreads the connections over them), each reading every store once on a link of its own and writing to its clients from another core; Caddy ends TLS in front. The server compresses nothing for its relays on loopback, and the relays compress what passes 4 KB for their clients on the internet. It serves the basic example's page, runs without containers too, and its README has the podman pod and Caddy commands and what to change for an app of one's own (authentication, how many relays, compression, open files, the data volume). Caddy opens a socket to a relay for every client, all to one address and port, which Linux's default range of source ports caps at some 28,000, so the pod widens the range and the README says how to add addresses; Caddy's container gets twice the app's limit on open files, holding two sockets for every client. `PROFILE=<dir>` has the server and each relay write a CPU profile when they stop, for a load test's run
