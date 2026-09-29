@@ -35,11 +35,11 @@ test('a store round-trips through node:sqlite: rows, replicas, epoch, and the de
     sqlite = sqliteStorage(file);
     const loaded = sqlite.store('team-1').load();
     assert.equal(loaded.epoch, epoch);
-    assert.deepEqual(loaded.log.map(e => e.v), [2, 3, 4], 'the log, pruned to three');
+    assert.deepEqual(loaded.log.map(e => e.v), [1, 2, 3, 4], 'the log, kept past its floor until that has moved a hundred entries');
     const two = createStore({ initial: INITIAL, registers: ['order'], storage: sqlite.store('team-1'), deltaLog: 3 });
     assert.deepEqual(two.snapshot(), { tasks: { a: { id: 'a', title: 'Kept', done: true }, c: { id: 'c' } }, order: ['a'], settings: { theme: 'dark' } });
     assert.equal(two.version, 4);
-    assert.equal(two.stats().log, 3);
+    assert.equal(two.stats().log, 3, 'the store keeps its own last three');
     const late = two.apply({ replicaId: 'late', seq: 1, ts: T(1, 'late'), diff: { tasks: { b: { title: 'ghost' } } } });
     assert.equal(late.accepted, null, 'the tombstone survived the reopen');
     assert.equal(two.apply({ replicaId: 'server', seq: 1, ts: T(1), diff: { settings: { theme: 'x' } } }).duplicate, true, 'replica progress survived');
@@ -123,6 +123,32 @@ test('one process serves a store: a second is refused until the first lets it go
     hub.close();
     first.close();
     second.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a commit reads its lease, and writes it only when it runs low', { skip: !sqliteStorage }, () => {
+  const dir = mkdtempSync(join(tmpdir(), 'lazy-storage-node-sqlite-'));
+  try {
+    const ttl = 3_600_000;   // the timer renews every twenty minutes: never within this test
+    const sqlite = sqliteStorage(join(dir, 'lease.sqlite'), { lease: { ttl } });
+    const store = createStore({ initial: INITIAL, storage: sqlite.store('team-1') });
+    const until = () => sqlite.db.prepare('SELECT until FROM leases WHERE store = ?').get('team-1').until;
+    const setUntil = ms => sqlite.db.prepare('UPDATE leases SET until = ? WHERE store = ?').run(ms, 'team-1');
+
+    // Renewing it in every commit wrote the lease's page every commit, while the timer keeps it fresh anyway
+    const fresh = Date.now() + ttl - 60_000;
+    setUntil(fresh);
+    store.patch({ tasks: { a: { id: 'a' } } });
+    store.patch({ tasks: { b: { id: 'b' } } });
+    assert.equal(until(), fresh, 'a lease with more than half its time left is only read');
+
+    setUntil(Date.now() + ttl / 4);   // the timer fell behind
+    store.patch({ tasks: { c: { id: 'c' } } });
+    assert.ok(until() > Date.now() + ttl - 60_000, 'one running low is renewed with the commit');
+    store.dispose();
+    sqlite.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

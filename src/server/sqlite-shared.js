@@ -13,6 +13,16 @@
 // prefix scans; the merge does its own descendant bookkeeping through
 // `deletes`, so the adapter never needs to scan.
 //
+// SQLite writes whole pages, 4 KB each, whatever part of them changed, so
+// what a commit costs the disk is the pages it touches, not the size of the
+// op: a small op touched six, some 26 KB of WAL for a few hundred bytes of
+// change, and a busy store's disk (and the event loop, waiting on its
+// checkpoints) was what held it back. So a commit touches no page it need
+// not: the delta log is pruned once the floor has moved PRUNE_EVERY entries
+// past what was last pruned, not one entry every commit (the rows between are
+// read back and dropped by the store on load, which keeps its own last
+// `deltaLog`), and the lease is written only when it runs low (see below).
+//
 // One process at a time serves a store. Two processes on one file (a
 // deploy whose old and new process overlap, a server started twice) would
 // each load the store, commit versions that collide, and send their
@@ -26,7 +36,12 @@
 // write over the one that took the store. A lease left by a process that
 // died runs out after `ttl`, or at once when that process was on this
 // machine and is gone. Stores are leased one by one, so two processes may
-// share a file on purpose by serving different stores.
+// share a file on purpose by serving different stores. A commit reads its
+// lease rather than writing it: the timer keeps it fresh, and a commit
+// renews it only when less than half of `ttl` is left (the timer fell
+// behind), so most commits write no lease page. The read comes after the
+// commit's first write, which takes the file's write lock, so it sees the
+// lease as it stands: no other process can take it in between.
 //
 // The driver is abstracted to what bun:sqlite and node:sqlite both offer:
 // `exec(sql)`, `prepare(sql)` giving a statement with run/get/all, and a
@@ -35,6 +50,9 @@
 import { hostname } from 'node:os';
 import { randomId } from '../core/ids.js';
 import { assertDocument, newEpoch } from './storage.js';
+
+/** How far a store's log floor moves before the rows under it are deleted (see the header) */
+const PRUNE_EVERY = 100;
 
 const SCHEMA = `
   CREATE TABLE IF NOT EXISTS leaves (
@@ -180,16 +198,21 @@ export function sqliteStorageOn({ exec, prepare, transaction, close, db }, { fil
     if (typeof renewer?.unref === 'function') renewer.unref();
   }
 
-  const commit = transaction((id, change) => {
+  const commit = transaction((id, change, prune) => {
+    // The version first: every commit writes it, and that first write takes
+    // the file's write lock, so the lease read below is the latest
+    q.setVersion.run(id, change.version, change.epoch, Number.isInteger(change.schema) ? change.schema : null);
     if (leasing) {
       // Still ours, or another process has the store now and this one must not write
-      const renewed = lq.renew.run(Date.now() + ttl, id, holder);
-      if (!renewed || renewed.changes === 0) {
+      const current = lq.get.get(id);
+      if (!current || current.holder !== holder) {
         held.delete(id);
         const err = new Error(`The lease on store "${id}" was lost: another process serves it now`);
         err.code = 'lease-lost';
         throw err;
       }
+      const now = Date.now();
+      if (current.until - now < ttl / 2) lq.renew.run(now + ttl, id, holder);
     }
     for (const key of change.deletes) q.del.run(id, key);
     for (const [key, row] of change.upserts) {
@@ -198,8 +221,7 @@ export function sqliteStorageOn({ exec, prepare, transaction, close, db }, { fil
     if (change.replica) q.setReplica.run(id, change.replica.id, change.replica.seq, change.replica.seen, change.replica.owner ?? null);
     for (const replica of change.forgetReplicas ?? []) q.forgetReplica.run(id, replica);
     if (change.log) q.putLog.run(id, change.log.v, JSON.stringify(change.log.diff));
-    if (Number.isInteger(change.logFloor)) q.pruneLog.run(id, change.logFloor);
-    q.setVersion.run(id, change.version, change.epoch, Number.isInteger(change.schema) ? change.schema : null);
+    if (prune) q.pruneLog.run(id, change.logFloor);
   });
 
   const replace = transaction((id, doc) => {
@@ -229,8 +251,12 @@ export function sqliteStorageOn({ exec, prepare, transaction, close, db }, { fil
     /** The storage adapter for one store (create it on first commit) */
     store(id) {
       assertId(id);
+      // The log floor the rows were last pruned to: null until a commit here
+      // prunes, which the first one does
+      let pruned = null;
       return {
         load() {
+          pruned = null;
           acquire(id);
           const meta = q.version.get(id);
           if (!meta) return null;
@@ -245,7 +271,9 @@ export function sqliteStorageOn({ exec, prepare, transaction, close, db }, { fil
           return { rows, replicas, version: meta.version, epoch: meta.epoch, ...(meta.schema === null || meta.schema === undefined ? {} : { schema: meta.schema }), log };
         },
         commit(change) {
-          commit(id, change);
+          const prune = Number.isInteger(change.logFloor) && (pruned === null || change.logFloor - pruned >= PRUNE_EVERY);
+          commit(id, change, prune);
+          if (prune) pruned = change.logFloor;
         },
         flush() {},
         /**
@@ -264,6 +292,7 @@ export function sqliteStorageOn({ exec, prepare, transaction, close, db }, { fil
             throw err;
           }
           acquire(id);
+          pruned = null;
           try {
             replace(id, doc);
           } finally {

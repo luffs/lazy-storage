@@ -77,20 +77,28 @@ test('a store round-trips through SQLite: rows on disk, state rebuilt on reopen,
   sqlite.close();
 });
 
-test('the delta log is persisted, pruned to the store\'s floor, reloaded, and dropped with the store', () => {
+test('the delta log is persisted, pruned to the store\'s floor a hundred entries at a time, reloaded, and dropped with the store', () => {
   let sqlite = sqliteStorage(file);
+  const logged = () => sqlite.db.query('SELECT v FROM log WHERE store = ? ORDER BY v').all('logged').map(r => r.v);
   const one = createStore({ initial: INITIAL, storage: sqlite.store('logged'), deltaLog: 3 });
   for (let i = 0; i < 5; i++) one.patch({ tasks: { [`t${i}`]: { id: `t${i}` } } });
   one.dispose();
-  assert.deepEqual(sqlite.db.query('SELECT v FROM log WHERE store = ? ORDER BY v').all('logged').map(r => r.v), [3, 4, 5], 'pruned to the last three');
+  // Deleting the oldest entry with every commit wrote a page of its own every commit
+  assert.deepEqual(logged(), [1, 2, 3, 4, 5], 'kept past the floor until it has moved far enough');
   sqlite.close();
 
   sqlite = sqliteStorage(file);
   const loaded = sqlite.store('logged').load();
-  assert.deepEqual(loaded.log.map(e => e.v), [3, 4, 5]);
-  assert.deepEqual(loaded.log[2].diff, { tasks: { t4: { id: 't4' } } });
+  assert.deepEqual(loaded.log.map(e => e.v), [1, 2, 3, 4, 5]);
+  assert.deepEqual(loaded.log[4].diff, { tasks: { t4: { id: 't4' } } });
   const two = createStore({ initial: INITIAL, storage: sqlite.store('logged'), deltaLog: 3 });
-  assert.equal(two.stats().log, 3, 'the reopened store can answer deltas from before the restart');
+  assert.equal(two.stats().log, 3, 'the reopened store keeps its own last three, and can answer deltas from before the restart');
+  two.patch({ tasks: { t5: { id: 't5' } } });
+  assert.deepEqual(logged(), [4, 5, 6], 'its first commit prunes to the floor');
+  for (let i = 6; i < 105; i++) two.patch({ tasks: { [`t${i}`]: { id: `t${i}` } } });
+  assert.deepEqual([logged()[0], logged().length], [4, 102], 'then not again until the floor has moved a hundred');
+  two.patch({ tasks: { t105: { id: 't105' } } });
+  assert.deepEqual(logged(), [104, 105, 106]);
   two.dispose();
   sqlite.remove('logged');
   assert.equal(sqlite.db.query('SELECT COUNT(*) AS n FROM log WHERE store = ?').get('logged').n, 0);

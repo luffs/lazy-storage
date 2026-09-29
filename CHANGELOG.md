@@ -12,6 +12,7 @@ All notable changes to lazy-storage are documented here. The format follows Keep
 
 ### Changed
 
+- **The SQLite adapters write a fifth less for each op.** SQLite writes whole 4 KB pages, and the commit of a small op touched six of them, some 26 KB of WAL for a few hundred bytes of change; on a server's disk that, not its CPU, held a busy store back (a 4-core Linux server took 8000 writes a second behind ten relays with memory storage, and some 2500 with SQLite). A commit now reads its lease rather than renewing it (the timer keeps it fresh, and a commit renews one with less than half its `ttl` left), and prunes the delta log once its floor has moved a hundred entries rather than with every commit, so the `log` table holds up to a hundred entries past the store's floor, which the store leaves out on load as it does anything past its `deltaLog`. That is 5.1 pages an op instead of 6.4, in about a quarter less time
 - **`npm run bench:fanout` spreads its clients over 50 relays by default, not 200.** Every relay parses, applies and logs each patch itself, and here they all do it on one machine; fifty cost the relays a little less. With 4000 clients either count keeps more than half of a 24-thread laptop busy from 50 patches a second (the fan-out itself costs the most), so the header of `bench/fanout/run.js` points to `--topologies hubs --n 400 --hubs 200` for the server behind many relays: there it kept up with 500 patches and 1000 writes a second
 
 ## [0.22.0] - 2026-09-28
