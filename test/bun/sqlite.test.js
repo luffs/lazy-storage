@@ -81,7 +81,10 @@ test('the delta log is persisted, pruned to the store\'s floor a hundred entries
   let sqlite = sqliteStorage(file);
   const logged = () => sqlite.db.query('SELECT v FROM log WHERE store = ? ORDER BY v').all('logged').map(r => r.v);
   const one = createStore({ initial: INITIAL, storage: sqlite.store('logged'), deltaLog: 3 });
-  for (let i = 0; i < 5; i++) one.patch({ tasks: { [`t${i}`]: { id: `t${i}` } } });
+  for (let i = 0; i < 5; i++) {
+    one.patch({ tasks: { [`t${i}`]: { id: `t${i}` } } });
+    one.flush();   // a commit each, not one for the turn (see groupCommit)
+  }
   one.dispose();
   // Deleting the oldest entry with every commit wrote a page of its own every commit
   assert.deepEqual(logged(), [1, 2, 3, 4, 5], 'kept past the floor until it has moved far enough');

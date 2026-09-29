@@ -35,7 +35,7 @@ test('a store round-trips through node:sqlite: rows, replicas, epoch, and the de
     sqlite = sqliteStorage(file);
     const loaded = sqlite.store('team-1').load();
     assert.equal(loaded.epoch, epoch);
-    assert.deepEqual(loaded.log.map(e => e.v), [1, 2, 3, 4], 'the log, kept past its floor until that has moved a hundred entries');
+    assert.deepEqual(loaded.log.map(e => e.v), [2, 3, 4], 'the turn\'s four patches, one commit, pruned to the floor they left');
     const two = createStore({ initial: INITIAL, registers: ['order'], storage: sqlite.store('team-1'), deltaLog: 3 });
     assert.deepEqual(two.snapshot(), { tasks: { a: { id: 'a', title: 'Kept', done: true }, c: { id: 'c' } }, order: ['a'], settings: { theme: 'dark' } });
     assert.equal(two.version, 4);
@@ -126,6 +126,39 @@ test('one process serves a store: a second is refused until the first lets it go
     hub.close();
     first.close();
     second.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a batch of changes leaves each row as the last of them left it, and is stored whole or not at all', { skip: !sqliteStorage }, () => {
+  const dir = mkdtempSync(join(tmpdir(), 'lazy-storage-node-sqlite-'));
+  try {
+    const sqlite = sqliteStorage(join(dir, 'batch.sqlite'));
+    const storage = sqlite.store('main');
+    storage.load();   // takes the lease, as a store does
+    const change = (version, rest) => ({ upserts: [], deletes: [], version, epoch: 'e', schema: 0, logFloor: 1, ...rest });
+    // One turn's changes: each row is written once, as the last of them leaves it
+    storage.commitMany([
+      change(1, { upserts: [['["a"]', { value: 1, ts: T(1) }], ['["b"]', { value: 1, ts: T(1) }]], replica: { id: 'r1', seq: 1, seen: 10 }, log: { v: 1, diff: { a: 1, b: 1 } } }),
+      change(2, { deletes: ['["a"]'], replica: { id: 'r2', seq: 1, seen: 20 }, log: { v: 2, diff: { a: null } } }),
+      change(3, { upserts: [['["a"]', { value: 3, ts: T(3) }], ['["b"]', { ts: T(3), deleted: true }]], replica: { id: 'r1', seq: 2, seen: 30 }, forgetReplicas: ['r2'], log: { v: 3, diff: { a: 3, b: null } } })
+    ]);
+    const loaded = storage.load();
+    assert.deepEqual(loaded.rows, [['["a"]', { value: 3, ts: T(3) }], ['["b"]', { ts: T(3), deleted: true }]], 'written, deleted, written again; and a tombstone');
+    assert.deepEqual(loaded.replicas, { r1: { seq: 2, seen: 30 } }, 'the last progress, and a replica forgotten after it was recorded');
+    assert.equal(loaded.version, 3, 'the last version');
+    assert.deepEqual(loaded.log.map(e => e.v), [1, 2, 3], 'and every log entry');
+
+    // Another process took the store: the batch that finds out is stored not at all
+    sqlite.db.prepare('UPDATE leases SET holder = ?, until = ? WHERE store = ?').run('other', Date.now() + 60_000, 'main');
+    assert.throws(() => storage.commitMany([
+      change(4, { upserts: [['["c"]', { value: 4, ts: T(4) }]], log: { v: 4, diff: { c: 4 } } }),
+      change(5, { upserts: [['["a"]', { value: 5, ts: T(5) }]], log: { v: 5, diff: { a: 5 } } })
+    ]), err => err.code === 'lease-lost');
+    assert.equal(sqlite.db.prepare('SELECT version FROM stores WHERE store = ?').get('main').version, 3);
+    assert.equal(sqlite.db.prepare('SELECT COUNT(*) AS n FROM leaves WHERE store = ? AND path = ?').get('main', '["c"]').n, 0);
+    sqlite.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

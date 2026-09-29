@@ -198,11 +198,21 @@ export function sqliteStorageOn({ exec, prepare, transaction, close, db }, { fil
     if (typeof renewer?.unref === 'function') renewer.unref();
   }
 
-  /** One change's rows, inside a transaction (see commit and commitMany) */
-  function commitRows(id, change, prune) {
+  /**
+   * A store's changes, in one transaction: one commit, or what a turn of
+   * the event loop merged (see the store's groupCommit). Each row is written
+   * once, as the last of the changes left it: the version is the last
+   * change's, the lease is read once, a leaf or a replica several changes
+   * wrote (or deleted, or forgot) gets its final row, and the log is pruned
+   * once, to `floor`. Every log entry is written, one a version. A page the
+   * changes share is written once, and a statement runs once for them all
+   * rather than once a change
+   */
+  const commitChanges = transaction((id, changes, floor) => {
+    const last = changes[changes.length - 1];
     // The version first: every commit writes it, and that first write takes
     // the file's write lock, so the lease read below is the latest
-    q.setVersion.run(id, change.version, change.epoch, Number.isInteger(change.schema) ? change.schema : null);
+    q.setVersion.run(id, last.version, last.epoch, Number.isInteger(last.schema) ? last.schema : null);
     if (leasing) {
       // Still ours, or another process has the store now and this one must not write
       const current = lq.get.get(id);
@@ -215,20 +225,25 @@ export function sqliteStorageOn({ exec, prepare, transaction, close, db }, { fil
       const now = Date.now();
       if (current.until - now < ttl / 2) lq.renew.run(now + ttl, id, holder);
     }
-    for (const key of change.deletes) q.del.run(id, key);
-    for (const [key, row] of change.upserts) {
-      q.upsert.run(id, key, row.deleted ? null : JSON.stringify(row.value), row.ts[0], row.ts[1], row.ts[2], row.deleted ? 1 : 0);
+    const leaves = new Map();     // path key -> its row as the changes leave it; null: deleted
+    const replicas = new Map();   // replica id -> its progress as they leave it; null: forgotten
+    for (const change of changes) {
+      // In the order one change's own rows go: its deletes, then its upserts
+      for (const key of change.deletes) leaves.set(key, null);
+      for (const [key, row] of change.upserts) leaves.set(key, row);
+      if (change.replica) replicas.set(change.replica.id, change.replica);
+      for (const replica of change.forgetReplicas ?? []) replicas.set(replica, null);
+      if (change.log) q.putLog.run(id, change.log.v, JSON.stringify(change.log.diff));
     }
-    if (change.replica) q.setReplica.run(id, change.replica.id, change.replica.seq, change.replica.seen, change.replica.owner ?? null);
-    for (const replica of change.forgetReplicas ?? []) q.forgetReplica.run(id, replica);
-    if (change.log) q.putLog.run(id, change.log.v, JSON.stringify(change.log.diff));
-    if (prune) q.pruneLog.run(id, change.logFloor);
-  }
-  const commit = transaction(commitRows);
-  // A store's changes of one turn (see the store's groupCommit), in one
-  // transaction: a page they share is written once
-  const commitMany = transaction((id, list) => {
-    for (const [change, prune] of list) commitRows(id, change, prune);
+    for (const [key, row] of leaves) {
+      if (row === null) q.del.run(id, key);
+      else q.upsert.run(id, key, row.deleted ? null : JSON.stringify(row.value), row.ts[0], row.ts[1], row.ts[2], row.deleted ? 1 : 0);
+    }
+    for (const [replica, r] of replicas) {
+      if (r === null) q.forgetReplica.run(id, replica);
+      else q.setReplica.run(id, replica, r.seq, r.seen, r.owner ?? null);
+    }
+    if (floor !== null) q.pruneLog.run(id, floor);
   });
 
   const replace = transaction((id, doc) => {
@@ -261,6 +276,16 @@ export function sqliteStorageOn({ exec, prepare, transaction, close, db }, { fil
       // The log floor the rows were last pruned to: null until a commit here
       // prunes, which the first one does
       let pruned = null;
+      /** Several changes, in order, in one transaction: all of them or none */
+      const commitMany = changes => {
+        if (!changes.length) return;
+        // The floor the last of them names, pruned to when it has moved far enough (see the header)
+        let floor = null;
+        for (const change of changes) if (Number.isInteger(change.logFloor)) floor = change.logFloor;
+        const prune = floor !== null && (pruned === null || floor - pruned >= PRUNE_EVERY);
+        commitChanges(id, changes, prune ? floor : null);
+        if (prune) pruned = floor;
+      };
       return {
         load() {
           pruned = null;
@@ -277,22 +302,8 @@ export function sqliteStorageOn({ exec, prepare, transaction, close, db }, { fil
           const log = q.log.all(id).map(r => ({ v: r.v, diff: JSON.parse(r.diff) }));
           return { rows, replicas, version: meta.version, epoch: meta.epoch, ...(meta.schema === null || meta.schema === undefined ? {} : { schema: meta.schema }), log };
         },
-        commit(change) {
-          const prune = Number.isInteger(change.logFloor) && (pruned === null || change.logFloor - pruned >= PRUNE_EVERY);
-          commit(id, change, prune);
-          if (prune) pruned = change.logFloor;
-        },
-        /** Several changes, in order, in one transaction: all of them or none */
-        commitMany(changes) {
-          let floor = pruned;
-          const list = changes.map(change => {
-            const prune = Number.isInteger(change.logFloor) && (floor === null || change.logFloor - floor >= PRUNE_EVERY);
-            if (prune) floor = change.logFloor;
-            return [change, prune];
-          });
-          commitMany(id, list);
-          pruned = floor;
-        },
+        commit: change => commitMany([change]),
+        commitMany,
         flush() {},
         /**
          * Take a document (store.export(), or another adapter's load()) as
