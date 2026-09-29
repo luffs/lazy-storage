@@ -21,6 +21,7 @@ npm run bench         # server benchmark (bench/run.js); medians of 5 rounds
 npm run bench:client  # client benchmark (bench/client.js) in happy-dom: React/Vue renders, list views, persistence
 npm run bench:check   # both benchmarks with --check: every case under its ceiling, the client counts within their bounds
 npm run bench:fanout  # (Bun) a store every client follows, published to by the server and written by its clients: direct, one relay, many relays (bench/fanout/)
+bun bench/fanout/agent.js  # the server's machine in a two-machine bench:fanout; run.js --remote <host>:36700 on the other
 ```
 
 Run one test file with `node --test test/facade.test.js`, one test with `--test-name-pattern="..."`. A fuzz failure prints its seed and a reproduction command. CI (`.github/workflows/test.yml`) runs the tests on Node 22/24/26, the Bun tests, the coverage gate, the benchmark guard, and a random-seed campaign of both fuzzers; the publish workflow runs tests, types, the coverage gate and the Bun tests before `npm publish`.

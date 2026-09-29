@@ -1723,8 +1723,13 @@ logical CPUs the processes kept busy between them, and flags one past
 half of them MACHINE BUSY: the relays and the clients share the machine
 with the server, and a phase that fills it measures the machine
 (`--topologies hubs --n 400 --hubs 200` shows the server behind many
-relays with room to spare). `bun bench/fanout/run.js --n 4000` for the
-defaults' size; see the header of `bench/fanout/run.js` for the rest.
+relays with room to spare). To give the server a machine of its own, run
+`bun bench/fanout/agent.js` there and `--remote <its host>:36700` here:
+the agent starts a fresh server for each topology, the relays and the
+clients stay here, and the server's clock is measured against this one so
+their latencies hold across the two. `bun bench/fanout/run.js --n 4000`
+for the defaults' size; see the header of `bench/fanout/run.js` for the
+rest.
 
 `npm run bench:client` times what an app feels in the browser, in a DOM
 from happy-dom: React and Vue components on `useClient` as the store

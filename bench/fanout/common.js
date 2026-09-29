@@ -1,8 +1,13 @@
 // common.js - What the fan-out bench's processes share: a clock they agree on,
 // a latency histogram that sums across processes, CPU time, and each child's
-// control server (a port on 127.0.0.1 it prints as its first line)
+// control server (a port it prints as its first line)
+import { availableParallelism, cpus } from 'node:os';
 
-/** Milliseconds since the epoch at sub-millisecond resolution; processes on one machine agree on it */
+/**
+ * Milliseconds since the epoch at sub-millisecond resolution; processes on
+ * one machine agree on it, and a server on another has its offset measured
+ * (see run.js's --remote)
+ */
 export const clock = () => performance.timeOrigin + performance.now();
 
 // Latency in microseconds, in buckets 5% apart: a few hundred counts, however many messages
@@ -93,14 +98,15 @@ export function parseArgs(argv) {
 }
 
 /**
- * A control server on 127.0.0.1: GET <path> answers with routes[path](url)
- * as JSON. Prints its port first. The process ends when its parent's pipe
- * to it closes, so no child outlives a run that died
+ * A control server, on 127.0.0.1 unless told otherwise (the server's, run
+ * by agent.js for a run.js on another machine): GET <path> answers with
+ * routes[path](url) as JSON. Prints its port first. The process ends when
+ * its parent's pipe to it closes, so no child outlives a run that died
  */
-export function control(routes, extra = {}) {
+export function control(routes, extra = {}, { hostname = '127.0.0.1', port = 0 } = {}) {
   const server = Bun.serve({
-    hostname: '127.0.0.1',
-    port: 0,
+    hostname,
+    port,
     async fetch(req) {
       const url = new URL(req.url);
       const route = routes[url.pathname];
@@ -121,3 +127,28 @@ export function control(routes, extra = {}) {
   })();
   return server;
 }
+
+/**
+ * What a child process says of its control server (see control): the
+ * first line it prints that starts so, parsed. What it prints after is
+ * read and dropped, so it never blocks on a full pipe
+ */
+export async function controlLine(child, file) {
+  const reader = child.stdout.getReader();
+  const decoder = new TextDecoder();
+  let buffered = '';
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) throw new Error(`${file} ended before it said its port`);
+    buffered += decoder.decode(value, { stream: true });
+    const lines = buffered.split('\n');
+    buffered = lines.pop();
+    const line = lines.find(l => l.startsWith('{"control"'));
+    if (!line) continue;
+    (async () => { for (;;) { const { done: over } = await reader.read(); if (over) return; } })();
+    return JSON.parse(line);
+  }
+}
+
+/** The logical CPUs of this machine */
+export const logicalCpus = () => (typeof availableParallelism === 'function' ? availableParallelism() : cpus().length);

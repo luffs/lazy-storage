@@ -3,10 +3,15 @@
 // sensor readings or an admin's change would be. Each patch carries the time it
 // was due (`at`) and the time it went out (`sent`): a server behind its
 // schedule shows as latency from `at`, what delivery takes as latency from `sent`.
+// Run by agent.js for a run.js on another machine, it listens on HOST, and
+// stamps those times in run.js's clock (`/skew`, the offset run.js measured
+// with `/clock`), so the clients there read their latency off their own clock
 //   env: STORAGE ('sqlite' | 'memory'), DB (the sqlite file), KEYS (100),
-//        PRESENCE_EVERY (ms; 0 a flush a turn; 'off' no presence), DEFLATE ('off')
+//        PRESENCE_EVERY (ms; 0 a flush a turn; 'off' no presence), DEFLATE ('off'),
+//        HOST (127.0.0.1), SYNC_PORT and CONTROL_PORT (any free one)
 // Control: /stats, /run (the paced run, cheaply), /publish?rate&seconds&size
-// (paced; refused while one is going), /burst?count&size (in one turn)
+// (paced; refused while one is going), /burst?count&size (in one turn),
+// /clock (this machine's), /skew?ms (how far it is ahead of run.js's)
 import { createStore, memoryStorage } from '../../src/server/index.js';
 import { createHandlers } from '../../src/server/bun.js';
 import { sqliteStorage } from '../../src/server/sqlite-bun.js';
@@ -14,6 +19,7 @@ import { clock, cpuSeconds, control, padOf } from './common.js';
 
 const STORE = 'feed';
 const KEYS = Number(process.env.KEYS || 100);
+const HOST = process.env.HOST || '127.0.0.1';
 const every = process.env.PRESENCE_EVERY ?? '250';
 const storage = process.env.STORAGE === 'memory' ? memoryStorage() : sqliteStorage(process.env.DB || ':memory:').store(STORE);
 const store = createStore({ initial: { feed: {} }, presence: every === 'off' ? false : { every: Number(every) }, rateLimit: false, storage });
@@ -41,8 +47,8 @@ const handlers = createHandlers({
   onError: err => console.error('server:', err)
 });
 const sync = Bun.serve({
-  hostname: '127.0.0.1',
-  port: 0,
+  hostname: HOST,
+  port: Number(process.env.SYNC_PORT || 0),
   async fetch(req, server) {
     return (await handlers.upgrade(req, server)) ?? new Response('Not found', { status: 404 });
   },
@@ -51,8 +57,9 @@ const sync = Bun.serve({
 
 let published = 0;
 let run = null;   // the paced run: { count, done, lagMax, started, finished }
+let skew = 0;     // how far this machine's clock is ahead of run.js's (see /skew)
 const publishOne = (i, at, pad) => {
-  store.patch({ feed: { [`k${i % KEYS}`]: { i, at, sent: clock(), pad } } });
+  store.patch({ feed: { [`k${i % KEYS}`]: { i, at: at - skew, sent: clock() - skew, pad } } });
   published++;
 };
 
@@ -111,5 +118,10 @@ control({
     const at = clock();
     for (let i = 0; i < count; i++) publishOne(i, at, pad);
     return { from, count, ms: clock() - at };
+  },
+  '/clock': () => ({ now: clock() }),
+  '/skew': url => {
+    skew = Number(url.searchParams.get('ms')) || 0;
+    return { skew };
   }
-}, { role: 'server', sync: sync.port });
+}, { role: 'server', sync: sync.port }, { hostname: HOST, port: Number(process.env.CONTROL_PORT || 0) });

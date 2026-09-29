@@ -7,7 +7,7 @@
 //     [--seconds 5] [--size 150] [--big 4096] [--burst 200] [--storage sqlite]
 //     [--presence-every 250] [--writers 400] [--write-rates 50,200,500,1000]
 //     [--phases idle,publish,big,burst,write] [--busy 0.5] [--profile <dir>]
-//     [--json out.json]
+//     [--remote host:port] [--json out.json]
 //   A topology may name its store's presence: `hubs:off`, `direct:0` (a flush a
 //   turn); otherwise --presence-every holds (250 ms; 'off' for none)
 //
@@ -22,6 +22,16 @@
 // 200 --phases write`). `--profile <dir>` has the server and the relay
 // processes write a CPU profile each there (Bun's --cpu-prof-md), over the
 // whole run: narrow it with --topologies and --phases
+//
+// `--remote host:port` puts the server on another machine, where agent.js
+// runs (see its header) and starts a fresh one for each topology; the relays
+// and the clients stay here and dial it there. Latency compares the times a
+// patch carries with the clock of the client that hears it, so the server's
+// clock is measured against this one's (the round trip to it that took
+// least, of 20) and the server stamps its patches in this machine's time:
+// good to half that round trip, which the header of each topology says. The
+// machine readout is then this machine's, the relays' and the clients'; the
+// server's CPU is its own, on its own machine
 //
 // Every part is a process of its own (the server, each process of relays, each
 // process of clients), so each one's CPU is its own (on Windows its cycle count,
@@ -48,10 +58,10 @@
 //           What the server does behind many relays shows with few clients to
 //           each, so the relays' own work leaves it room: --topologies hubs
 //           --n 400 --hubs 200
-import { availableParallelism, cpus, tmpdir } from 'node:os';
+import { tmpdir } from 'node:os';
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { parseArgs, newHistogram, addInto, percentile, cycleRate } from './common.js';
+import { parseArgs, newHistogram, addInto, percentile, cycleRate, clock, controlLine, logicalCpus } from './common.js';
 
 const args = parseArgs(process.argv.slice(2));
 const N = Number(args.n || 4000);
@@ -70,12 +80,18 @@ const WRITERS = Number(args.writers || 400);
 const WRITE_RATES = String(args['write-rates'] || '50,200,500,1000').split(',').map(Number);
 const PHASES = new Set(String(args.phases || 'idle,publish,big,burst,write').split(','));
 const PROFILE = typeof args.profile === 'string' ? resolve(args.profile) : null;
-const CPUS = typeof availableParallelism === 'function' ? availableParallelism() : cpus().length;
+const CPUS = logicalCpus();
 const BUSY = Number(args.busy || 0.5);
+// agent.js's address on the server's machine, host:port
+const REMOTE = typeof args.remote === 'string' ? (([, host, port]) => ({ host, port: Number(port) }))(args.remote.match(/^(.+):(\d+)$/) ?? []) : null;
+if (REMOTE && !(REMOTE.host && REMOTE.port)) throw new Error(`--remote takes the agent's host:port, not ${args.remote}`);
 const here = import.meta.dir;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const CYCLE_HZ = cycleRate();
 if (PROFILE) mkdirSync(PROFILE, { recursive: true });
+
+/** GET a control route (see common.js's control), answered as JSON */
+const getter = (host, port) => path => fetch(`http://${host}:${port}${path}`, { signal: AbortSignal.timeout(60_000) }).then(r => r.json());
 
 const children = [];
 /** A child process, and its control server once it says its port; `profile` names the CPU profile it writes (see --profile) */
@@ -88,32 +104,58 @@ async function spawn(file, env, profile) {
     stderr: 'inherit'
   });
   children.push(child);
-  const reader = child.stdout.getReader();
-  const decoder = new TextDecoder();
-  let buffered = '';
-  for (;;) {
-    const { value, done } = await reader.read();
-    if (done) throw new Error(`${file} ended before it said its port`);
-    buffered += decoder.decode(value, { stream: true });
-    const lines = buffered.split('\n');
-    buffered = lines.pop();
-    const line = lines.find(l => l.startsWith('{"control"'));
-    if (!line) continue;
-    // Keep draining what it prints, so it never blocks on a full pipe
-    (async () => { for (;;) { const { done: over } = await reader.read(); if (over) return; } })();
-    const info = JSON.parse(line);
-    return { ...info, child, get: path => fetch(`http://127.0.0.1:${info.control}${path}`, { signal: AbortSignal.timeout(60_000) }).then(r => r.json()) };
-  }
+  const info = await controlLine(child, file);
+  return { ...info, host: '127.0.0.1', child, get: getter('127.0.0.1', info.control) };
 }
+
+// The server's machine (--remote): agent.js there starts a server for each
+// topology, and stops it after, as spawn and stopAll do the processes here
+const agent = REMOTE ? { host: REMOTE.host, get: getter(REMOTE.host, REMOTE.port) } : null;
+let remoteUp = false;
+/** The server, on this machine or on the agent's */
+async function startServer(env, profile) {
+  if (!agent) return spawn('server.js', env, profile);
+  // What the server is told of the environment it runs in here, when set; its
+  // database, ports and CPU profile's place are the agent's to choose
+  const { DB: _db, ...rest } = env;
+  const passed = Object.fromEntries(['KEYS', 'DEFLATE'].filter(k => process.env[k] !== undefined).map(k => [k, process.env[k]]));
+  const query = new URLSearchParams({ ...passed, ...rest, ...(PROFILE ? { profile } : {}) });
+  remoteUp = true;
+  const info = await agent.get(`/start?${query}`);
+  if (info.error) throw new Error(`the agent could not start the server: ${info.error}`);
+  return { ...info, host: agent.host, get: getter(agent.host, info.control) };
+}
+
+/**
+ * The server's clock against this one: of 20 round trips to it, the one
+ * that took least, its reading taken to fall halfway through. The server
+ * then stamps its patches in this machine's time (see server.js's /skew),
+ * so the clients here read their latency off their own clock
+ */
+async function alignClock(server) {
+  let best = null;
+  for (let i = 0; i < 20; i++) {
+    const sent = clock();
+    const { now } = await server.get('/clock');
+    const back = clock();
+    if (!best || back - sent < best.rtt) best = { rtt: back - sent, offset: now - (sent + back) / 2 };
+  }
+  await server.get(`/skew?ms=${best.offset}`);
+  return best;
+}
+
 async function stopAll() {
   const stopping = children.splice(0);
   for (const child of stopping) {
     try { child.stdin.end(); } catch { /* gone */ }
   }
+  const remote = remoteUp ? agent.get('/stop').catch(err => console.error(`the agent could not stop the server: ${err?.message || err}`)) : null;
+  remoteUp = false;
   // Each ends itself once its pipe closes (see control), writing its profile
   // if it takes one; what has not ended by then is killed
   await Promise.race([Promise.all(stopping.map(child => child.exited)), sleep(PROFILE ? 30_000 : 2000)]);
   for (const child of stopping) child.kill();
+  await remote;
   await sleep(1000);
 }
 process.on('SIGINT', async () => { await stopAll(); process.exit(130); });
@@ -164,8 +206,8 @@ async function measure(parts, { count, seconds, paced = false, writes = false, a
   const d = i => after[i].cpu - before[i].cpu;
   const relayCpus = relays.map((r, k) => d(1 + k));
   const clientCpus = clients.map((c, k) => d(1 + relays.length + k) / wall);
-  // Every process's CPU over the wall time: the logical CPUs they kept busy between them
-  const machine = (d(0) + relayCpus.reduce((a, b) => a + b, 0)) / wall + clientCpus.reduce((a, b) => a + b, 0);
+  // Every process's CPU on this machine over the wall time: the logical CPUs they kept busy between them
+  const machine = ((agent ? 0 : d(0)) + relayCpus.reduce((a, b) => a + b, 0)) / wall + clientCpus.reduce((a, b) => a + b, 0);
   const cs = after.slice(1 + relays.length);
   const histogram = cs.reduce((h, s) => addInto(h, s.histogram), newHistogram());
   const delivery = cs.reduce((h, s) => addInto(h, s.delivery), newHistogram());
@@ -220,8 +262,12 @@ async function topology(spec, results) {
   results.push(out);
   try {
     const name = spec.replace(/[^\w-]/g, '-');
-    const server = await spawn('server.js', { STORAGE: args.storage || 'sqlite', DB: join(db, 'bench.sqlite'), PRESENCE_EVERY: presence }, `server-${name}`);
-    const central = `ws://127.0.0.1:${server.sync}`;
+    const server = await startServer({ STORAGE: args.storage || 'sqlite', DB: join(db, 'bench.sqlite'), PRESENCE_EVERY: presence }, `server-${name}`);
+    const central = `ws://${server.host}:${server.sync}`;
+    if (agent) {
+      out.clock = await alignClock(server);
+      out.server = { host: server.host, cpus: server.cpus, platform: server.platform };
+    }
     const relays = [];
     if (kind === 'hub') relays.push(await spawn('relays.js', { CENTRAL: central, COUNT: '1', NAME: 'hub' }, `relays-${name}`));
     if (kind === 'hubs') {
@@ -260,7 +306,10 @@ async function topology(spec, results) {
     }
     Object.assign(out, { serverSockets: s.sockets.sockets, listed: s.listed });
     out.processes = children.length;
-    console.log(`\n${spec}: ${N} clients answered in ${out.connectS.toFixed(1)} s; the server holds ${s.sockets.sockets} sockets (${out.relays} relays), lists ${s.listed} in presence (presence ${presence}); ${children.length} processes on ${CPUS} logical CPUs`);
+    const where = agent
+      ? `the server on ${server.host} (${server.cpus} logical CPUs, ${server.platform}; its clock ${f(out.clock.offset)} ms from this one's, to within ${f(out.clock.rtt / 2, 2)} ms), ${children.length} processes here on ${CPUS}`
+      : `${children.length} processes on ${CPUS} logical CPUs`;
+    console.log(`\n${spec}: ${N} clients answered in ${out.connectS.toFixed(1)} s; the server holds ${s.sockets.sockets} sockets (${out.relays} relays), lists ${s.listed} in presence (presence ${presence}); ${where}`);
 
     // An idle stretch, for what the processes use doing nothing (keepalives, sweeps, timers)
     if (PHASES.has('idle')) {
@@ -334,11 +383,18 @@ function print(spec, label, r) {
     (r.drained ? '' : '  UNDRAINED') + (r.machine > BUSY * CPUS ? '  MACHINE BUSY' : '') + (trouble ? `  ${trouble}` : ''));
 }
 
+if (agent) {
+  const info = await agent.get('/info').catch(err => {
+    throw new Error(`no agent answers at ${REMOTE.host}:${REMOTE.port} (bun bench/fanout/agent.js there): ${err?.message || err}`);
+  });
+  console.log(`the server's machine: ${agent.host}, ${info.cpus} logical CPUs, ${info.platform}, Bun ${info.bun}`);
+}
+
 const results = [];
 try {
   for (const spec of TOPOLOGIES) {
     await topology(spec, results);
-    if (args.json) await Bun.write(String(args.json), JSON.stringify({ args: { N, PROCS, HUBS, HUB_PROCS, ADMINS, RATES, SECONDS, SIZE, BIG, BURST, PRESENCE, WRITERS, WRITE_RATES, PHASES: [...PHASES], CPUS, BUSY, CYCLE_HZ }, results }, null, 1));
+    if (args.json) await Bun.write(String(args.json), JSON.stringify({ args: { N, PROCS, HUBS, HUB_PROCS, ADMINS, RATES, SECONDS, SIZE, BIG, BURST, PRESENCE, WRITERS, WRITE_RATES, PHASES: [...PHASES], CPUS, BUSY, REMOTE, CYCLE_HZ }, results }, null, 1));
   }
 } finally {
   await stopAll();
