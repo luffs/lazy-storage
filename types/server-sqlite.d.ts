@@ -46,6 +46,12 @@ export interface SqliteStorageOptions {
    * by SQLite on the thread that commits ('inline')
    */
   checkpoints?: 'worker' | 'inline';
+  /**
+   * Faults of the adapter's own: a checkpoint worker that could not start,
+   * failed, or ended (code 'checkpoint-worker'; the checkpoints are back on
+   * the thread that commits); default console
+   */
+  onError?: (error: any) => void;
 }
 
 /** One database file for any number of stores, one row per leaf, WAL mode, the delta log alongside */

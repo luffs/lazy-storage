@@ -1355,7 +1355,11 @@ export function createStore({
     /** Every live session: `{ replicaId, user, data }`, `data` being what it shares */
     peers,
     snapshot: () => LazyWatch.snapshot(state),
-    /** Subscribe to accepted changes (a LazyWatch listener on the state) */
+    /**
+     * Subscribe to accepted changes (a LazyWatch listener on the state):
+     * heard as they are merged, before the turn's commit stores them (see
+     * groupCommit). To pass on only what is stored, observe('op')
+     */
     on: (listener, options) => LazyWatch.on(state, listener, options),
     /**
      * Watch what happens to the store, for logs, audits, and metrics:

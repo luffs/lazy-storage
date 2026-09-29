@@ -284,9 +284,18 @@ export interface Store<S extends object = any> {
   readonly sessions: number;
   /** Replica ids the store remembers progress for */
   readonly replicas: string[];
-  /** Merge one op; with a session it is a client's and passes the gates, without one it is trusted */
+  /**
+   * Merge one op; with a session it is a client's and passes the gates,
+   * without one it is trusted. Returns once merged, before it is stored
+   * (see `groupCommit`): `flush()` before telling anyone it is saved
+   */
   apply(op: Op, session?: Session): ApplyResult;
-  /** A change from the server itself, timestamped now. The authority: a tombstone on its way is lifted, so what it writes at a deleted path re-adds it, `id` or not */
+  /**
+   * A change from the server itself, timestamped now. The authority: a
+   * tombstone on its way is lifted, so what it writes at a deleted path
+   * re-adds it, `id` or not. Returns once merged, before it is stored (see
+   * `groupCommit`): `flush()` before telling anyone it is saved
+   */
   patch(diff: Diff): ApplyResult;
   /**
    * A lazy-watch batch from state the server keeps elsewhere: array fragments are replaced with the whole arrays
@@ -311,7 +320,11 @@ export interface Store<S extends object = any> {
   snapshot(): S;
   /** The state as JSON, encoded once per change: what a snapshot carries, inline or over HTTP */
   snapshotJSON(): string;
-  /** Subscribe to accepted changes (a lazy-watch listener on the state) */
+  /**
+   * Subscribe to accepted changes (a lazy-watch listener on the state):
+   * heard as they are merged, before the turn's commit stores them (see
+   * `groupCommit`). To pass on only what is stored, `observe('op')`
+   */
   on(listener: ChangeListener<S>, options?: ListenerOptions): Unsubscribe;
   /** Watch ops, refusals, and sessions, for logs, audits, and metrics */
   observe<E extends keyof StoreEvents>(event: E, fn: (payload: StoreEvents[E]) => void): Unsubscribe;

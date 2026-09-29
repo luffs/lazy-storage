@@ -379,13 +379,37 @@ writes whole 4 KB pages, and a commit touches several however small the
 op; a busy store's ops share them, a page written once for the turn, and
 the disk stops being what holds the store back. A store with nothing
 pending sends at once, so a quiet one answers as it always did.
-`patch()` and `apply()` return before their change is stored:
 `store.flush()` commits at once (and throws `unavailable` when the
 commit failed), and so do creating a session, an eviction, a snapshot
 over HTTP, `export()` and `dispose()`. `groupCommit: false` commits every
 change as it is made. A backup holds what is stored: a change from the
 turn it runs in is not in it yet, and nothing acknowledged is missing
 from it.
+
+What that asks of code on the server:
+
+- **`patch()` and `apply()` return before their change is stored.** A
+  process that goes down before the turn ends loses it, and nobody was
+  told otherwise, unless the code that called them told someone. So
+  before you tell anyone outside the store that a change is saved (an
+  HTTP response, a message to another system, a job marked done), call
+  `store.flush()`:
+
+  ```js
+  store.patch({ orders: { [id]: order } });
+  store.flush();   // stored now, or it throws: then say so, and do not answer 'saved'
+  res.json({ saved: true });
+  ```
+
+- **A commit that fails does not throw from `patch()`.** The store
+  reports it to `onError` and unloads itself (its clients say hello
+  again, with every edit they had not had acknowledged); `flush()` is
+  where a failure reaches the code that wrote.
+- **`store.on(listener)` hears a change as it is merged, before it is
+  stored.** A listener that passes changes on (a webhook, an audit log, a
+  search index) can pass on one whose commit then fails. `store.observe('op',
+  fn)` is told of an op once it is stored, as its author is: the one to
+  forward from.
 
 Adapters:
 
@@ -397,7 +421,10 @@ Adapters:
   (checkpointed) on a worker thread with a connection of its own, so the
   thread that commits, the server's event loop, never waits on the disk
   for it; `checkpoints: 'inline'` leaves that to SQLite on the committing
-  thread, as it was.
+  thread, as it was. A worker that cannot start (a bundle that left
+  `sqlite-checkpoint.js` out, say) or fails is reported to `onError`
+  (default console) with code `checkpoint-worker`, and SQLite checkpoints
+  on the committing thread again.
 - `sqliteStorage(file)` from `lazy-storage/server/sqlite-node` — the same
   adapter on `node:sqlite` (Node 22.13 and later); the two read each
   other's files.
@@ -1538,14 +1565,14 @@ runs on the synced state and shows in the array view like any other change.
 - `store.snapshotJSON()` — the state as JSON, encoded once per change; `snapshotResponse(store, request)` — the snapshot route's Response (`{ v, epoch, state }`, brotli or gzip as accepted, an ETag and 304s), for a server of your own
 - `store.closeSessions(predicate, message)` — evict sessions; `store.presence()` — distinct users with a live session; `store.peers()` — every live session as `{ replicaId, user, data }`
 - `store.patch(diff)` — a server-side change, timestamped and broadcast, never held back by a tombstone; `store.patchFrom(diff, state)` — a lazy-watch batch from state kept elsewhere, its array fragments replaced with the whole arrays read from `state` (see [Serving state the server owns](#serving-state-the-server-owns)); `store.apply(op)` — a trusted op, gates skipped
-- `store.on(listener)`, `store.snapshot()`, `store.state`, `store.version`, `store.replicas`
+- `store.on(listener)` (hears a change as it is merged, before it is stored: see [Persistence](#persistence)), `store.snapshot()`, `store.state`, `store.version`, `store.replicas`
 - `store.compact()` → `{ tombstones, replicas }` removed; `store.export()` → the store as a JSON document, `store.restore(doc)` puts one in its storage and ends the store (see [Backups](#backups-restores-and-moving-a-store)); `store.flush()` stores what is pending now and sends what waited for it (throws `unavailable` when the commit failed), `store.dispose()`
 - `memoryStorage()`, `jsonFileStorage(path, { debounce, onError })` — `onError` hears a debounced write that failed, which is tried again a second later
 - `createStores(factory, { idle, sweepEvery, now })` → `get(id)`, `has(id)`, `ids()`, `stats()` — the live stores' stats rolled up: `{ stores, idle, sessions, replicas, rows, tombstones, log }` — `release(id)`, `restore(id, doc)`, `sweep()`, `dispose()`; `isStoreId(id)`
 - `createHub(resolveStore, { send, user, authorizeId, authorize, channel, httpSnapshots, onError })` → `{ receive(message), close(), revalidate(filter), stores, user }` — the server side of a multiplexed connection, session-shaped; `channel` is a transport's topic fan-out, `httpSnapshots` `{ url(id), threshold }` its snapshot route
 - `toJSON(message)` — a message's JSON, encoded once however many sockets it goes to; use it in a transport of your own so a broadcast is not re-encoded per socket (`tagStore(message, id)` is what a hub does)
 
-**SQLite** (`lazy-storage/server/sqlite`, Bun): `sqliteStorage(file, { wal, lease: { ttl } | false })` →
+**SQLite** (`lazy-storage/server/sqlite`, Bun): `sqliteStorage(file, { wal, lease: { ttl } | false, checkpoints: 'worker' | 'inline', onError })` →
 `store(id)` (whose load takes the store's lease, `close()` gives it up, and `replace(doc)` takes a document), `ids()`, `remove(id)`, `backup(file)`, `db`, `close()` (gives up every lease). `memoryStorage()` and `jsonFileStorage(file)` take a document with `replace(doc)` too.
 
 **Bun adapter** (`lazy-storage/server/bun`): `serve({ stores, port, path, fetch, authenticate, authorizeId, authorize, expiresAt, minSession, maxPayload, perMessageDeflate, httpSnapshots, maxBuffered, onError })` —
@@ -1556,7 +1583,7 @@ hub listens at `path` and the snapshot route under it; the returned server gains
 
 **Node adapter** (`lazy-storage/server/node`, needs `ws`): `serve({ stores, port, host, request, path, authenticate, authorizeId, authorize, expiresAt, minSession, maxPayload, perMessageDeflate, httpSnapshots, idleTimeout, maxBuffered, onError })` →
 an `http.Server` with `shutdown({ reason })`, `sockets()`, `socketStats()`, `disconnect(filter)` and `revalidate(filter)`; `createHandlers(options)` → `{ upgrade(req, socket, head), request(req, res), close({ reason }), closing, sockets(), socketStats(), disconnect(filter), revalidate(filter), wss }`;
-`toRequest(req)` — the Web `Request` `authenticate` sees. **node:sqlite** (`lazy-storage/server/sqlite-node`): `sqliteStorage(file, { wal })`, as the Bun one.
+`toRequest(req)` — the Web `Request` `authenticate` sees. **node:sqlite** (`lazy-storage/server/sqlite-node`): `sqliteStorage(file, { wal, lease, checkpoints, onError })`, as the Bun one.
 
 **Relay** (`lazy-storage/relay`, see [Relays](#relays))
 

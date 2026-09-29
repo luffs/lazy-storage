@@ -168,7 +168,8 @@ test('the WAL is copied back into the file on a worker thread, not by the thread
   const dir = mkdtempSync(join(tmpdir(), 'lazy-storage-node-sqlite-'));
   try {
     const file = join(dir, 'checkpoints.sqlite');
-    const sqlite = sqliteStorage(file);
+    const faults = [];
+    const sqlite = sqliteStorage(file, { onError: err => faults.push(err) });
     const autocheckpoint = sqlite.db.prepare('PRAGMA wal_autocheckpoint').get().wal_autocheckpoint;
     assert.ok(autocheckpoint > 1000, 'the committing connection checkpoints only a log far longer than SQLite would');
     const store = createStore({ initial: INITIAL, storage: sqlite.store('main') });
@@ -182,11 +183,52 @@ test('the WAL is copied back into the file on a worker thread, not by the thread
     assert.ok(statSync(file).size >= 2_000_000, `the database file holds what the log did (${statSync(file).size} bytes)`);
     store.dispose();
     sqlite.close();
+    assert.deepEqual(faults, [], 'a worker that ran, and was let go of, is no fault');
 
     const inline = sqliteStorage(file, { checkpoints: 'inline' });
     assert.equal(inline.db.prepare('PRAGMA wal_autocheckpoint').get().wal_autocheckpoint, 1000, "'inline' leaves them to SQLite, as they were");
     inline.close();
     assert.throws(() => sqliteStorage(file, { checkpoints: 'sometimes' }), /checkpoints/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a checkpoint worker that fails is reported, and SQLite checkpoints on the thread that commits again', { skip: !sqliteStorage }, async () => {
+  const { sqliteStorageOn } = await import('../src/server/sqlite-shared.js');
+  const { DatabaseSync } = await import('node:sqlite');
+  const dir = mkdtempSync(join(tmpdir(), 'lazy-storage-node-sqlite-'));
+  try {
+    const file = join(dir, 'failing.sqlite');
+    const db = new DatabaseSync(file);
+    const errors = [];
+    let reported;
+    const told = new Promise(resolve => { reported = resolve; });
+    // A worker told to open the file with bun:sqlite, under Node: it cannot, as a bundle without sqlite-checkpoint.js could not start it
+    const sqlite = sqliteStorageOn({
+      db,
+      driver: 'bun',
+      exec: sql => db.exec(sql),
+      prepare: sql => db.prepare(sql),
+      transaction: fn => (...args) => {
+        db.exec('BEGIN');
+        try {
+          const result = fn(...args);
+          db.exec('COMMIT');
+          return result;
+        } catch (err) {
+          db.exec('ROLLBACK');
+          throw err;
+        }
+      },
+      close: () => db.close()
+    }, { file, wal: true, onError: err => { errors.push(err); reported(); } });
+    await Promise.race([told, new Promise(resolve => setTimeout(resolve, 5000))]);
+    // Silent, it showed only as slow answers
+    assert.deepEqual(errors.map(e => e.code), ['checkpoint-worker'], 'reported once');
+    assert.match(errors[0].message, /back on the thread that commits/);
+    assert.equal(db.prepare('PRAGMA wal_autocheckpoint').get().wal_autocheckpoint, 1000, 'and SQLite checkpoints as it did');
+    sqlite.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
