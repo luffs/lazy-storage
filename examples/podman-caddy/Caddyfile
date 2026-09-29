@@ -1,0 +1,17 @@
+# Caddy in front of the example: TLS ends here, and every connection goes on
+# to the relays on :3000, which Caddy reaches as localhost in the same pod.
+# SITE is the address to serve: localhost:8443 by default (a certificate
+# from Caddy's own authority, which a browser warns about), a domain in
+# production (one from Let's Encrypt).
+{
+	# In a container there is no system trust store to add the local authority to
+	skip_install_trust
+}
+
+{$SITE:localhost:8443} {
+	reverse_proxy localhost:3000 {
+		# WebSockets outlive a config reload by this long, rather than every
+		# client reconnecting in the same instant
+		stream_close_delay 5m
+	}
+}

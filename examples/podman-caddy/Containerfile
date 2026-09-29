@@ -1,0 +1,19 @@
+# The shared list behind Caddy: the server and its relays in one container (see README.md).
+# Built from the repository's root, which it copies the library's source from:
+#   podman build -f examples/podman-caddy/Containerfile -t lazy-storage-example .
+FROM docker.io/oven/bun:1
+
+WORKDIR /app
+COPY package.json bun.lock ./
+RUN bun install --production --frozen-lockfile
+COPY src src
+COPY examples/basic/index.html examples/basic/index.html
+COPY examples/podman-caddy examples/podman-caddy
+
+# The relays listen on PORT (what Caddy proxies to); the server on
+# 127.0.0.1:SERVER_PORT inside, never published. Two relays suit a 4-core
+# machine that also runs Caddy: the server, the relays and Caddy a core each
+ENV PORT=3000 SERVER_PORT=3201 RELAYS=2 DATA_DIR=/data
+VOLUME /data
+EXPOSE 3000
+CMD ["bun", "examples/podman-caddy/main.js"]

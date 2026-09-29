@@ -27,6 +27,12 @@ no build step.
 - **`node/`** — the same page served by Node instead of Bun, with the `ws`
   package for sockets and `node:sqlite` for storage (Node 22.13 or later).
   `node examples/node/server.js`.
+- **`podman-caddy/`** — the same page served for as many clients as one
+  machine takes: the server alone on 127.0.0.1, relays on the other
+  cores sharing the public port, Caddy ending TLS, all in a podman pod.
+  `PORT=3200 bun examples/podman-caddy/main.js` runs it without
+  containers; its README has the podman and Caddy commands, and what to
+  change for an app of your own.
 - **`mirror.js`** — a client that runs on the server side: it follows the
   `shared` store of either server from a Bun or Node process, prints every
   change, and keeps its own copy in SQLite when run with Bun. Start one of

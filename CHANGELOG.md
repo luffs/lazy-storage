@@ -2,6 +2,12 @@
 
 All notable changes to lazy-storage are documented here. The format follows Keep a Changelog; versions follow Semantic Versioning.
 
+## [Unreleased]
+
+### Added
+
+- **`examples/podman-caddy`: a server for as many clients as one machine takes.** A store lives in one process and uses one core, and each change costs a write to every socket that hears it, so the clients connect to relays rather than to the server: `main.js` starts the server alone on 127.0.0.1 and `RELAYS` relays that share the public port (`reusePort`: on Linux the kernel spreads the connections over them), each reading every store once on a link of its own and writing to its clients from another core; Caddy ends TLS in front. It serves the basic example's page, runs without containers too, and its README has the podman pod and Caddy commands and what to change for an app of one's own (authentication, how many relays, open files, the data volume)
+
 ## [0.23.0] - 2026-09-29
 
 A busy store no longer waits on its disk. What one turn of the event loop
