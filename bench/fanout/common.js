@@ -73,6 +73,14 @@ export function cycleRate() {
   return (read() - c0) / ((performance.now() - t0) / 1000);
 }
 
+// A pad that compresses as readings do (numbers, about 4 to 6 times under deflate), in a string, so the
+// clients' search for "at", "sent" and "v" never lands in it
+export const padOf = size => {
+  let pad = '';
+  while (pad.length < size) pad += `${(Math.random() * 1000).toFixed(2)},`;
+  return pad.slice(0, size);
+};
+
 /** `--name value` pairs; a bare `--flag` is true */
 export function parseArgs(argv) {
   const args = {};

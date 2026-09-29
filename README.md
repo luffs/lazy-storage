@@ -1712,8 +1712,14 @@ direct,hub,hubs`, `hubs:off` for a store without presence), each part a
 process of its own. It steps the rate up until a patch is late by more
 than two seconds, and reports what each patch took from when it was due
 and from when it went out, and each part's CPU; then 4 KB patches and a
-burst in one turn. `bun bench/fanout/run.js --n 4000` for the defaults'
-size; see the header of `bench/fanout/run.js` for the rest.
+burst in one turn. Then its clients write to it: `--writers` of them
+write the store between them, rate by rate, as live ops on their own
+sockets (through a relay, up a write-only socket of their own), every
+client hearing each op as it hears the server's patches and its author
+timing its ack; the server's CPU for each op is all a write costs it, the
+fan-out included (`--n 200 --writers 200 --phases write` for the write
+path with few readers). `bun bench/fanout/run.js --n 4000` for the
+defaults' size; see the header of `bench/fanout/run.js` for the rest.
 
 `npm run bench:client` times what an app feels in the browser, in a DOM
 from happy-dom: React and Vue components on `useClient` as the store

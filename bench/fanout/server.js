@@ -10,7 +10,7 @@
 import { createStore, memoryStorage } from '../../src/server/index.js';
 import { createHandlers } from '../../src/server/bun.js';
 import { sqliteStorage } from '../../src/server/sqlite-bun.js';
-import { clock, cpuSeconds, control } from './common.js';
+import { clock, cpuSeconds, control, padOf } from './common.js';
 
 const STORE = 'feed';
 const KEYS = Number(process.env.KEYS || 100);
@@ -48,14 +48,6 @@ const sync = Bun.serve({
   },
   websocket: handlers.websocket
 });
-
-// A pad that compresses as readings do (numbers, about 4 to 6 times under deflate), in a string, so the
-// clients' search for "at", "sent" and "v" never lands in it
-const padOf = size => {
-  let pad = '';
-  while (pad.length < size) pad += `${(Math.random() * 1000).toFixed(2)},`;
-  return pad.slice(0, size);
-};
 
 let published = 0;
 let run = null;   // the paced run: { count, done, lagMax, started, finished }

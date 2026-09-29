@@ -2,6 +2,12 @@
 
 All notable changes to lazy-storage are documented here. The format follows Keep a Changelog; versions follow Semantic Versioning.
 
+## [Unreleased]
+
+### Added
+
+- **`npm run bench:fanout` has the clients write, not only the server publish.** Its write phases have `--writers` of the thin clients (400) write the store between them at each of `--write-rates`, as live ops on their own sockets, or through their relay up a write-only socket of their own; every client hears each op as it hears the server's patches, each op's author times its ack, and the server's CPU for each op is reported with the sockets it holds. What a write costs the server was measured nowhere: it is the one load relays cannot spread. `--phases` picks the phases to run, and `--profile <dir>` has the server and the relay processes each write a CPU profile there (Bun's `--cpu-prof-md`)
+
 ## [0.22.0] - 2026-09-28
 
 A store the server will not let a fanning-out relay carry is passed
