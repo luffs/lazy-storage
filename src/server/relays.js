@@ -101,6 +101,7 @@ export function createRelayLink(resolveStore, {
   const shared = new Map();    // store id -> { session, store }: the relay's own session on it
   const pending = new Map();   // store id -> messages queued while the relay's session is being let in
   const grants = new Map();    // grant id -> { id, socket, storeId, replicaId, user, store, peer, expires, cancelExpiry, openedAt }
+  const byStore = new Map();   // store id -> the Set of its grants (see grantsOn)
   const vouching = new Map();  // grant id -> { msg }: the vouch being judged (a later one, or an unvouch, disowns it)
   const lingering = new Map(); // store id -> the timer that closes the relay's session there
   const bucket = rate ? { tokens: rate.burst, at: Date.now() } : null;
@@ -119,7 +120,28 @@ export function createRelayLink(resolveStore, {
 
   // --- The relay's own sessions --------------------------------------------------------------------
 
-  const grantsOn = storeId => [...grants.values()].filter(g => g.storeId === storeId);
+  // The grants on a store, kept by store as they come and go: every client
+  // leaving asks whether its store still has one, and a reconnect storm is
+  // every client leaving, so the answer costs that store's, not the link's
+  const NONE = new Set();
+  const grantsOn = storeId => byStore.get(storeId) ?? NONE;
+
+  function addGrant(grant) {
+    const old = grants.get(grant.id);
+    if (old) dropGrant(old);
+    grants.set(grant.id, grant);
+    let set = byStore.get(grant.storeId);
+    if (!set) byStore.set(grant.storeId, (set = new Set()));
+    set.add(grant);
+  }
+
+  function dropGrant(grant) {
+    grants.delete(grant.id);
+    const set = byStore.get(grant.storeId);
+    if (!set) return;
+    set.delete(grant);
+    if (!set.size) byStore.delete(grant.storeId);
+  }
 
   /** Stop hearing a store: the session gone, the topic left, no linger pending */
   function dropShared(id) {
@@ -141,13 +163,13 @@ export function createRelayLink(resolveStore, {
 
   /** The store's last client went: the relay's session there goes too, `linger` later (at once when `now`) unless another comes */
   function lastGone(storeId, now = false) {
-    if (grantsOn(storeId).length || (!shared.has(storeId) && !pending.has(storeId))) return;
+    if (grantsOn(storeId).size || (!shared.has(storeId) && !pending.has(storeId))) return;
     clearTimeout(lingering.get(storeId));
     lingering.delete(storeId);
     if (now || !(linger > 0)) return closeShared(storeId, 'unused', 'No client behind this relay reads the store');
     const timer = setTimeout(() => {
       lingering.delete(storeId);
-      if (!closed && !grantsOn(storeId).length) closeShared(storeId, 'unused', 'No client behind this relay reads the store');
+      if (!closed && !grantsOn(storeId).size) closeShared(storeId, 'unused', 'No client behind this relay reads the store');
     }, linger);
     if (typeof timer.unref === 'function') timer.unref();
     lingering.set(storeId, timer);
@@ -191,11 +213,11 @@ export function createRelayLink(resolveStore, {
       pending.delete(id);
       refuseStore(id, 'forbidden', message || `This relay may not carry store "${id}"`);
     };
-    if (!grantsOn(id).length) return unused();
+    if (!grantsOn(id).size) return unused();
     step(() => (authorizeRelay ? authorizeRelay(relay, id) : true), allowed => {
       if (!allowed) return deny();
       // The store its clients were judged on: one reloaded since revoked them (see evicted)
-      const store = grantsOn(id)[0]?.store;
+      const store = grantsOn(id).values().next().value?.store;
       if (!store || store.disposed) return unused();
       pending.delete(id);
       const session = store.session({
@@ -240,7 +262,7 @@ export function createRelayLink(resolveStore, {
   }
 
   function forget(grant) {
-    grants.delete(grant.id);
+    dropGrant(grant);
     grant.cancelExpiry?.();
     grant.peer?.close();
   }
@@ -323,7 +345,7 @@ export function createRelayLink(resolveStore, {
           }
           vouching.delete(id);
           settle(false);
-          grants.set(id, grant);
+          addGrant(grant);
           if (grant.expires !== null) grant.cancelExpiry = runAt(grant.expires, () => revoke([id], 'reauthenticate', 'Your session ran out'));
           clearTimeout(lingering.get(storeId));
           lingering.delete(storeId);
@@ -398,7 +420,7 @@ export function createRelayLink(resolveStore, {
         for (const id of await Promise.all(verdicts)) {
           if (id === null || closed) continue;
           closeShared(id, 'forbidden', `This relay may no longer carry store "${id}"`);
-          count += revoke(grantsOn(id).map(g => g.id), 'forbidden', `This relay may no longer carry store "${id}"`);
+          count += revoke([...grantsOn(id)].map(g => g.id), 'forbidden', `This relay may no longer carry store "${id}"`);
         }
       }
       if (!authorizeId && !authorize) return count;
@@ -439,6 +461,7 @@ export function createRelayLink(resolveStore, {
         grant.peer?.close();
       }
       grants.clear();
+      byStore.clear();
       vouching.clear();
       for (const [id, { session }] of shared) {
         session.close();

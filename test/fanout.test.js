@@ -560,6 +560,45 @@ test('the relay link: its own session is let in only while a client is, closed `
   store.dispose();
 });
 
+test('the relay link: clients leaving cost their own store, not every client the relay carries (a reconnect storm of 20 000 stays linear)', () => {
+  const stores = new Map();
+  const storeOf = id => {
+    if (!stores.has(id)) stores.set(id, createStore({ initial: INITIAL }));
+    return stores.get(id);
+  };
+  const sent = [];
+  const link = createRelayLink(storeOf, {
+    send: m => sent.push(m),
+    relay: { id: 'hub' },
+    admit: credential => ({ user: { id: credential.user }, expires: null }),
+    linger: 0
+  });
+  const CLIENTS = 20_000;
+  const STORES = 20;
+  for (let i = 0; i < CLIENTS; i++) link.receive({ t: 'vouch', grant: `g${i}`, store: `s${i % STORES}`, replicaId: `r${i}`, credential: { user: `u${i}` } });
+  for (let k = 0; k < STORES; k++) link.receive({ t: 'hello', store: `s${k}`, replicaId: 'relay' });
+  assert.equal(link.grants().length, CLIENTS);
+  assert.equal(link.stores.length, STORES);
+
+  // Every client of store s0 leaves: its session goes (linger 0), the others' stay
+  for (let i = 0; i < CLIENTS; i += STORES) link.receive({ t: 'unvouch', grant: `g${i}` });
+  assert.deepEqual(link.stores.includes('s0'), false);
+  assert.equal(link.stores.length, STORES - 1);
+  assert.ok(sent.some(m => m.t === 'closed' && m.store === 's0' && m.code === 'unused'));
+
+  // The rest leave at once, as in a storm: once asking whether a store still had a client walked
+  // every grant, so 20 000 of them leaving took seconds of the server's one core
+  const started = performance.now();
+  for (let i = 0; i < CLIENTS; i++) if (i % STORES) link.receive({ t: 'unvouch', grant: `g${i}` });
+  const ms = performance.now() - started;
+  assert.equal(link.grants().length, 0);
+  assert.deepEqual(link.stores, []);
+  // Some 20 ms linear, some 2 s as it was
+  assert.ok(ms < 300, `${CLIENTS} clients left in ${Math.round(ms)} ms`);
+  link.close();
+  for (const store of stores.values()) store.dispose();
+});
+
 test('a vouch\'s credential is made a request of only what says who a client is; a vouch withdrawn before its verdict admits nobody', async () => {
   const req = credentialRequest({ headers: { Authorization: 'Bearer x', cookie: 'c=1', 'user-agent': 'kiosk', origin: 'https://evil', 'x-forwarded-for': '1.2.3.4', host: 'central' }, query: '?t=1' }, '/sync');
   assert.equal(req.headers.get('authorization'), 'Bearer x');
