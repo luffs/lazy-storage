@@ -3,10 +3,11 @@
 // clients that do not hear presence (all but a few admins'), straight to
 // the server and through fan-out relays.
 //   bun bench/fanout/run.js [--n 4000] [--procs 16] [--topologies direct,hub,hubs]
-//     [--hubs 200] [--hub-procs 8] [--admins 2] [--rates 5,20,50,100,200,500]
+//     [--hubs 50] [--hub-procs 8] [--admins 2] [--rates 5,20,50,100,200,500]
 //     [--seconds 5] [--size 150] [--big 4096] [--burst 200] [--storage sqlite]
 //     [--presence-every 250] [--writers 400] [--write-rates 50,200,500,1000]
-//     [--phases idle,publish,big,burst,write] [--profile <dir>] [--json out.json]
+//     [--phases idle,publish,big,burst,write] [--busy 0.5] [--profile <dir>]
+//     [--json out.json]
 //   A topology may name its store's presence: `hubs:off`, `direct:0` (a flush a
 //   turn); otherwise --presence-every holds (250 ms; 'off' for none)
 //
@@ -26,17 +27,28 @@
 // process of clients), so each one's CPU is its own (on Windows its cycle count,
 // as process.cpuUsage() there moves in 15.6 ms steps); the machine's cores are
 // shared, so read CPU seconds, not wall time alone, and check that the clients
-// had room (their busiest process is reported). A patch carries the time it
-// was due and the time it went out, so a server behind its schedule shows as
-// latency, and what delivery took shows apart. Before each phase whatever is
-// still on its way is let arrive, and a phase counts only its own versions.
+// had room (their busiest process is reported). Every phase also says how many
+// of the machine's logical CPUs its processes kept busy between them, and one
+// past `--busy` of them (half: with two threads a core, as on most machines and
+// most VMs' vCPUs, the cores themselves are all in use by then) is flagged
+// MACHINE BUSY: what it measured is the machine, not the server or the
+// relays. The relays and the clients cost the most of it: every patch is a
+// write to each of thousands of sockets and a read from each, whichever relays
+// make them, and each relay parses, applies and logs the patch itself besides.
+// A patch carries the time it was due and the time it went out, so a server
+// behind its schedule shows as latency, and what delivery took shows apart.
+// Before each phase whatever is still on its way is let arrive, and a phase
+// counts only its own versions.
 // A rate is given up on (and the higher ones skipped) once a patch is missing,
 // a client is cut off or told to say hello again, or the p99 passes 2 s.
 //   direct: every client a socket of the server's
 //   hub:    every client behind one relay (one store's hub with all of them)
 //   hubs:   the clients spread over many relays (a chain: a hub per shop),
-//           many relays to a process here, where each would be a box of its own
-import { tmpdir } from 'node:os';
+//           many relays to a process here, where each would be a box of its own.
+//           What the server does behind many relays shows with few clients to
+//           each, so the relays' own work leaves it room: --topologies hubs
+//           --n 400 --hubs 200
+import { availableParallelism, cpus, tmpdir } from 'node:os';
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { parseArgs, newHistogram, addInto, percentile, cycleRate } from './common.js';
@@ -45,7 +57,7 @@ const args = parseArgs(process.argv.slice(2));
 const N = Number(args.n || 4000);
 const PROCS = Number(args.procs || 16);
 const TOPOLOGIES = String(args.topologies || 'direct,hub,hubs').split(',');
-const HUBS = Number(args.hubs || 200);
+const HUBS = Number(args.hubs || 50);
 const HUB_PROCS = Number(args['hub-procs'] || 8);
 const ADMINS = Number(args.admins ?? 2);
 const RATES = String(args.rates || '5,20,50,100,200,500').split(',').map(Number);
@@ -58,6 +70,8 @@ const WRITERS = Number(args.writers || 400);
 const WRITE_RATES = String(args['write-rates'] || '50,200,500,1000').split(',').map(Number);
 const PHASES = new Set(String(args.phases || 'idle,publish,big,burst,write').split(','));
 const PROFILE = typeof args.profile === 'string' ? resolve(args.profile) : null;
+const CPUS = typeof availableParallelism === 'function' ? availableParallelism() : cpus().length;
+const BUSY = Number(args.busy || 0.5);
 const here = import.meta.dir;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const CYCLE_HZ = cycleRate();
@@ -150,6 +164,8 @@ async function measure(parts, { count, seconds, paced = false, writes = false, a
   const d = i => after[i].cpu - before[i].cpu;
   const relayCpus = relays.map((r, k) => d(1 + k));
   const clientCpus = clients.map((c, k) => d(1 + relays.length + k) / wall);
+  // Every process's CPU over the wall time: the logical CPUs they kept busy between them
+  const machine = (d(0) + relayCpus.reduce((a, b) => a + b, 0)) / wall + clientCpus.reduce((a, b) => a + b, 0);
   const cs = after.slice(1 + relays.length);
   const histogram = cs.reduce((h, s) => addInto(h, s.histogram), newHistogram());
   const delivery = cs.reduce((h, s) => addInto(h, s.delivery), newHistogram());
@@ -179,6 +195,7 @@ async function measure(parts, { count, seconds, paced = false, writes = false, a
     relayCpu: relayCpus.reduce((a, b) => a + b, 0),
     relayCpuMax: relayCpus.length ? Math.max(...relayCpus) : 0,
     clientBusiest: Math.max(...clientCpus),
+    machine,
     achieved: writes ? (span > 0 ? (sum(runs, 'done') - 1) / span : null)
       : paced && run.finished && run.done > 1 ? (run.done - 1) / ((run.last - run.first) / 1000) : null,
     lagMax: writes ? (runs.length ? Math.max(...runs.map(w => w.lagMax)) : null) : paced ? run.lagMax : null,
@@ -242,7 +259,8 @@ async function topology(spec, results) {
       if (shut || s.sockets.relays !== used.length) throw new Error(`${spec}: fan-out is not on (links not open: ${shut}, relays at the server ${s.sockets.relays} of ${used.length})`);
     }
     Object.assign(out, { serverSockets: s.sockets.sockets, listed: s.listed });
-    console.log(`\n${spec}: ${N} clients answered in ${out.connectS.toFixed(1)} s; the server holds ${s.sockets.sockets} sockets (${out.relays} relays), lists ${s.listed} in presence (presence ${presence})`);
+    out.processes = children.length;
+    console.log(`\n${spec}: ${N} clients answered in ${out.connectS.toFixed(1)} s; the server holds ${s.sockets.sockets} sockets (${out.relays} relays), lists ${s.listed} in presence (presence ${presence}); ${children.length} processes on ${CPUS} logical CPUs`);
 
     // An idle stretch, for what the processes use doing nothing (keepalives, sweeps, timers)
     if (PHASES.has('idle')) {
@@ -310,16 +328,17 @@ function print(spec, label, r) {
   console.log(`  ${spec.padEnd(9)} ${label.padEnd(14)} ${(r.delivered * 100).toFixed(2)}%  due→heard p50 ${f(r.p50)} p99 ${f(r.p99)} max ${f(r.max)} ms, sent→heard p50 ${f(r.deliveryP50)} p99 ${f(r.deliveryP99)} ms  ` +
     (r.writes ? `acked ${r.acked}/${r.count} sent→ack p50 ${f(r.ackP50)} p99 ${f(r.ackP99)} ms  ` : '') +
     `cpu: server ${f(r.serverCpu, 2)} s${r.writes ? ` (${f(r.serverPerOp, 0)} µs an op, ${r.serverSockets} sockets)` : ''}, relays ${f(r.relayCpu, 2)} s (busiest process ${f(r.relayCpuMax, 2)}), clients' busiest ${f(r.clientBusiest * 100, 0)}%` +
+    `, machine ${f(r.machine)} of ${CPUS} CPUs` +
     (r.achieved !== null ? `  rate ${f(r.achieved)}/s lag ${f(r.lagMax)} ms` : '') +
     (r.peakServerBuffered || r.peakRelayBuffered ? `  unsent peak: server ${Math.round(r.peakServerBuffered / 1024)} KB, relay ${Math.round(r.peakRelayBuffered / 1024)} KB` : '') +
-    (r.drained ? '' : '  UNDRAINED') + (trouble ? `  ${trouble}` : ''));
+    (r.drained ? '' : '  UNDRAINED') + (r.machine > BUSY * CPUS ? '  MACHINE BUSY' : '') + (trouble ? `  ${trouble}` : ''));
 }
 
 const results = [];
 try {
   for (const spec of TOPOLOGIES) {
     await topology(spec, results);
-    if (args.json) await Bun.write(String(args.json), JSON.stringify({ args: { N, PROCS, HUBS, HUB_PROCS, ADMINS, RATES, SECONDS, SIZE, BIG, BURST, PRESENCE, WRITERS, WRITE_RATES, PHASES: [...PHASES], CYCLE_HZ }, results }, null, 1));
+    if (args.json) await Bun.write(String(args.json), JSON.stringify({ args: { N, PROCS, HUBS, HUB_PROCS, ADMINS, RATES, SECONDS, SIZE, BIG, BURST, PRESENCE, WRITERS, WRITE_RATES, PHASES: [...PHASES], CPUS, BUSY, CYCLE_HZ }, results }, null, 1));
   }
 } finally {
   await stopAll();

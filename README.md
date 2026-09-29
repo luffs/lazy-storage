@@ -1718,7 +1718,12 @@ sockets (through a relay, up a write-only socket of their own), every
 client hearing each op as it hears the server's patches and its author
 timing its ack; the server's CPU for each op is all a write costs it, the
 fan-out included (`--n 200 --writers 200 --phases write` for the write
-path with few readers). `bun bench/fanout/run.js --n 4000` for the
+path with few readers). Every phase says how many of the machine's
+logical CPUs the processes kept busy between them, and flags one past
+half of them MACHINE BUSY: the relays and the clients share the machine
+with the server, and a phase that fills it measures the machine
+(`--topologies hubs --n 400 --hubs 200` shows the server behind many
+relays with room to spare). `bun bench/fanout/run.js --n 4000` for the
 defaults' size; see the header of `bench/fanout/run.js` for the rest.
 
 `npm run bench:client` times what an app feels in the browser, in a DOM

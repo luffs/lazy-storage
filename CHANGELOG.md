@@ -7,6 +7,11 @@ All notable changes to lazy-storage are documented here. The format follows Keep
 ### Added
 
 - **`npm run bench:fanout` has the clients write, not only the server publish.** Its write phases have `--writers` of the thin clients (400) write the store between them at each of `--write-rates`, as live ops on their own sockets, or through their relay up a write-only socket of their own; every client hears each op as it hears the server's patches, each op's author times its ack, and the server's CPU for each op is reported with the sockets it holds. What a write costs the server was measured nowhere: it is the one load relays cannot spread. `--phases` picks the phases to run, and `--profile <dir>` has the server and the relay processes each write a CPU profile there (Bun's `--cpu-prof-md`)
+- **`npm run bench:fanout` says how busy the machine was.** Every phase reports how many of the machine's logical CPUs its processes kept busy between them, and flags one past `--busy` of them (half) MACHINE BUSY: the relays and the clients share the machine with the server, and a phase that fills it measures the machine, not the server
+
+### Changed
+
+- **`npm run bench:fanout` spreads its clients over 50 relays by default, not 200.** Every relay parses, applies and logs each patch itself, and here they all do it on one machine; fifty cost the relays a little less. With 4000 clients either count keeps more than half of a 24-thread laptop busy from 50 patches a second (the fan-out itself costs the most), so the header of `bench/fanout/run.js` points to `--topologies hubs --n 400 --hubs 200` for the server behind many relays: there it kept up with 500 patches and 1000 writes a second
 
 ## [0.22.0] - 2026-09-28
 
