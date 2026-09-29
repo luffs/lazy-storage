@@ -1022,6 +1022,23 @@ while the server is away (see what a relay cannot do, above): a store's
 clients on two relays see each other's offline edits only once the server
 is back.
 
+**Compression, hop by hop.** Compression is paid for once per socket and
+message, by whichever process writes to the socket, and the Bun adapters
+negotiate it without context takeover: each message is compressed on its
+own, so a patch of a few hundred bytes hardly shrinks, and a snapshot
+shrinks several-fold. So set it per hop, by what that hop's bandwidth is
+worth:
+
+| Hop | Relay on the clients' network | Relays next to the server, spreading its load |
+|---|---|---|
+| Server → relay | Compress: the site's uplink is the slow part, and there are few links (the server's default, 1 KB, suits it) | Don't: loopback or the data centre. `perMessageDeflate: false` on a server that only relays connect to spares the store's core |
+| Relay → clients | Don't: the LAN has the bandwidth (the relay's default compresses only what passes 64 KB) | Compress what is big, for clients on slow links: `perMessageDeflate: { threshold: 4096 }` on the relays, paid for on their cores, not the store's |
+
+What a client on a slow link waits on most is a snapshot: one coming back
+within the delta log is sent the patches it missed instead (a relay's copy
+keeps a log too), and small patches and `presence.every` keep the stream
+itself light. `examples/podman-caddy` is the second column.
+
 Two things the store does for this, which any transport can use. A
 relay's own session (`store.session({ relay: true })`) hears the store and
 its presence, is nobody's peer, and writes nothing. And

@@ -60,6 +60,12 @@ certificate). For a real domain, publish 80 and 443 and run Caddy with
   server, the relays and Caddy about a core each. Without Caddy there, or
   with more cores, more (`RELAYS`). Watch `top` under load: relays at a
   full core and room elsewhere means one more.
+- **Compression.** The server compresses nothing (only the relays
+  connect, over loopback), and the relays compress what passes 4 KB for
+  the clients, who are on the internet: a new client's snapshot above
+  all. With relays on the clients' own networks it goes the other way
+  round; the repository's README ("Spreading the load") says how to
+  choose, hop by hop.
 - **Open files.** Every client's socket at a relay is one, and every
   writing client's socket up to the server another: `--ulimit` (or
   `Ulimit=` in a Quadlet unit) well above your number of clients.

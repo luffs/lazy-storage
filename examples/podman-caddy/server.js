@@ -23,6 +23,9 @@ const stores = createStores(id => createStore({
 const handlers = createHandlers({
   stores,
   path: '/ws',
+  // Only the relays connect, over loopback: compressing what goes to them
+  // would spend the store's one core on bandwidth nobody lacks
+  perMessageDeflate: false,
   // Who is asking: the name in the query string, as the basic example has
   // it. A real app checks a token or a session cookie here, and the relays
   // pass on the header that carries it (see relay.js)

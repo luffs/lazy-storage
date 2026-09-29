@@ -28,6 +28,11 @@ const name = req => new URL(req.url).searchParams.get('name');
 const handlers = createRelayHandlers({
   relay,
   path: '/ws',
+  // The clients are on the internet, some on slow links: what passes 4 KB
+  // (a new client's snapshot, a large patch) goes compressed, each message
+  // on its own. A patch of a few hundred bytes would hardly shrink, and
+  // the cost is per client, here on a relay's core, not the store's
+  perMessageDeflate: { threshold: 4096 },
   key: req => (name(req) ? new Bun.CryptoHasher('sha256').update(name(req)).digest('hex') : null),
   upstream: req => upstreamSocket(SERVER + new URL(req.url).search),
   credential: req => ({ query: new URL(req.url).search })
