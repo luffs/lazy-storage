@@ -1811,6 +1811,20 @@ their latencies hold across the two. `bun bench/fanout/run.js --n 4000`
 for the defaults' size; see the header of `bench/fanout/run.js` for the
 rest.
 
+To see how many clients a deployment takes, rather than the server alone,
+`--url wss://<host>/<path>` runs the clients by themselves against it,
+through whatever stands in front (Caddy, relays), `--clients
+1000,5000,10000` at a time, over `--stores` stores, each client named in
+the query by `--auth-param` as the deployment's `authenticate` reads it
+(`--insecure` takes a local certificate). Each step says how long its new
+clients took to be answered, writes at `--write-rates` as every client of
+a store hears them, and runs a reconnect storm: every client dropped at
+once and back as a client comes back after a drop, with how long until
+all were answered again, and whether with deltas. What the deployment
+spends meanwhile is its own machine's to watch. One machine runs out of
+ports to one address at some 16 000 sockets on Windows and 28 000 on
+Linux; past that, more machines.
+
 `npm run bench:client` times what an app feels in the browser, in a DOM
 from happy-dom: React and Vue components on `useClient` as the store
 changes (with how many of them re-render), the array view of a

@@ -6,8 +6,12 @@
 //     [--hubs 50] [--hub-procs 8] [--admins 2] [--rates 5,20,50,100,200,500]
 //     [--seconds 5] [--size 150] [--big 4096] [--burst 200] [--storage sqlite]
 //     [--presence-every 250] [--writers 400] [--write-rates 50,200,500,1000]
-//     [--phases idle,publish,big,burst,write] [--busy 0.5] [--profile <dir>]
-//     [--remote host:port] [--json out.json]
+//     [--phases idle,publish,big,burst,write,storm] [--idle-seconds 3] [--busy 0.5]
+//     [--profile <dir>] [--remote host:port] [--json out.json]
+//   bun bench/fanout/run.js --url wss://host/path [--clients 1000,5000,10000]
+//     [--store loadtest] [--stores 1] [--auth-param id] [--query k=v&...]
+//     [--per-proc 1000] [--insecure] [--writers 400] [--write-rates 1,10,100]
+//     [--size 150] [--phases idle,write,storm] ...
 //   A topology may name its store's presence: `hubs:off`, `direct:0` (a flush a
 //   turn); otherwise --presence-every holds (250 ms; 'off' for none)
 //
@@ -32,6 +36,28 @@
 // good to half that round trip, which the header of each topology says. The
 // machine readout is then this machine's, the relays' and the clients'; the
 // server's CPU is its own, on its own machine
+//
+// `--url` runs clients alone, against a deployment already up (a server, or
+// Caddy in front of relays: whatever its clients would dial), to see how many
+// it takes: `--clients` steps up how many are connected, and each step runs
+// the phases with all of them (the server's own phases, publish, big and
+// burst, need the bench's server, so they are not among them). The clients
+// open `--store` (or `--stores` of them, `<store>-0` and on, the clients
+// dealt round them), named by `--auth-param` in the query as the deployment's
+// `authenticate` reads it, with `--query` added (a token of a test user, say);
+// `--insecure` takes any TLS certificate (Caddy's own, on localhost). A step
+// says how long its new clients took to be answered; its writes, the patches
+// every client of the store hears and the acks, timed on this machine alone;
+// and its storm (`storm` in --phases, in the other mode too) every client
+// dropped at once and back as a client comes back after a drop, answered
+// with the delta since its version: how long until all were answered again.
+// What the deployment spends doing it is its own machine's to watch (`top`,
+// `podman stats`), step by step. The writers write `feed.w-<id>` in the
+// stores, which the deployment keeps: point it at stores nobody reads. One
+// machine opens some 16 000 sockets to one address on Windows and 28 000 on
+// Linux before its ports run out (then sockets fail to open): past that, more
+// machines, or a wider range of ports (Windows: netsh int ipv4 set
+// dynamicport tcp start=10000 num=55000)
 //
 // Every part is a process of its own (the server, each process of relays, each
 // process of clients), so each one's CPU is its own (on Windows its cycle count,
@@ -76,15 +102,29 @@ const SIZE = Number(args.size || 150);
 const BIG = Number(args.big || 4096);
 const BURST = Number(args.burst || 200);
 const PRESENCE = String(args['presence-every'] ?? 250);
+// A deployment's address (--url): clients alone, no server or relays of the bench's own
+const TARGET = typeof args.url === 'string' ? args.url : null;
 const WRITERS = Number(args.writers || 400);
-const WRITE_RATES = String(args['write-rates'] || '50,200,500,1000').split(',').map(Number);
-const PHASES = new Set(String(args.phases || 'idle,publish,big,burst,write').split(','));
+const WRITE_RATES = String(args['write-rates'] || (TARGET ? '1,10,100' : '50,200,500,1000')).split(',').map(Number);
+const PHASES = new Set(String(args.phases || (TARGET ? 'idle,write,storm' : 'idle,publish,big,burst,write')).split(','));
+const IDLE = Number(args['idle-seconds'] || 3);
 const PROFILE = typeof args.profile === 'string' ? resolve(args.profile) : null;
 const CPUS = logicalCpus();
 const BUSY = Number(args.busy || 0.5);
 // agent.js's address on the server's machine, host:port
 const REMOTE = typeof args.remote === 'string' ? (([, host, port]) => ({ host, port: Number(port) }))(args.remote.match(/^(.+):(\d+)$/) ?? []) : null;
 if (REMOTE && !(REMOTE.host && REMOTE.port)) throw new Error(`--remote takes the agent's host:port, not ${args.remote}`);
+if (TARGET && REMOTE) throw new Error('--url runs clients alone, against a server already up: --remote starts one, so not both');
+if (TARGET && !/^wss?:\/\//.test(TARGET)) throw new Error(`--url takes a ws:// or wss:// address, not ${TARGET}`);
+const STEPS = String(args.clients || '1000').split(',').map(Number);
+if (TARGET && !STEPS.every((n, k) => Number.isInteger(n) && n > 0 && (k === 0 || n > STEPS[k - 1]))) throw new Error(`--clients takes counts going up, not ${args.clients}`);
+const STORE_COUNT = Number(args.stores || 1);
+const STORES = STORE_COUNT > 1 ? Array.from({ length: STORE_COUNT }, (_, k) => `${args.store || 'loadtest'}-${k}`) : [String(args.store || 'loadtest')];
+const AUTH = String(args['auth-param'] || 'id');
+const QUERY = typeof args.query === 'string' ? args.query : '';
+const PER_PROC = Number(args['per-proc'] || 1000);
+// In every replica's id, so a store the deployment kept from an earlier run takes this one's ops as new
+const RUN = Date.now().toString(36);
 const here = import.meta.dir;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const CYCLE_HZ = cycleRate();
@@ -163,16 +203,61 @@ process.on('SIGINT', async () => { await stopAll(); process.exit(130); });
 const sum = (list, key) => list.reduce((a, s) => a + (s[key] || 0), 0);
 const all = list => Promise.all(list.map(p => p.get('/count')));
 
-/** Let whatever is still on its way arrive: the server done publishing, and every client at its version */
+/**
+ * Let whatever is still on its way arrive: the server done publishing, and
+ * every client at its version. Against a deployment, whose version nobody
+ * here asks: no writer going or waiting on an ack, and each store's clients
+ * all at one version
+ */
 async function drain({ server, clients }, capMs = 60_000) {
   const started = performance.now();
   for (;;) {
-    const run = await server.get('/run');
+    const run = server ? await server.get('/run') : null;
     const counts = await all(clients);
-    if (run.finished && counts.every(c => c.minV === null || (c.minV === run.v && c.maxV === run.v))) return true;
+    if (run ? run.finished && counts.every(c => c.minV === null || (c.minV === run.v && c.maxV === run.v)) : settled(counts)) return true;
     if (performance.now() - started > capMs) return false;
     await sleep(250);
   }
+}
+
+function settled(counts) {
+  if (counts.some(c => c.writing || c.pending)) return false;
+  const stores = {};
+  for (const c of counts) {
+    for (const [store, [min, max]] of Object.entries(c.stores)) {
+      const held = stores[store] ??= [min, max];
+      held[0] = Math.min(held[0], min);
+      held[1] = Math.max(held[1], max);
+    }
+  }
+  return Object.values(stores).every(([min, max]) => min === max);
+}
+
+/** The processes' `key`s ({ store: n }), added up by store */
+function byStore(counts, key) {
+  const total = {};
+  for (const c of counts) for (const [store, n] of Object.entries(c[key] || {})) total[store] = (total[store] || 0) + n;
+  return total;
+}
+
+const written = counts => Object.values(byStore(counts, 'written')).reduce((a, b) => a + b, 0);
+
+/** Against a deployment: every op written reaches every client of its store */
+function heardBy(counts) {
+  const members = byStore(counts, 'members');
+  return Object.entries(byStore(counts, 'written')).reduce((a, [store, n]) => a + n * (members[store] || 0), 0);
+}
+
+let phases = 0;
+/**
+ * Each phase's window, at the clients (and the relays' peaks): the versions
+ * after the server's with a server of the bench's own, or against a
+ * deployment the patches that carry the phase's number, which its writers
+ * put in their ops
+ */
+async function resetAll({ server, relays, clients }, count) {
+  const reset = server ? `/reset?from=${(await server.get('/run')).v}&count=${count}` : `/reset?phase=${++phases}`;
+  await Promise.all([...clients.map(c => c.get(reset)), ...relays.map(r => r.get('/reset'))]);
 }
 
 /**
@@ -184,35 +269,38 @@ async function drain({ server, clients }, capMs = 60_000) {
 async function measure(parts, { count, seconds, paced = false, writes = false, act }) {
   const { server, relays, clients } = parts;
   const drained = await drain(parts);
-  const from = (await server.get('/run')).v;
-  await Promise.all([...clients.map(c => c.get(`/reset?from=${from}&count=${count}`)), ...relays.map(r => r.get('/reset'))]);
-  const before = await Promise.all([server, ...relays, ...clients].map(p => p.get('/stats')));
+  await resetAll(parts, count);
+  // The processes measured: the server (when the bench has one), the relays, the clients
+  const measured = [...(server ? [server] : []), ...relays, ...clients];
+  const o = server ? 1 : 0;
+  const before = await Promise.all(measured.map(p => p.get('/stats')));
   const started = performance.now();
   const job = await act();
   if (job?.refused) throw new Error(job.refused);
-  const expected = count * (N + ADMINS);
   let peakServer = 0;
   for (;;) {
     await sleep(250);
-    const run = await server.get('/run');
-    peakServer = Math.max(peakServer, run.largest || 0);
+    const run = server ? await server.get('/run') : null;
+    peakServer = Math.max(peakServer, run?.largest || 0);
     const counts = await all(clients);
     const finished = !paced || (writes ? counts.every(c => !c.writing) : run.finished);
-    const acked = !writes || sum(counts, 'acked') >= count;
-    if ((sum(counts, 'received') >= expected && finished && acked) || performance.now() - started > seconds * 1000 + 20_000) break;
+    // Against a deployment, what was written (a writer between sockets skips its turn), each op acknowledged or refused
+    const acked = !writes || (server ? sum(counts, 'acked') >= count : sum(counts, 'acked') + sum(counts, 'refused') >= written(counts));
+    if ((sum(counts, 'received') >= parts.expected(counts, count) && finished && acked) || performance.now() - started > seconds * 1000 + 20_000) break;
   }
   const wall = (performance.now() - started) / 1000;
-  const after = await Promise.all([server, ...relays, ...clients].map(p => p.get('/stats')));
+  const after = await Promise.all(measured.map(p => p.get('/stats')));
   const d = i => after[i].cpu - before[i].cpu;
-  const relayCpus = relays.map((r, k) => d(1 + k));
-  const clientCpus = clients.map((c, k) => d(1 + relays.length + k) / wall);
+  const relayCpus = relays.map((r, k) => d(o + k));
+  const clientCpus = clients.map((c, k) => d(o + relays.length + k) / wall);
   // Every process's CPU on this machine over the wall time: the logical CPUs they kept busy between them
-  const machine = ((agent ? 0 : d(0)) + relayCpus.reduce((a, b) => a + b, 0)) / wall + clientCpus.reduce((a, b) => a + b, 0);
-  const cs = after.slice(1 + relays.length);
+  const machine = ((server && !agent ? d(0) : 0) + relayCpus.reduce((a, b) => a + b, 0)) / wall + clientCpus.reduce((a, b) => a + b, 0);
+  const cs = after.slice(o + relays.length);
   const histogram = cs.reduce((h, s) => addInto(h, s.histogram), newHistogram());
   const delivery = cs.reduce((h, s) => addInto(h, s.delivery), newHistogram());
   const received = sum(cs, 'received');
-  const run = after[0].run;
+  const expected = parts.expected(cs, count);
+  const run = server ? after[0].run : null;
   // The writers' runs, one a process: the rate they kept between them, and the furthest any fell behind
   const runs = writes ? cs.map(s => s.writes).filter(w => w && w.finished !== null && w.done > 0) : [];
   const span = runs.length ? (Math.max(...runs.map(w => w.last)) - Math.min(...runs.map(w => w.first))) / 1000 : 0;
@@ -224,7 +312,8 @@ async function measure(parts, { count, seconds, paced = false, writes = false, a
     delivered: expected ? received / expected : 1,
     stale: sum(cs, 'stale'),
     gaps: sum(cs, 'gaps'),
-    closes: sum(cs, 'closes') - sum(before.slice(1 + relays.length), 'closes'),
+    closes: sum(cs, 'closes') - sum(before.slice(o + relays.length), 'closes'),
+    failed: sum(cs, 'failed') - sum(before.slice(o + relays.length), 'failed'),
     retold: sum(cs, 'retold'),
     errors: sum(cs, 'errors'),
     p50: percentile(histogram, 0.5),
@@ -233,7 +322,7 @@ async function measure(parts, { count, seconds, paced = false, writes = false, a
     deliveryP50: percentile(delivery, 0.5),
     deliveryP99: percentile(delivery, 0.99),
     wall,
-    serverCpu: d(0),
+    serverCpu: server ? d(0) : null,
     relayCpu: relayCpus.reduce((a, b) => a + b, 0),
     relayCpuMax: relayCpus.length ? Math.max(...relayCpus) : 0,
     clientBusiest: Math.max(...clientCpus),
@@ -248,10 +337,68 @@ async function measure(parts, { count, seconds, paced = false, writes = false, a
     skipped: sum(cs, 'skipped'),
     ackP50: percentile(acks, 0.5),
     ackP99: percentile(acks, 0.99),
-    serverPerOp: count ? (d(0) / count) * 1e6 : null,
-    serverSockets: after[0].sockets?.sockets,
+    serverPerOp: server && count ? (d(0) / count) * 1e6 : null,
+    serverSockets: server ? after[0].sockets?.sockets : null,
     peakServerBuffered: peakServer,
-    peakRelayBuffered: relays.length ? Math.max(...after.slice(1, 1 + relays.length).map(s => s.peakBuffered)) : 0
+    peakRelayBuffered: relays.length ? Math.max(...after.slice(o, o + relays.length).map(s => s.peakBuffered)) : 0
+  };
+}
+
+/**
+ * The storm: every client's socket dropped at once and each dialled again
+ * as a client does after a drop (see clients.js's /storm), answered with the
+ * delta since its version. How long until all `total` were answered again,
+ * and each one's time from dialling to its answer
+ */
+async function storm(parts, total) {
+  const { server, relays, clients } = parts;
+  const drained = await drain(parts);
+  await resetAll(parts, 0);
+  const measured = [...(server ? [server] : []), ...relays, ...clients];
+  const o = server ? 1 : 0;
+  const before = await Promise.all(measured.map(p => p.get('/stats')));
+  const started = performance.now();
+  const dropped = sum(await Promise.all(clients.map(c => c.get('/storm'))), 'dropped');
+  let back = null;
+  let answered = 0;
+  for (;;) {
+    await sleep(100);
+    answered = sum(await all(clients), 'answered');
+    if (answered >= total) {
+      back = (performance.now() - started) / 1000;
+      break;
+    }
+    if (performance.now() - started > 180_000) break;
+  }
+  const wall = (performance.now() - started) / 1000;
+  const after = await Promise.all(measured.map(p => p.get('/stats')));
+  const d = i => after[i].cpu - before[i].cpu;
+  const relayCpus = relays.map((r, k) => d(o + k));
+  const clientCpus = clients.map((c, k) => d(o + relays.length + k) / wall);
+  const cs = after.slice(o + relays.length);
+  const was = before.slice(o + relays.length);
+  const storms = cs.reduce((h, s) => addInto(h, s.storms), newHistogram());
+  return {
+    drained,
+    total,
+    dropped,
+    answered,
+    back,
+    deltas: sum(cs, 'deltas'),
+    snapshots: sum(cs, 'back') - sum(cs, 'deltas'),
+    p50: percentile(storms, 0.5),
+    p99: percentile(storms, 0.99),
+    max: percentile(storms, 1),
+    closes: sum(cs, 'closes') - sum(was, 'closes'),
+    failed: sum(cs, 'failed') - sum(was, 'failed'),
+    retold: sum(cs, 'retold'),
+    errors: sum(cs, 'errors'),
+    wall,
+    serverCpu: server ? d(0) : null,
+    relayCpu: relayCpus.reduce((a, b) => a + b, 0),
+    relayCpuMax: relayCpus.length ? Math.max(...relayCpus) : 0,
+    clientBusiest: Math.max(...clientCpus),
+    machine: ((server && !agent ? d(0) : 0) + relayCpus.reduce((a, b) => a + b, 0)) / wall + clientCpus.reduce((a, b) => a + b, 0)
   };
 }
 
@@ -295,7 +442,7 @@ async function topology(spec, results) {
     }
     out.connectS = (performance.now() - connectStarted) / 1000;
     await sleep(3000);
-    const parts = { server, relays, clients };
+    const parts = { server, relays, clients, expected: (counts, count) => count * (N + ADMINS) };
     const s = await server.get('/stats');
     if (kind !== 'direct') {
       const rs = await Promise.all(relays.map(r => r.get('/stats')));
@@ -311,11 +458,7 @@ async function topology(spec, results) {
       : `${children.length} processes on ${CPUS} logical CPUs`;
     console.log(`\n${spec}: ${N} clients answered in ${out.connectS.toFixed(1)} s; the server holds ${s.sockets.sockets} sockets (${out.relays} relays), lists ${s.listed} in presence (presence ${presence}); ${where}`);
 
-    // An idle stretch, for what the processes use doing nothing (keepalives, sweeps, timers)
-    if (PHASES.has('idle')) {
-      out.idle = await measure(parts, { count: 0, seconds: 3, act: async () => { await sleep(3000); return {}; } });
-      print(spec, 'idle 3 s', out.idle);
-    }
+    if (PHASES.has('idle')) out.idle = await idle(spec, parts);
     for (const rate of PHASES.has('publish') ? RATES : []) {
       // At least 50 patches, so the p99 is not one slow patch
       const seconds = Math.max(SECONDS, 50 / rate);
@@ -336,32 +479,8 @@ async function topology(spec, results) {
       out.burst = await measure(parts, { count: BURST, seconds: 0, act: () => server.get(`/burst?count=${BURST}&size=${SIZE}`) });
       print(spec, `${BURST} at once`, out.burst);
     }
-    if (PHASES.has('write')) {
-      // Each client process (the admins' aside) writes its share of the rate, over its share of the writers
-      const writing = clients.filter(c => !c.admin);
-      const writersEach = writing.map(c => Math.max(1, Math.min(c.n, Math.round(WRITERS / writing.length))));
-      out.writers = writersEach.reduce((a, b) => a + b, 0);
-      out.writes = [];
-      console.log(`  ${spec.padEnd(9)} writes: ${out.writers} writers`);
-      for (const rate of WRITE_RATES) {
-        const seconds = Math.max(SECONDS, 50 / rate);
-        const each = writing.map(() => Math.round((rate / writing.length) * seconds));
-        const count = each.reduce((a, b) => a + b, 0);
-        const r = await measure(parts, {
-          count, seconds, paced: true, writes: true,
-          act: async () => {
-            const answers = await Promise.all(writing.map((c, k) => c.get(`/write?rate=${rate / writing.length}&count=${each[k]}&writers=${writersEach[k]}&size=${SIZE}`)));
-            return answers.find(a => a.refused) ?? {};
-          }
-        });
-        out.writes.push({ rate, ...r });
-        print(spec, `write ${rate}/s`, r);
-        if (r.received < r.expected || r.acked < r.count || r.gaps || r.closes || r.retold || r.errors || (r.p99 ?? 0) > 2000) {
-          console.log(`  ${spec}: given up writing at ${rate}/s`);
-          break;
-        }
-      }
-    }
+    if (PHASES.has('write')) await writePhases(spec, parts, out);
+    if (PHASES.has('storm')) out.storm = await stormPhase(spec, parts, N + ADMINS);
   } catch (err) {
     out.error = String(err?.message || err);
     console.log(`  ${spec} failed: ${out.error}`);
@@ -371,12 +490,118 @@ async function topology(spec, results) {
   }
 }
 
+/** An idle stretch, for what the processes use doing nothing (keepalives, sweeps, timers) */
+async function idle(spec, parts) {
+  const r = await measure(parts, { count: 0, seconds: IDLE, act: async () => { await sleep(IDLE * 1000); return {}; } });
+  print(spec, `idle ${IDLE} s`, r);
+  return r;
+}
+
+/** The write phases, rate by rate: each client process (the admins' aside) writes its share of the rate, over its share of the writers */
+async function writePhases(spec, parts, out) {
+  const writing = parts.clients.filter(c => !c.admin);
+  const writersEach = writing.map(c => Math.max(1, Math.min(c.n, Math.round(WRITERS / writing.length))));
+  // Where each process's writers start in the stores (see clients.js's writersFrom)
+  const firsts = writersEach.map((_, k) => writersEach.slice(0, k).reduce((a, b) => a + b, 0));
+  out.writers = writersEach.reduce((a, b) => a + b, 0);
+  out.writes = [];
+  console.log(`  ${spec.padEnd(9)} writes: ${out.writers} writers`);
+  for (const rate of WRITE_RATES) {
+    const seconds = Math.max(SECONDS, 50 / rate);
+    const each = writing.map(() => Math.round((rate / writing.length) * seconds));
+    const count = each.reduce((a, b) => a + b, 0);
+    const r = await measure(parts, {
+      count, seconds, paced: true, writes: true,
+      act: async () => {
+        const answers = await Promise.all(writing.map((c, k) => c.get(`/write?rate=${rate / writing.length}&count=${each[k]}&writers=${writersEach[k]}&size=${SIZE}&first=${firsts[k]}`)));
+        return answers.find(a => a.refused) ?? {};
+      }
+    });
+    out.writes.push({ rate, ...r });
+    print(spec, `write ${rate}/s`, r);
+    if (r.received < r.expected || r.acked < r.count || r.gaps || r.closes || r.retold || r.errors || (r.p99 ?? 0) > 2000) {
+      console.log(`  ${spec}: given up writing at ${rate}/s`);
+      break;
+    }
+  }
+}
+
+async function stormPhase(spec, parts, total) {
+  const r = await storm(parts, total);
+  const trouble = ['failed', 'closes', 'retold', 'errors'].filter(k => r[k]).map(k => `${k.toUpperCase()} ${r[k]}`).join(' ');
+  const cpu = r.serverCpu === null ? '' : `server ${f(r.serverCpu, 2)} s, relays ${f(r.relayCpu, 2)} s (busiest process ${f(r.relayCpuMax, 2)}), `;
+  console.log(`  ${spec.padEnd(9)} ${'storm'.padEnd(14)} ${r.dropped} dropped, ` +
+    (r.back !== null ? `all ${r.total} answered again in ${f(r.back, 2)} s` : `only ${r.answered} of ${r.total} answered again in ${f(r.wall, 0)} s`) +
+    ` (${r.deltas} with a delta, ${r.snapshots} a snapshot); dialled→answered p50 ${f(r.p50)} p99 ${f(r.p99)} max ${f(r.max)} ms  cpu: ${cpu}clients' busiest ${f(r.clientBusiest * 100, 0)}%, machine ${f(r.machine)} of ${CPUS} CPUs` +
+    (r.drained ? '' : '  UNDRAINED') + (r.machine > BUSY * CPUS ? '  MACHINE BUSY' : '') + (trouble ? `  ${trouble}` : ''));
+  return r;
+}
+
+/** --url: clients alone, against a deployment, `--clients` at a time */
+async function deployment(results, save) {
+  const out = { url: TARGET, stores: STORES.length, steps: [] };
+  results.push(out);
+  const clients = [];
+  const parts = { server: null, relays: [], clients, expected: heardBy };
+  const left = ['publish', 'big', 'burst'].filter(p => PHASES.has(p));
+  if (left.length) console.log(`${left.join(', ')}: the server's own phases, which need the bench's server; left out`);
+  let total = 0;
+  try {
+    for (const target of STEPS) {
+      const spec = String(target);
+      const step = { clients: target };
+      out.steps.push(step);
+      const added = target - total;
+      const connectStarted = performance.now();
+      while (total < target) {
+        const n = Math.min(PER_PROC, target - total);
+        clients.push(await spawn('clients.js', {
+          TARGETS: TARGET, N: String(n), OFFSET: String(total), STORES: STORES.join(','), AUTH, QUERY, RUN,
+          INSECURE: args.insecure === true ? '1' : ''
+        }));
+        total += n;
+      }
+      // Three minutes, and more for many (a slow link, a TLS handshake each)
+      const cap = 180_000 + added * 10;
+      for (;;) {
+        const counts = await all(clients);
+        const answered = sum(counts, 'answered');
+        if (answered >= total) break;
+        // Not one answered and the sockets failing (the address, the certificate) is no load to wait out
+        if (performance.now() - connectStarted > cap || (answered === 0 && sum(counts, 'failed') >= Math.min(added, 100))) {
+          const first = counts.find(c => c.firstError)?.firstError;
+          throw new Error(`only ${answered} of ${total} answered in ${Math.round((performance.now() - connectStarted) / 1000)} s; ${sum(counts, 'failed')} sockets failed to open` +
+            (first ? ` (the first: ${first})` : '') + (total > 14_000 ? '; past some 16 000 sockets, see the header on this machine\'s ports' : ''));
+        }
+        await sleep(250);
+      }
+      step.connectS = (performance.now() - connectStarted) / 1000;
+      step.processes = clients.length;
+      const where = STORES.length === 1 ? `the store ${STORES[0]}` : `${STORES.length} stores (${STORES[0]} to ${STORES.at(-1)})`;
+      console.log(`\n${TARGET}: ${total} clients on ${where}, the ${added} new ones answered in ${step.connectS.toFixed(1)} s (${f(added / step.connectS, 0)} a second); ${clients.length} processes on ${CPUS} logical CPUs`);
+      await sleep(3000);
+      if (PHASES.has('idle')) step.idle = await idle(spec, parts);
+      if (PHASES.has('write')) await writePhases(spec, parts, step);
+      if (PHASES.has('storm')) step.storm = await stormPhase(spec, parts, total);
+      await save();
+    }
+  } catch (err) {
+    out.error = String(err?.message || err);
+    console.log(`  ${TARGET} failed: ${out.error}`);
+  } finally {
+    await stopAll();
+  }
+}
+
 const f = (x, d = 1) => (x === null || x === undefined || !Number.isFinite(x) ? '-' : x.toFixed(d));
 function print(spec, label, r) {
-  const trouble = ['gaps', 'closes', 'retold', 'errors', 'refused', 'skipped', 'stale'].filter(k => r[k]).map(k => `${k.toUpperCase()} ${r[k]}`).join(' ');
+  const trouble = ['gaps', 'closes', 'failed', 'retold', 'errors', 'refused', 'skipped', 'stale'].filter(k => r[k]).map(k => `${k.toUpperCase()} ${r[k]}`).join(' ');
+  const cpu = r.serverCpu === null
+    ? ''
+    : `server ${f(r.serverCpu, 2)} s${r.writes ? ` (${f(r.serverPerOp, 0)} µs an op, ${r.serverSockets} sockets)` : ''}, relays ${f(r.relayCpu, 2)} s (busiest process ${f(r.relayCpuMax, 2)}), `;
   console.log(`  ${spec.padEnd(9)} ${label.padEnd(14)} ${(r.delivered * 100).toFixed(2)}%  due→heard p50 ${f(r.p50)} p99 ${f(r.p99)} max ${f(r.max)} ms, sent→heard p50 ${f(r.deliveryP50)} p99 ${f(r.deliveryP99)} ms  ` +
     (r.writes ? `acked ${r.acked}/${r.count} sent→ack p50 ${f(r.ackP50)} p99 ${f(r.ackP99)} ms  ` : '') +
-    `cpu: server ${f(r.serverCpu, 2)} s${r.writes ? ` (${f(r.serverPerOp, 0)} µs an op, ${r.serverSockets} sockets)` : ''}, relays ${f(r.relayCpu, 2)} s (busiest process ${f(r.relayCpuMax, 2)}), clients' busiest ${f(r.clientBusiest * 100, 0)}%` +
+    `cpu: ${cpu}clients' busiest ${f(r.clientBusiest * 100, 0)}%` +
     `, machine ${f(r.machine)} of ${CPUS} CPUs` +
     (r.achieved !== null ? `  rate ${f(r.achieved)}/s lag ${f(r.lagMax)} ms` : '') +
     (r.peakServerBuffered || r.peakRelayBuffered ? `  unsent peak: server ${Math.round(r.peakServerBuffered / 1024)} KB, relay ${Math.round(r.peakRelayBuffered / 1024)} KB` : '') +
@@ -391,10 +616,20 @@ if (agent) {
 }
 
 const results = [];
+// (The query only as set or not: it may carry a test user's token)
+const settings = TARGET
+  ? { TARGET, STEPS, STORES, AUTH, QUERY: QUERY ? '(set)' : '', PER_PROC, INSECURE: args.insecure === true, WRITERS, WRITE_RATES, SECONDS, SIZE, IDLE, PHASES: [...PHASES], CPUS, BUSY, CYCLE_HZ }
+  : { N, PROCS, HUBS, HUB_PROCS, ADMINS, RATES, SECONDS, SIZE, BIG, BURST, PRESENCE, WRITERS, WRITE_RATES, IDLE, PHASES: [...PHASES], CPUS, BUSY, REMOTE, CYCLE_HZ };
+const save = async () => {
+  if (args.json) await Bun.write(String(args.json), JSON.stringify({ args: settings, results }, null, 1));
+};
 try {
-  for (const spec of TOPOLOGIES) {
-    await topology(spec, results);
-    if (args.json) await Bun.write(String(args.json), JSON.stringify({ args: { N, PROCS, HUBS, HUB_PROCS, ADMINS, RATES, SECONDS, SIZE, BIG, BURST, PRESENCE, WRITERS, WRITE_RATES, PHASES: [...PHASES], CPUS, BUSY, REMOTE, CYCLE_HZ }, results }, null, 1));
+  if (TARGET) await deployment(results, save);
+  else {
+    for (const spec of TOPOLOGIES) {
+      await topology(spec, results);
+      await save();
+    }
   }
 } finally {
   await stopAll();

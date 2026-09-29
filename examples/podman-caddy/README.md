@@ -88,5 +88,15 @@ sysctl is the pod's own, as its network is, and leaves the host's alone.
 - **Caddy reloads.** `stream_close_delay` keeps open WebSockets through a
   config reload, rather than every client reconnecting at once.
 - **Measure** with your numbers of clients and writes, and your patch
-  sizes: `npm run bench:fanout` (see the repository's README), from
-  another machine through Caddy.
+  sizes, from another machine through Caddy, while `podman stats` and
+  `top` on this one say what it costs:
+
+  ```bash
+  bun bench/fanout/run.js --url wss://app.example.com/ws --auth-param name --clients 1000,5000,10000 --stores 10 --size 1024 --write-rates 1,10
+  ```
+
+  (`--insecure` for Caddy's local certificate). Each step says how long
+  its clients took to be answered, how long a write took to reach every
+  client of its store, and how long all took to come back when every
+  client dropped at once; the repository's README ("Examples and
+  benchmark") says more.
