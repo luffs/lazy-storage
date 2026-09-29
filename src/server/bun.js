@@ -101,9 +101,10 @@ import { snapshotOptions, snapshotId, serveSnapshot } from './snapshot.js';
  *   whose unsent output passes this many bytes, with code 1013: a client
  *   that stopped reading would otherwise have Bun drop what it cannot
  *   buffer (past its own `backpressureLimit`) and keep the socket open. It
- *   reconnects and catches up with a delta. Checked on every send and,
- *   for store broadcasts (a topic publish, which Bun fans out itself),
- *   once a second. false leaves it to Bun, which drops past 16 MB
+ *   reconnects and catches up with a delta. Checked on every write (what
+ *   one task sent the socket, written together) and, for store broadcasts
+ *   (a topic publish, which Bun fans out itself), once a second. false
+ *   leaves it to Bun, which drops past 16 MB
  * @param {(error: any) => void} [options.onError] - server faults: a
  *   store factory that threw, a bug while handling a message; default console
  * @returns {{ upgrade: (req: Request, server: any) => Promise<Response|undefined|null>, websocket: Object, close: (options?: { reason?: string }) => Promise<void>, get closing(): boolean, sockets: () => Array<Object>, socketStats: () => Object, disconnect: (filter?: (user: any) => boolean) => number, revalidate: (filter?: (user: any, storeId: string) => boolean) => Promise<number> }}
@@ -143,11 +144,48 @@ export function createHandlers({
   // Where the hub points a client that can fetch for a large snapshot
   const snapshotRoute = snapshots && { threshold: snapshots.threshold, url: id => `${path}/snapshot/${id}` };
   // Bun compresses a frame only when asked per send; every message is
-  // encoded once (see wire.js) and sent compressed when it is large enough
-  const send = (ws, message) => {
+  // encoded once (see wire.js) and sent compressed when it is large enough.
+  // What goes to a socket in one task goes out in one write (ws.cork), once
+  // the task is done (a microtask): a socket costs a system call for every
+  // send whatever it carries, and a store sends a turn's acks and answers
+  // together, after the turn's commit (see its groupCommit), outside the
+  // callback in which Bun would cork them itself. Each socket hears what it
+  // is sent in the order it was sent: a topic publish goes out at once, so
+  // the sockets that hear it get what waits for them first (see publish),
+  // and a socket the server closes gets what waits for it before it goes
+  const queued = new Map();     // socket -> [json, compress][] not yet written
+  const topicsOf = new Map();   // socket -> the stores it hears the broadcasts of
+  let flushing = false;
+  const write = (ws, messages) => {
     if (behind(ws)) return;
+    try {
+      if (messages.length === 1) ws.send(messages[0][0], messages[0][1]);
+      else ws.cork(() => { for (const [json, compress] of messages) ws.send(json, compress); });
+    } catch (err) {
+      onError(err);
+    }
+  };
+  /** What waits for this socket, written now */
+  const writeQueued = ws => {
+    const messages = queued.get(ws);
+    if (!messages) return;
+    queued.delete(ws);
+    write(ws, messages);
+  };
+  const flush = () => {
+    flushing = false;
+    for (const ws of [...queued.keys()]) writeQueued(ws);
+  };
+  const send = (ws, message) => {
     const json = toJSON(message);
-    ws.send(json, deflate !== null && json.length >= deflate.threshold);
+    const entry = [json, deflate !== null && json.length >= deflate.threshold];
+    const waiting = queued.get(ws);
+    if (waiting) waiting.push(entry);
+    else queued.set(ws, [entry]);
+    if (!flushing) {
+      flushing = true;
+      queueMicrotask(flush);
+    }
   };
   const hubs = new Map();
   const links = new Map();  // relay sockets -> their link (see relays.js)
@@ -237,9 +275,21 @@ export function createHandlers({
       // publish, which Bun fans out natively, rather than a send per socket from
       // JavaScript. Bun still writes (and compresses, past the threshold) per subscriber
       const channel = {
-        subscribe: id => ws.subscribe(topic(id)),
-        unsubscribe: id => { try { ws.unsubscribe(topic(id)); } catch { /* a closing socket is already gone */ } },
-        publish: (id, message) => { const json = toJSON(message); bunServer.publish(topic(id), json, shouldCompress(json)); }
+        subscribe: id => {
+          ws.subscribe(topic(id));
+          if (!topicsOf.has(ws)) topicsOf.set(ws, new Set());
+          topicsOf.get(ws).add(id);
+        },
+        unsubscribe: id => {
+          topicsOf.get(ws)?.delete(id);
+          try { ws.unsubscribe(topic(id)); } catch { /* a closing socket is already gone */ }
+        },
+        publish: (id, message) => {
+          // A socket that hears the store gets what was queued for it first (see send)
+          for (const other of [...queued.keys()]) if (topicsOf.get(other)?.has(id)) writeQueued(other);
+          const json = toJSON(message);
+          bunServer.publish(topic(id), json, shouldCompress(json));
+        }
       };
       if (ws.data.relay !== undefined) {
         links.set(ws, createRelayLink(resolveStore, { send: message => send(ws, message), relay: ws.data.relay, admit, authorizeRelay: relays.authorize, authorizeId, authorize, channel, linger: relays.linger, rate: relays.rate, onError }));
@@ -273,15 +323,15 @@ export function createHandlers({
       try {
         msg = JSON.parse(typeof raw === 'string' ? raw : new TextDecoder().decode(raw));
       } catch {
-        return ws.send(JSON.stringify({ t: 'error', message: 'Expected JSON' }));
+        return send(ws, { t: 'error', message: 'Expected JSON' });
       }
-      if (!LazyWatch.Utils.isPlainObject(msg)) return ws.send(JSON.stringify({ t: 'error', message: 'Expected a message object' }));
+      if (!LazyWatch.Utils.isPlainObject(msg)) return send(ws, { t: 'error', message: 'Expected a message object' });
       // A bug below this point must not take the process down with it
       try {
         (hubs.get(ws) ?? links.get(ws))?.receive(msg);
       } catch (err) {
         onError(err);
-        ws.send(JSON.stringify({ t: 'error', store: msg.store, message: 'Something went wrong' }));
+        send(ws, { t: 'error', store: msg.store, message: 'Something went wrong' });
       }
     },
     close(ws) {
@@ -291,6 +341,9 @@ export function createHandlers({
       links.delete(ws);
       seen.get(ws)?.cancel?.();
       seen.delete(ws);
+      // Gone: nothing more is written to it
+      queued.delete(ws);
+      topicsOf.delete(ws);
     }
   };
 
@@ -310,6 +363,7 @@ export function createHandlers({
       const hub = map.get(ws);
       map.set(ws, { receive() {}, close() { hub?.close(); resolve(); } });
     })));
+    flush();   // what the sockets were sent before goes before the close
     for (const ws of sockets) {
       try {
         ws.close(1001, reason);
@@ -362,6 +416,7 @@ export function createHandlers({
     links.delete(ws);
     seen.get(ws)?.cancel?.();
     seen.delete(ws);
+    writeQueued(ws);   // what it was sent before goes before the close
     ws.close(...REAUTHENTICATE);
   }
 

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { test, afterAll } from 'bun:test';
 import { brotliDecompressSync } from 'node:zlib';
 import { createStore, createStores, memoryStorage } from '../../src/server/index.js';
-import { serve } from '../../src/server/bun.js';
+import { serve, createHandlers } from '../../src/server/bun.js';
 import { createClient, createConnection, webSocketTransport } from '../../src/index.js';
 import { probeFrames, stalledSocket } from '../frames.js';
 import { randomBytes } from 'node:crypto';
@@ -425,6 +425,57 @@ test('expiresAt closes a socket when its session runs out: a client with fresh c
   assert.deepEqual({ expired, disconnected }, { expired: 2, disconnected: 1 });
   connection.close();
   await expiring.shutdown();
+});
+
+/**
+ * The handlers over a stand-in for Bun: a socket that records its writes
+ * (the frames one write carries, several under ws.cork), and a server that
+ * records its topic publishes, both into `events` in the order they happen
+ */
+async function standIn(store) {
+  const handlers = createHandlers({ stores: () => store, path: '/ws' });
+  const events = [];
+  const server = {
+    upgrade: (req, { data }) => { server.data = data; return true; },
+    publish: (topic, json) => events.push(`publish ${JSON.parse(json).t} ${JSON.parse(json).v}`)
+  };
+  await handlers.upgrade(new Request('http://localhost/ws'), server);
+  let corked = null;
+  const ws = {
+    data: server.data,
+    send: json => (corked ?? events).push(JSON.parse(json).t),
+    cork: fn => {
+      corked = [];
+      try { fn(); } finally { events.push(corked); corked = null; }
+    },
+    subscribe() {},
+    unsubscribe() {},
+    getBufferedAmount: () => 0,
+    close() {}
+  };
+  handlers.websocket.open(ws);
+  const receive = message => handlers.websocket.message(ws, JSON.stringify(message));
+  return { events, receive };
+}
+
+test('what one task sends a socket goes out in one write, in the order it was sent', async () => {
+  const { events, receive } = await standIn(createStore({ initial: INITIAL }));
+  receive({ t: 'ping' });
+  receive({ t: 'ping' });
+  receive({ t: 'ping' });
+  await Promise.resolve();
+  // A write each cost a system call each: a turn's acks to one socket are many
+  assert.deepEqual(events, [['pong', 'pong', 'pong']]);
+});
+
+test('a patch published at once reaches a socket after what was queued for it before', async () => {
+  const store = createStore({ initial: INITIAL, groupCommit: false });
+  const { events, receive } = await standIn(store);
+  receive({ t: 'hello', store: 'main', replicaId: 'r', ops: [] });   // its answer waits for the end of the task
+  store.patch({ tasks: { a: { id: 'a' } } });                       // published at once
+  await Promise.resolve();
+  assert.deepEqual(events, ['snapshot', 'publish patch 1'], 'the answer first, then the patch it came before');
+  store.dispose();
 });
 
 afterAll(async () => {
