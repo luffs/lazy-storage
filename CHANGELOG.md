@@ -2,14 +2,29 @@
 
 All notable changes to lazy-storage are documented here. The format follows Keep a Changelog; versions follow Semantic Versioning.
 
-## [Unreleased]
+## [0.23.0] - 2026-09-29
+
+A busy store no longer waits on its disk. What one turn of the event loop
+merged is committed together (`groupCommit`, on by default), each SQLite
+row written once for the turn, the write-ahead log is copied back on a
+worker thread, and the Bun adapter writes what one task sends a socket
+in one go: one store on SQLite, on a 4-core Linux server behind ten
+relays, went from some 2500 writes a second to 15000, at a p99 of some
+50 ms. `npm run bench:fanout` now measures writes, on one machine or on
+two. The wire protocol and the SQLite files are unchanged, so clients
+and relays of 0.22 work with it as they are. On upgrade, check the server
+code that writes: `patch()` and `apply()` return before their change is
+stored and no longer throw a commit that failed, so call `store.flush()`
+before telling anyone a change is saved; `store.on` listeners hear a
+change before it is stored (pass changes on from `store.observe('op')`);
+and a test that reads storage straight after a `patch` needs a `flush()`
+first. `groupCommit: false` keeps the old timing.
 
 ### Added
 
 - **`npm run bench:fanout` has the clients write, not only the server publish.** Its write phases have `--writers` of the thin clients (400) write the store between them at each of `--write-rates`, as live ops on their own sockets, or through their relay up a write-only socket of their own; every client hears each op as it hears the server's patches, each op's author times its ack, and the server's CPU for each op is reported with the sockets it holds. What a write costs the server was measured nowhere: it is the one load relays cannot spread. `--phases` picks the phases to run, and `--profile <dir>` has the server and the relay processes each write a CPU profile there (Bun's `--cpu-prof-md`)
 - **`npm run bench:fanout` says how busy the machine was.** Every phase reports how many of the machine's logical CPUs its processes kept busy between them, and flags one past `--busy` of them (half) MACHINE BUSY: the relays and the clients share the machine with the server, and a phase that fills it measures the machine, not the server
 - **`npm run bench:fanout` can put the server on a machine of its own.** `bun bench/fanout/agent.js` on the server's machine starts a fresh server for each topology when `run.js --remote <host>:36700` on another asks, on fixed ports (the agent's, and the next two) a firewall can let in; the relays and the clients stay with `run.js`. The server's clock is measured against `run.js`'s (the quickest of 20 round trips) and it stamps its patches in that time, so latencies hold across the two machines to within half that round trip. On one machine the relays and the clients share the server's cores, and each socket's kernel work at both ends of the loopback is on the same machine too
-
 - **The SQLite adapters take an `onError`, and report a checkpoint worker that failed.** A worker that could not start (a bundle that left `sqlite-checkpoint.js` out, say), failed or ended handed the checkpoints back to SQLite without a word, and showed only as slow answers: it is now reported, with code `checkpoint-worker` (default console)
 
 ### Changed
