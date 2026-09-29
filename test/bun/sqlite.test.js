@@ -111,6 +111,22 @@ test('the delta log is persisted, pruned to the store\'s floor a hundred entries
   sqlite.close();
 });
 
+test('the WAL is copied back into the file on a worker thread (bun:sqlite there too)', async () => {
+  const workerFile = join(dir, 'checkpoints.sqlite');
+  const sqlite = sqliteStorage(workerFile);
+  assert.ok(sqlite.db.query('PRAGMA wal_autocheckpoint').get().wal_autocheckpoint > 1000, 'the committing connection checkpoints only a log far longer');
+  const store = createStore({ initial: INITIAL, storage: sqlite.store('main') });
+  for (let i = 0; i < 30; i++) {
+    store.patch({ tasks: { [`t${i}`]: { id: `t${i}`, body: 'x'.repeat(100_000) } } });
+    store.flush();
+  }
+  const size = () => Bun.file(workerFile).size;
+  for (let waited = 0; size() < 2_000_000 && waited < 5000; waited += 50) await Bun.sleep(50);
+  assert.ok(size() >= 2_000_000, `the database file holds what the log did (${size()} bytes)`);
+  store.dispose();
+  sqlite.close();
+});
+
 test('an in-memory database works for tests and throwaway servers', () => {
   const sqlite = sqliteStorage(':memory:');
   const store = createStore({ initial: INITIAL, storage: sqlite.store('tmp') });

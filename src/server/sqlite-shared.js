@@ -48,11 +48,60 @@
 // `transaction(fn)` wrapper. sqlite-bun.js and sqlite-node.js supply them.
 
 import { hostname } from 'node:os';
+import { Worker } from 'node:worker_threads';
 import { randomId } from '../core/ids.js';
 import { assertDocument, newEpoch } from './storage.js';
 
 /** How far a store's log floor moves before the rows under it are deleted (see the header) */
 const PRUNE_EVERY = 100;
+
+/** How often (ms) the worker checkpoints (see checkpointer) */
+const CHECKPOINT_EVERY = 100;
+/** The log (in pages, some 40 MB) past which the main connection checkpoints after all: a worker fallen far behind */
+const BACKSTOP_PAGES = 10_000;
+/** SQLite's own: the log past which the committing connection checkpoints, with no worker */
+const INLINE_PAGES = 1000;
+/** How long (ms) close() waits for the worker to let the file go */
+const CLOSE_WAIT = 5000;
+
+/**
+ * Checkpoints on a worker thread with a connection of its own (see
+ * sqlite-checkpoint.js), and the main connection's own put off to a
+ * backstop: the thread that commits (a server's event loop) no longer waits
+ * on the disk for them. A worker that cannot start, or fails, hands them
+ * back to SQLite on the committing thread, as they were. `close()` has the
+ * worker close its connection first, and waits for it: a connection left
+ * open would keep the WAL, and on Windows the file
+ */
+function checkpointer({ file, driver, exec }) {
+  let running = true;
+  const inline = () => {
+    if (!running) return;
+    running = false;
+    try {
+      exec(`PRAGMA wal_autocheckpoint = ${INLINE_PAGES};`);
+    } catch { /* the file closed meanwhile */ }
+  };
+  const done = new SharedArrayBuffer(4);
+  let worker;
+  try {
+    worker = new Worker(new URL('./sqlite-checkpoint.js', import.meta.url), { workerData: { file, driver, every: CHECKPOINT_EVERY, done } });
+  } catch {
+    return { close() {} };
+  }
+  exec(`PRAGMA wal_autocheckpoint = ${BACKSTOP_PAGES};`);
+  worker.unref();
+  worker.on('error', inline);
+  worker.on('exit', inline);
+  return {
+    close() {
+      if (!running) return;
+      running = false;
+      worker.postMessage('close');
+      Atomics.wait(new Int32Array(done), 0, 0, CLOSE_WAIT);
+    }
+  };
+}
 
 const SCHEMA = `
   CREATE TABLE IF NOT EXISTS leaves (
@@ -111,12 +160,20 @@ function alive(pid) {
  * @param {(fn: Function) => Function} driver.transaction - wraps fn so a call runs in one transaction
  * @param {() => void} driver.close
  * @param {any} driver.db - the driver's database object, exposed as `db`
- * @param {{ file: string, wal: boolean, lease?: { ttl?: number } | false }} options
+ * @param {'bun'|'node'} [driver.driver] - which driver the checkpoint worker opens the file with
+ * @param {{ file: string, wal: boolean, lease?: { ttl?: number } | false, checkpoints?: 'worker'|'inline' }} options
  *   `lease`: how long (ms) a store's lease lasts without renewal (default
  *   30 s); false serves stores without leases (an in-memory database has
- *   no other process to guard against)
+ *   no other process to guard against). `checkpoints`: where the WAL is
+ *   copied back into the file, on a worker thread (the default, for a file
+ *   in WAL mode; see checkpointer) or, 'inline', by SQLite on the thread
+ *   that commits
  */
-export function sqliteStorageOn({ exec, prepare, transaction, close, db }, { file, wal, lease = {} }) {
+export function sqliteStorageOn({ exec, prepare, transaction, close, db, driver }, { file, wal, lease = {}, checkpoints = 'worker' }) {
+  if (checkpoints !== 'worker' && checkpoints !== 'inline') {
+    close();   // the driver opened the file already
+    throw new TypeError("checkpoints must be 'worker' or 'inline'");
+  }
   if (wal && file !== ':memory:') exec('PRAGMA journal_mode = WAL;');
   exec('PRAGMA synchronous = NORMAL;');
   // Wait out another connection's lock (a backup, an admin script) rather
@@ -126,6 +183,7 @@ export function sqliteStorageOn({ exec, prepare, transaction, close, db }, { fil
   // Files from before replicas had owners, or stores a schema, gain the column
   if (!prepare('PRAGMA table_info(replicas)').all().some(c => c.name === 'owner')) exec('ALTER TABLE replicas ADD COLUMN owner TEXT;');
   if (!prepare('PRAGMA table_info(stores)').all().some(c => c.name === 'schema')) exec('ALTER TABLE stores ADD COLUMN schema INTEGER;');
+  const background = wal && file !== ':memory:' && checkpoints === 'worker' && driver ? checkpointer({ file, driver, exec }) : null;
 
   const q = {
     upsert: prepare(`
@@ -364,7 +422,7 @@ export function sqliteStorageOn({ exec, prepare, transaction, close, db }, { fil
     },
     /** The underlying database object, for backups or ad-hoc queries */
     db,
-    /** Give up every lease this process holds and close the file */
+    /** Give up every lease this process holds, stop the checkpoint worker, and close the file */
     close() {
       clearInterval(renewer);
       if (leasing && held.size) {
@@ -373,6 +431,8 @@ export function sqliteStorageOn({ exec, prepare, transaction, close, db }, { fil
         } catch { /* they run out on their own */ }
       }
       held.clear();
+      // The worker's connection first: the last one to close checkpoints and removes the WAL
+      background?.close();
       close();
     }
   };

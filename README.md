@@ -393,7 +393,11 @@ Adapters:
   any number of stores, keyed by `(store, path)`, WAL mode, the delta log
   kept alongside. `sqlite.store(id)` gives a store its adapter;
   `sqlite.ids()`, `sqlite.remove(id)`, and the raw `sqlite.db` are there
-  for administration.
+  for administration. The write-ahead log is copied back into the file
+  (checkpointed) on a worker thread with a connection of its own, so the
+  thread that commits, the server's event loop, never waits on the disk
+  for it; `checkpoints: 'inline'` leaves that to SQLite on the committing
+  thread, as it was.
 - `sqliteStorage(file)` from `lazy-storage/server/sqlite-node` — the same
   adapter on `node:sqlite` (Node 22.13 and later); the two read each
   other's files.

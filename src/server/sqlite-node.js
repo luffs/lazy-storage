@@ -11,11 +11,12 @@ import { sqliteStorageOn } from './sqlite-shared.js';
 
 /**
  * @param {string} [file=':memory:'] - database file (created if missing)
- * @param {{ wal?: boolean, lease?: { ttl?: number } | false }} [options] -
- *   write-ahead logging (default on for files); `lease` as in
- *   sqlite-shared.js (one process per store)
+ * @param {{ wal?: boolean, lease?: { ttl?: number } | false, checkpoints?: 'worker' | 'inline' }} [options] -
+ *   write-ahead logging (default on for files); `lease` and `checkpoints`
+ *   as in sqlite-shared.js (one process per store; the WAL copied back on a
+ *   worker thread)
  */
-export function sqliteStorage(file = ':memory:', { wal = true, lease } = {}) {
+export function sqliteStorage(file = ':memory:', { wal = true, lease, checkpoints } = {}) {
   const db = new DatabaseSync(file);
   const transaction = fn => (...args) => {
     db.exec('BEGIN');
@@ -30,9 +31,10 @@ export function sqliteStorage(file = ':memory:', { wal = true, lease } = {}) {
   };
   return sqliteStorageOn({
     db,
+    driver: 'node',
     exec: sql => db.exec(sql),
     prepare: sql => db.prepare(sql),
     transaction,
     close: () => db.close()
-  }, { file, wal, lease });
+  }, { file, wal, lease, checkpoints });
 }

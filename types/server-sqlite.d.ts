@@ -39,6 +39,13 @@ export interface SqliteStorageOptions {
    * refused with code 'store-locked'. false serves stores without leases
    */
   lease?: { ttl?: number } | false;
+  /**
+   * Where the write-ahead log is copied back into the file: on a worker
+   * thread with a connection of its own ('worker', the default for a file in
+   * WAL mode), so the thread that commits never waits on the disk for it, or
+   * by SQLite on the thread that commits ('inline')
+   */
+  checkpoints?: 'worker' | 'inline';
 }
 
 /** One database file for any number of stores, one row per leaf, WAL mode, the delta log alongside */

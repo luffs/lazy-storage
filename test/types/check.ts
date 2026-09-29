@@ -284,6 +284,9 @@ async function bun() {
   return port;
 }
 const sqlite = sqliteStorage('data/state.sqlite');
+sqliteStorage('data/inline.sqlite', { checkpoints: 'inline' });
+// @ts-expect-error a worker thread or inline
+sqliteStorage('data/other.sqlite', { checkpoints: 'sometimes' });
 const adapter: ServerStorage = sqlite.store('team-1');
 sqlite.store('team-2').replace(exported);
 sqlite.backup('backups/state.sqlite');

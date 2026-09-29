@@ -164,6 +164,34 @@ test('a batch of changes leaves each row as the last of them left it, and is sto
   }
 });
 
+test('the WAL is copied back into the file on a worker thread, not by the thread that commits', { skip: !sqliteStorage }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'lazy-storage-node-sqlite-'));
+  try {
+    const file = join(dir, 'checkpoints.sqlite');
+    const sqlite = sqliteStorage(file);
+    const autocheckpoint = sqlite.db.prepare('PRAGMA wal_autocheckpoint').get().wal_autocheckpoint;
+    assert.ok(autocheckpoint > 1000, 'the committing connection checkpoints only a log far longer than SQLite would');
+    const store = createStore({ initial: INITIAL, storage: sqlite.store('main') });
+    // Some 3 MB: short of what would have the committing connection checkpoint either way
+    for (let i = 0; i < 30; i++) {
+      store.patch({ tasks: { [`t${i}`]: { id: `t${i}`, body: 'x'.repeat(100_000) } } });
+      store.flush();
+    }
+    const { statSync } = await import('node:fs');
+    for (let waited = 0; statSync(file).size < 2_000_000 && waited < 5000; waited += 50) await new Promise(r => setTimeout(r, 50));
+    assert.ok(statSync(file).size >= 2_000_000, `the database file holds what the log did (${statSync(file).size} bytes)`);
+    store.dispose();
+    sqlite.close();
+
+    const inline = sqliteStorage(file, { checkpoints: 'inline' });
+    assert.equal(inline.db.prepare('PRAGMA wal_autocheckpoint').get().wal_autocheckpoint, 1000, "'inline' leaves them to SQLite, as they were");
+    inline.close();
+    assert.throws(() => sqliteStorage(file, { checkpoints: 'sometimes' }), /checkpoints/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('a commit reads its lease, and writes it only when it runs low', { skip: !sqliteStorage }, () => {
   const dir = mkdtempSync(join(tmpdir(), 'lazy-storage-node-sqlite-'));
   try {
