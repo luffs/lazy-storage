@@ -975,21 +975,31 @@ gathered and presence every 250 ms.
 
 ### Spreading the load
 
-What a server spends on a store every client follows is a write to each
-socket for each change: `server.publish` fans a patch out without a send
-per socket from JavaScript, but the runtime still writes, and compresses
-past the threshold, once for each subscriber. Relays with a link take that
-off it: the server writes each change once a relay, and each relay once
-for each of its clients. Measured with `npm run bench:fanout` (4000
-clients of one store, the server publishing, one Windows machine, so read
-the proportions rather than the figures): a patch cost the server some
-50–80 ms of CPU with every client a socket of its own, some 4.6 ms through
-200 relays and some 0.5 ms through one; the server was busy at 10–20
-patches a second without relays and at 100–200 with 200 of them, and the
-median patch reached its clients in 11 ms through the 200 against
-40–80 ms without. A server or a relay that falls behind loses nothing:
-what was published meanwhile goes out together, a write a socket, a turn
-later.
+A server's work on a change is of two kinds. Its own: the gates, the
+merge and the commit, some 70 µs a write on a busy 4-core Linux server
+(see [Persistence](#persistence) for how commits are grouped). And a write
+to every socket that hears the change, some 13 µs each on the same server:
+`server.publish` fans a patch out without a send per socket from
+JavaScript, but the runtime still writes, and compresses past the
+threshold, once for each subscriber. The second grows with the clients,
+and all of it lands on the one core a store has: with 4000 clients on
+sockets of their own, one change costs that core some 50 ms. Relays with a
+link take it off the server: the server writes each change once a relay,
+and each relay once for each of its clients, on cores or machines of its
+own. A server or a relay that falls behind loses nothing: what was
+published meanwhile goes out together, a write a socket, a turn later.
+
+Measured with `npm run bench:fanout`, the server alone on that 4-core
+machine and the relays and clients on another on the same network: behind
+ten relays, one store on SQLite took 15 000 writes a second, each reaching
+every client at a p99 of some 50 ms, and delivered 18 000 with the
+server's core full. Each relay adds a write, and the change's bytes, to
+every change, so relays by the hundred (one at every site of a chain) meet
+the network before the core: with 200 relays and patches of some 300
+bytes, a gigabit link was full at some 2000 changes a second. On a single
+machine, relays on its other cores do the writing to clients while the
+server merges and stores: `examples/podman-caddy` is that layout, behind
+Caddy.
 
 A relay also takes the reconnect storm: a client's hello is answered from
 the relay's copy, a delta out of its log where that reaches back, and the
