@@ -61,6 +61,7 @@ test('a new store starts with every migration done; one added later runs alone',
   const store = createStore({ initial: INITIAL, storage: disk, migrations: [state => { renamed++; return renameTitle(state); }] });
   assert.equal(renamed, 0, 'initial is in the latest shape already');
   store.patch({ tasks: { a: { id: 'a', name: 'Milk' } } });
+  store.flush();   // stored at the end of the turn (see groupCommit), or now
   assert.equal(disk.load().schema, 1, 'the count is stored with the first commit');
   store.dispose();
 

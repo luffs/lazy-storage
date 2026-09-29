@@ -11,6 +11,19 @@
 // `initial` acts as the skeleton (the containers an app expects to exist)
 // and rows carry the data.
 //
+// Commits are grouped. What one turn of the event loop merged (the ops of
+// every socket that turn's poll delivered, the server's own patches, the
+// replicas hellos claimed) goes to storage as one commit at the end of the
+// turn, and what the store would have sent meanwhile (acks, patches,
+// answers, presence) is held back until that commit is done, then sent in
+// the order it was made. So a client never hears of a change the storage
+// does not have, and storage that writes whole pages (SQLite: a small op
+// touched six) writes each once a turn rather than once an op, which was
+// what held a busy store back. A store with nothing pending sends at once.
+// Creating a session, evicting, a snapshot over HTTP, an export, flush()
+// and dispose() commit what is pending first; `groupCommit: false`
+// commits each change as it is made.
+//
 // Client ops pass three gates before the merge sees them, in this order:
 // - the clock guard: an op stamped more than `maxSkew` ahead of the
 //   server's clock is refused (code 'clock-skew', with the server's time
@@ -103,6 +116,14 @@ const DAY = 24 * HOUR;
 
 /** The most ops one hello carries; the client sends the rest once it is answered */
 export const HELLO_OPS = 1000;
+
+/**
+ * The most changes one commit groups (see groupCommit): a turn that merges
+ * more (a burst, a hello's thousand ops) is stored this many at a time. By
+ * then a page the changes share is written once for a hundred or more of
+ * them, and what waits in memory for the commit stays small
+ */
+const GROUP_MAX = 256;
 
 /** A client op the store would not merge; `code` travels to the client */
 /** The `presence` option as the store uses it: null when off, else its hooks and limits with the defaults filled in */
@@ -206,6 +227,13 @@ const defaultPresenceKey = user =>
  *   list holds (code rolled back after a newer one migrated it) is refused
  *   with code 'schema-ahead', rather than written in the older shape
  * @param {Object} [options.storage] - a storage adapter (default: memory)
+ * @param {boolean} [options.groupCommit=true] - commit what one turn of the
+ *   event loop merged in one go at its end, holding back what the store
+ *   sends until then (see the header): `patch` and `apply` return before
+ *   their change is stored, and a commit that fails unloads the store and
+ *   reports to `onError` rather than throwing to them; `flush()` commits at
+ *   once, and throws. false commits every change as it is made, and a
+ *   failed commit throws from the call that made it
  * @param {boolean|Object} [options.presence=false] - whether sessions
  *   learn of each other. Off, nothing is broadcast, `presence()` and
  *   `peers()` are empty, and a share is refused with 'forbidden'. `true`
@@ -242,6 +270,7 @@ export function createStore({
   maxLeaves = 10_000,
   rateLimit = { burst: 500, perSecond: 100 },
   storage = memoryStorage(),
+  groupCommit = true,
   migrations = [],
   presence: presenceOption = false,   // `presence` below is the list
   onError = err => console.error('lazy-storage:', err),
@@ -274,6 +303,7 @@ export function createStore({
   }
   const clock = createClock('server', now);
   const sessions = new Set();
+  let madeSessions = 0;   // numbers sessions (and peers) as they join `sessions`, in its order (see broadcast)
   let serverSeq = replicas.get('server')?.seq ?? 0;
   let lastCompaction = -Infinity;
   // The last `deltaLog` accepted diffs, as { v, diff }; an adapter that
@@ -350,40 +380,121 @@ export function createStore({
     for (const s of sessions) if (s.follows) followers++;
     if (followers === 0) return;
     toJSON(message);  // encoded once, however many sessions there are
-    const bytes = encodedBytes(message);
-    tally(String(message.t), followers, followers * bytes);
-    // A session whose transport can fan out (Bun's topic publish) hears it
-    // through one publish, which reaches every
-    // such session at once; the rest are sent to one by one. A session that
-    // does not follow the store (a relay's client's peer, a write-only
+    tally(String(message.t), followers, followers * encodedBytes(message));
+    // Who hears it is who follows now and is still there when it goes: a
+    // session made later in the turn (numbered past `upTo`) is answered with
+    // a state that holds it already. A session whose transport can fan out
+    // (Bun's topic publish) hears it through one publish, which reaches
+    // every such session at once; the rest are sent to one by one. A session
+    // that does not follow the store (a relay's client's peer, a write-only
     // session: see session and peer below) hears none of it
-    let published = false;
-    for (const s of sessions) {
-      if (!s.follows) continue;
-      if (!s.publish) s.transportSend(message);
-      else if (!published) {
-        s.publish(message);
-        published = true;
+    const upTo = madeSessions;
+    later(() => {
+      let published = false;
+      for (const s of sessions) {
+        if (s.number > upTo) break;   // the set keeps the order sessions were made in
+        if (!s.follows) continue;
+        if (!s.publish) s.transportSend(message);
+        else if (!published) {
+          s.publish(message);
+          published = true;
+        }
       }
+    });
+  }
+
+  // Group commit (see the header): the changes merged since the last commit,
+  // each with the version it made, and what the store has to send (or tell)
+  // once they are stored, in the order it was made
+  let changes = [];
+  let effects = [];
+  let draining = false;      // effects running: what they set off queues behind them
+  let cancelCommit = null;   // cancels the scheduled commit; null when none is
+
+  /**
+   * Run `fn` now, or once what is pending is stored: whatever reaches a
+   * client or a transport goes through here, so none of it overtakes the
+   * commit of what it tells of, nor what was held back before it
+   */
+  function later(fn) {
+    if (changes.length || effects.length || draining) effects.push(fn);
+    else fn();
+  }
+
+  /**
+   * Every commit carries the version and epoch alongside its rows. With
+   * groupCommit it is stored at the end of the turn, with the rest of the
+   * turn's (see commitNow); without, at once, and a failure throws to the
+   * caller
+   */
+  function commit(change) {
+    changes.push({ ...change, version, epoch, schema });
+    if (groupCommit && changes.length < GROUP_MAX) return scheduleCommit();
+    if (!commitNow()) throw new RefusedError('unavailable', 'The store could not save the change and was unloaded');
+  }
+
+  /** Commit after this turn of the event loop, so what one poll of the sockets brought is stored together */
+  function scheduleCommit() {
+    if (cancelCommit) return;
+    if (typeof setImmediate === 'function') {
+      const timer = setImmediate(commitNow);
+      cancelCommit = () => clearImmediate(timer);
+    } else {
+      const timer = setTimeout(commitNow, 0);
+      cancelCommit = () => clearTimeout(timer);
     }
   }
 
   /**
-   * Every commit carries the version and epoch alongside its rows. A
-   * commit that fails (a full disk, a database locked past its timeout)
-   * leaves memory ahead of disk, with the change never broadcast: the
-   * store unloads itself rather than serve a state it cannot keep. Its
-   * sessions hear `unavailable` and say hello again, their unacknowledged
-   * ops with them, to a store a registry loads afresh from what is on disk
+   * Store what is pending, in one commit (an adapter's commitMany, else one
+   * commit a change), then send what waited for it. A commit that fails (a
+   * full disk, a database locked past its timeout) leaves memory ahead of
+   * disk, with nobody told of those changes: what they would have been told
+   * is dropped, and the store unloads itself rather than serve a state it
+   * cannot keep. Its sessions hear `unavailable` and say hello again, their
+   * unacknowledged ops with them, to a store a registry loads afresh from
+   * what is on disk. Returns false then
    */
-  function commit(change) {
-    try {
-      storage.commit({ ...change, version, epoch, schema });
-    } catch (err) {
-      onError(err);
-      self.dispose();
-      throw new RefusedError('unavailable', 'The store could not save the change and was unloaded');
+  function commitNow() {
+    cancelCommit?.();
+    cancelCommit = null;
+    if (changes.length) {
+      const batch = changes;
+      changes = [];
+      try {
+        if (typeof storage.commitMany === 'function') storage.commitMany(batch);
+        else for (const change of batch) storage.commit(change);
+      } catch (err) {
+        effects = [];
+        onError(err);
+        self.dispose();
+        return false;
+      }
     }
+    // A commit an effect set off (a session made in-process as a message
+    // arrived) stores its changes and leaves the sending to the drain it
+    // happened in, which has earlier messages to send first
+    if (draining) return true;
+    // What an effect sets off (a client that answers at once, in-process)
+    // queues behind the rest; a change it makes waits for the next commit
+    while (effects.length && !changes.length) {
+      const run = effects;
+      effects = [];
+      draining = true;
+      try {
+        for (const fn of run) {
+          try {
+            fn();
+          } catch (err) {
+            onError(err);
+          }
+        }
+      } finally {
+        draining = false;
+      }
+    }
+    if (changes.length) scheduleCommit();
+    return true;
   }
 
   // A session counts from its hello: that is when it has a replica id to
@@ -646,7 +757,9 @@ export function createStore({
     if (applied) broadcast({ t: 'patch', diff: applied, ts: op.ts, v: version });
     const lost = [...rejected, ...stripped];
     if (observers.op.size) {
-      notify('op', { replicaId: op.replicaId, seq: op.seq, user: session?.user, accepted: accepted !== null, rejected: lost.length, version, ms: performance.now() - started });
+      // Told once the op is stored, as its author is
+      const event = { replicaId: op.replicaId, seq: op.seq, user: session?.user, accepted: accepted !== null, rejected: lost.length, version, ms: performance.now() - started };
+      later(() => notify('op', event));
     }
     return { duplicate: false, accepted, rejected: lost, correction: lost.length ? correction(lost) : null };
   }
@@ -823,10 +936,29 @@ export function createStore({
    */
   function session({ send: transportSend, user, onEvict, broadcast: publish, httpSnapshot, relay = false } = {}) {
     if (typeof transportSend !== 'function') throw new TypeError('A session needs a send function');
-    /** Send to this session alone, counted (see `sent`) from the encoding the transport made */
-    const send = message => {
+    /**
+     * Send to this session alone, counted (see `sent`) from the encoding the
+     * transport made; behind what is pending (see later), and not at all if
+     * the session closed while it waited (its transport went)
+     */
+    const deliver = message => {
       transportSend(message);
       tally(String(message.t), 1, encodedBytes(message));
+    };
+    const send = message => {
+      if (!changes.length && !effects.length && !draining) return deliver(message);
+      effects.push(() => { if (sessions.has(s)) deliver(message); });
+    };
+    /**
+     * End the session with `message`: what is pending is stored and sent
+     * first, then the message, then the transport is told (onEvict), in that
+     * order even when an in-process transport set this off mid-send
+     */
+    const closeWith = message => {
+      if (!commitNow()) return;
+      s.close();
+      later(() => deliver(message));
+      later(() => s.onEvict?.());
     };
     const s = {
       send,
@@ -860,10 +992,7 @@ export function createStore({
               // Final for this store on this connection: the client's replica
               // is someone else's (a browser that signed in as another user
               // with the last one's storage, or a forgery); the app decides
-              send({ t: 'closed', code: claim.code, message: claim.message });
-              s.close();
-              s.onEvict?.();
-              return;
+              return closeWith({ t: 'closed', code: claim.code, message: claim.message });
             }
             if (claim) return send({ t: 'error', ...claim });
             // A hello costs a token: its ops ride free, so a reconnect after
@@ -877,10 +1006,7 @@ export function createStore({
             // relay lets its client say hello again, vouched for again first
             const writeOnly = !s.relay && (s.replicaId ? !s.listed : msg.follow === false);
             if (writeOnly && !servedByRelay(msg.replicaId)) {
-              send({ t: 'closed', code: 'unavailable', message: 'No relay serves this replica the store; say hello to it through one' });
-              s.close();
-              s.onEvict?.();
-              return;
+              return closeWith({ t: 'closed', code: 'unavailable', message: 'No relay serves this replica the store; say hello to it through one' });
             }
             s.heldUntil = null;
             if (!s.relay) {
@@ -1011,6 +1137,7 @@ export function createStore({
         if (observers.session.size) notify('session', { event: 'close', kind: s.kind, user, replicaId: s.replicaId, sessions: sessions.size });
       }
     };
+    s.number = ++madeSessions;
     sessions.add(s);
     // Presence goes out once the session has said hello (see presence above)
     if (observers.session.size) notify('session', { event: 'open', kind: s.kind, user, replicaId: null, sessions: sessions.size });
@@ -1071,6 +1198,7 @@ export function createStore({
     if (wait > 0) throw new RefusedError('rate-limited', `Too many hellos; try again in ${wait} ms`, { retryAfter: wait });
     takeReplica(s, replicaId);
     s.replicaId = s.speaksFor = replicaId;
+    s.number = ++madeSessions;
     sessions.add(s);
     if (observers.session.size) notify('session', { event: 'open', kind: 'peer', via, user, replicaId, sessions: sessions.size });
     noteChange(s, 'join');
@@ -1103,6 +1231,9 @@ export function createStore({
    * @param {string} [message]
    */
   function closeSessions(predicate, message = 'Your session was closed by the server') {
+    // What is pending is stored and sent first: a session hears its eviction
+    // after what it was sent before, and its transport is told at once
+    commitNow();
     let closed = 0;
     for (const s of [...sessions]) {
       if (s.relay || !predicate(s)) continue;
@@ -1197,6 +1328,11 @@ export function createStore({
     patchFrom,
     session: options => {
       alive('open a session on');
+      // What is pending goes out before the session exists, and before its
+      // transport subscribes to the store's broadcasts (see hub.js): a patch
+      // held back from before its hello would reach it ahead of its answer
+      commitNow();
+      alive('open a session on');
       return session(options);
     },
     /** A client a relay serves: listed, claimed, judged, but sent nothing (see peer above) */
@@ -1207,8 +1343,11 @@ export function createStore({
     /** True once dispose() ran (a registry's idle sweep does): the store takes no more writes or sessions */
     get disposed() { return disposed; },
     closeSessions,
-    /** The state as JSON, encoded once per change: what a snapshot carries, inline or over HTTP */
-    snapshotJSON: encodedState,
+    /** The state as JSON, encoded once per change: what a snapshot carries, inline or over HTTP (stored first) */
+    snapshotJSON: () => {
+      commitNow();
+      return encodedState();
+    },
     [TALLY]: tally,
     /** Distinct users with a live session */
     presence,
@@ -1249,9 +1388,12 @@ export function createStore({
      * `replace(doc)` makes a store of it that refuses what this one would:
      * a stale write, a write under a tombstone, another user's replica.
      * For backups, moving a store between adapters or servers, and looking
-     * at one
+     * at one. What is pending is stored first
      */
-    export: exportDocument,
+    export: () => {
+      commitNow();
+      return exportDocument();
+    },
     /**
      * Put `doc` (store.export(), or an adapter's load()) in this store's
      * storage in place of what it holds, while the server runs, and end
@@ -1268,8 +1410,20 @@ export function createStore({
       self.dispose();
       storage.replace(doc);
     },
-    flush: () => storage.flush(),
+    /**
+     * Store what is pending now, and send what waited for it, then have the
+     * adapter write out what it buffers. Throws 'unavailable' when the
+     * commit failed (the store has unloaded; see commitNow)
+     */
+    flush() {
+      if (!commitNow()) throw new RefusedError('unavailable', 'The store could not save the change and was unloaded');
+      storage.flush();
+    },
     dispose() {
+      if (disposed) return;
+      // What is pending is stored and sent before the sessions are told; a
+      // commit that fails unloads the store itself
+      commitNow();
       if (disposed) return;
       disposed = true;
       try {
@@ -1311,6 +1465,8 @@ export function createStore({
   // outlived; the first op after that runs compaction again on schedule
   compact();
   migrate();
+  // Stored before anyone is served, grouped or not
+  if (!commitNow()) throw new RefusedError('unavailable', 'The store could not save the change and was unloaded');
   return self;
 
   /**
@@ -1327,6 +1483,8 @@ export function createStore({
         schema = i + 1;
         if (Utils.isPlainObject(diff) && Object.keys(diff).length) patch(diff);
         else commit({ upserts: [], deletes: [] });
+        // Each one stored with its count before the next runs
+        if (!commitNow()) throw new RefusedError('unavailable', 'The store could not save the change and was unloaded');
       } catch (err) {
         schema = i;
         if (!disposed) self.dispose();

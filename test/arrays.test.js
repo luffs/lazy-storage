@@ -65,6 +65,7 @@ test('rows and the state cache hold undeclared arrays as leaves', async () => {
   const storage = memoryStorage();
   const store = createStore({ initial: INITIAL, storage });
   store.patch({ tasks: { t1: { id: 't1', tags: ['a'] } } });
+  store.flush();   // stored at the end of the turn (see groupCommit), or now
   assert.deepEqual(storage.load().rows.find(([k]) => k === '["tasks","t1","tags"]')[1].value, ['a']);
   store.dispose();
   const reopened = createStore({ initial: INITIAL, storage });

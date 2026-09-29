@@ -94,10 +94,13 @@ test('the delta log is persisted, pruned to the store\'s floor a hundred entries
   const two = createStore({ initial: INITIAL, storage: sqlite.store('logged'), deltaLog: 3 });
   assert.equal(two.stats().log, 3, 'the reopened store keeps its own last three, and can answer deltas from before the restart');
   two.patch({ tasks: { t5: { id: 't5' } } });
+  two.flush();   // stored at the end of the turn (see groupCommit), or now
   assert.deepEqual(logged(), [4, 5, 6], 'its first commit prunes to the floor');
   for (let i = 6; i < 105; i++) two.patch({ tasks: { [`t${i}`]: { id: `t${i}` } } });
+  two.flush();
   assert.deepEqual([logged()[0], logged().length], [4, 102], 'then not again until the floor has moved a hundred');
   two.patch({ tasks: { t105: { id: 't105' } } });
+  two.flush();
   assert.deepEqual(logged(), [104, 105, 106]);
   two.dispose();
   sqlite.remove('logged');
@@ -109,6 +112,7 @@ test('an in-memory database works for tests and throwaway servers', () => {
   const sqlite = sqliteStorage(':memory:');
   const store = createStore({ initial: INITIAL, storage: sqlite.store('tmp') });
   store.patch({ tasks: { a: { id: 'a' } } });
+  store.flush();   // stored at the end of the turn (see groupCommit), or now
   assert.deepEqual(sqlite.store('tmp').load().rows.map(([k]) => k), ['["tasks","a","id"]']);
   store.dispose();
   sqlite.close();
@@ -127,6 +131,7 @@ test('an exported store is taken in whole, and a backup of a live file serves at
   assert.throws(() => sqlite.store('copy').replace(original.export()), err => err.code === 'store-open');
 
   loaded.patch({ tasks: { c: { id: 'c' } } });
+  loaded.flush();   // a backup holds what is stored: this turn's patch is, at its end (see groupCommit), or now
   sqlite.backup(join(dir, 'export-backup.sqlite'));
   const restored = sqliteStorage(join(dir, 'export-backup.sqlite'));
   const fromBackup = createStore({ initial: INITIAL, storage: restored.store('copy') });

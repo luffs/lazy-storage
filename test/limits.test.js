@@ -128,15 +128,20 @@ test('the store refuses every live op after a rate-limit refusal until the next 
   const time = fakeTime(START);
   const store = createStore({ initial: INITIAL, now: time, rateLimit: { burst: 2, perSecond: 10 } });
   const sent = [];
+  // What the session heard, read as the turn ends (see groupCommit)
+  const last = () => {
+    store.flush();
+    return sent.at(-1);
+  };
   const s = store.session({ send: m => sent.push(m) });
   const op = (seq, id) => ({ t: 'op', op: { replicaId: 'r', seq, ts: [time(), 0, 'r'], diff: { tasks: { [id]: { id } } } } });
   s.receive({ t: 'hello', replicaId: 'r', ops: [] });
   s.receive(op(1, 'a'));
   s.receive(op(2, 'b'));
-  assert.equal(sent.at(-1).code, 'rate-limited');
+  assert.equal(last().code, 'rate-limited');
   time.advance(10_000);
   s.receive(op(3, 'c'));
-  assert.equal(sent.at(-1).code, 'rate-limited', 'held until the hello, though the bucket is full');
+  assert.equal(last().code, 'rate-limited', 'held until the hello, though the bucket is full');
   s.receive({ t: 'hello', replicaId: 'r', ops: [op(2, 'b').op, op(3, 'c').op] });
   assert.deepEqual(Object.keys(store.snapshot().tasks).sort(), ['a', 'b', 'c']);
   store.dispose();
@@ -147,12 +152,14 @@ test('the rate limit follows the user, not the replica id, and a hello carries a
   const store = createStore({ initial: INITIAL, now: time, rateLimit: { burst: 3, perSecond: 1 } });
   const sent = [];
   for (let i = 0; i < 4; i++) store.session({ send: m => sent.push(m), user: { id: 'mallory' } }).receive({ t: 'hello', replicaId: `fresh-${i}`, ops: [] });
+  store.flush();   // what the sessions heard, as the turn ends (see groupCommit)
   assert.equal(sent.at(-1).code, 'rate-limited', 'minting replica ids does not refill the bucket');
 
   const big = createStore({ initial: INITIAL, now: time, rateLimit: false });
   const out = [];
   const ops = Array.from({ length: 1200 }, (_, i) => ({ replicaId: 'r', seq: i + 1, ts: [time(), i, 'r'], diff: { tasks: { [`t${i}`]: { id: `t${i}` } } } }));
   big.session({ send: m => out.push(m) }).receive({ t: 'hello', replicaId: 'r', ops });
+  big.flush();
   assert.equal(out.at(-1).seq, 1000, 'the server merged the first 1000; the client sends the rest next');
   assert.equal(Object.keys(big.snapshot().tasks).length, 1000);
   store.dispose();

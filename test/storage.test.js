@@ -92,6 +92,7 @@ test('the store persists every accepted op as rows and rebuilds state as initial
   const r = two.apply({ replicaId: 'late', seq: 1, ts: T(1, 'late'), diff: { tasks: { a: { done: true } } } });
   assert.equal(r.accepted, null);
   assert.equal(two.version, 3, 'nothing accepted, version unchanged');
+  two.flush();   // stored at the end of the turn (see groupCommit), or now
   assert.equal(storage.load().replicas.late.seq, 1, 'the replica\'s progress is still recorded');
 });
 
@@ -114,6 +115,7 @@ test('a container written empty keeps its row beside its children, so a rebuild 
   store.patch({ tasks: { a: { score: { high: 9 } } } });         // ...that becomes a container: both rows exist, shallow-first rebuild wins
   const live = store.snapshot();
   assert.deepEqual(live, { tasks: { a: { id: 'a', assignees: {}, score: { high: 9 } } } });
+  store.flush();
   const rows = storage.load().rows.map(([k, r]) => `${k}${r.deleted ? ' (tombstone)' : ''}`);
   assert.ok(rows.includes('["tasks","a","assignees"]'), 'the empty-container row is kept');
   assert.ok(rows.includes('["tasks","a","assignees","u1"] (tombstone)'));

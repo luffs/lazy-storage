@@ -49,6 +49,7 @@ test('through a hub, every socket receives the same JSON for a broadcast, produc
   JSON.stringify = value => { if (value && typeof value === 'object' && value.t === 'patch') payloads++; return original(value); };
   try {
     store.patch({ tasks: { a: { id: 'a', title: 'to everyone' } } });
+    store.flush();   // sent once stored, at the end of the turn (see groupCommit): counted here too
   } finally {
     JSON.stringify = original;
   }

@@ -198,7 +198,6 @@ export function createRelayLink(resolveStore, {
       const store = grantsOn(id)[0]?.store;
       if (!store || store.disposed) return unused();
       pending.delete(id);
-      channel?.subscribe(id);
       const session = store.session({
         send: m => send(tagStore(m, id)),
         user: relay,
@@ -206,6 +205,8 @@ export function createRelayLink(resolveStore, {
         onEvict: () => dropShared(id),
         broadcast: channel ? m => channel.publish(id, tagStore(m, id)) : undefined
       });
+      // Once the session exists (see hub.js's open): no patch from before its hello
+      channel?.subscribe(id);
       shared.set(id, { session, store });
       for (const m of queued) session.receive(m);
     }, deny, current);

@@ -180,8 +180,12 @@ const store: Store<State> = createStore<State>({
   maxSkew: 60_000,
   retention: Infinity,
   rateLimit: { burst: 100, perSecond: 10 },
+  groupCommit: true,
   onError: err => console.error(err)
 });
+store.flush();
+// @ts-expect-error groupCommit is on or off
+createStore<State>({ groupCommit: 'turn' });
 store.patch({ tasks: { a: { id: 'a', title: 't', done: false } } });
 const session = store.session({ send: m => { if (m.t === 'ack') return m.seq; }, user: { id: 'u1' } });
 session.receive({ t: 'ping' });
@@ -213,6 +217,7 @@ store.restore(exported);
 const custom: ServerStorage = {
   load: () => null,
   commit: (change: StorageCommit) => { void change.log?.v; },
+  commitMany: (changes: StorageCommit[]) => { void changes.length; },
   flush() {}
 };
 void [jsonFileStorage('x.json', { debounce: 100 }), custom];

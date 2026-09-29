@@ -62,8 +62,6 @@ export function createHub(resolveStore, { send, user, authorizeId, authorize, ch
   }
 
   function open(id, store) {
-    // Subscribe before the session exists, so no broadcast can slip past on its way in
-    channel?.subscribe(id);
     const session = store.session({
       send: message => send(tagStore(message, id)),
       user,
@@ -73,6 +71,10 @@ export function createHub(resolveStore, { send, user, authorizeId, authorize, ch
       // Where a client that can fetch gets a large snapshot, when the transport serves the route
       httpSnapshot: httpSnapshots ? { url: httpSnapshots.url(id), threshold: httpSnapshots.threshold } : undefined
     });
+    // Subscribed once the session exists, before its first message: the
+    // store sent what it held back (see groupCommit) before making it, so the
+    // socket hears no patch from before its hello, and every one after
+    channel?.subscribe(id);
     sessions.set(id, session);
     storeOf.set(id, store);
     return session;

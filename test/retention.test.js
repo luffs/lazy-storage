@@ -20,15 +20,18 @@ test('compaction forgets tombstones and replicas older than the window, runs on 
   const session = store.session({ send: () => {} });
   session.receive({ t: 'op', op: { replicaId: 'idle', seq: 1, ts: [100 * DAY, 0, 'idle'], diff: { tasks: { b: { done: true } } } } });
   assert.deepEqual(store.replicas.sort(), ['idle', 'server']);
+  store.flush();   // stored at the end of the turn (see groupCommit), or now
   assert.equal(rows(storage)['["tasks","a"]'], 'tombstone');
 
   time.advance(20 * DAY);
   store.patch({ tasks: { c: { id: 'c' } } });
+  store.flush();
   assert.equal(rows(storage)['["tasks","a"]'], 'tombstone', 'day 120: the deletion from day 100 is inside the window');
   assert.deepEqual(store.replicas.sort(), ['idle', 'server']);
 
   time.advance(20 * DAY);
   store.patch({ tasks: { d: { id: 'd' } } });
+  store.flush();
   assert.equal(rows(storage)['["tasks","a"]'], undefined, 'day 140: forgotten with the next op');
   assert.deepEqual(store.replicas, ['server']);
   assert.deepEqual(Object.keys(storage.load().replicas), ['server'], 'and gone from storage');
@@ -116,6 +119,7 @@ test('retention: Infinity keeps every tombstone and replica and accepts ops of a
   time.advance(400 * DAY);
   store.patch({ tasks: { b: { id: 'b' } } });
   assert.deepEqual(store.compact(), { tombstones: 0, replicas: 0 });
+  store.flush();
   assert.equal(rows(storage)['["tasks","a"]'], 'tombstone');
 
   const net = createNetwork(store);

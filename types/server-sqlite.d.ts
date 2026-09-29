@@ -33,9 +33,10 @@ export interface SqliteStorageOptions {
   wal?: boolean;
   /**
    * One process per store: loading a store takes a lease on it in the file,
-   * renewed with every commit and on a timer, lapsing `ttl` ms (default
-   * 30 000) after its holder stops; another process is refused with code
-   * 'store-locked'. false serves stores without leases
+   * renewed on a timer (and by a commit that finds it with less than half
+   * its `ttl` left), lapsing `ttl` ms (default 30 000) after its holder
+   * stops; every commit checks it is still the holder's. Another process is
+   * refused with code 'store-locked'. false serves stores without leases
    */
   lease?: { ttl?: number } | false;
 }

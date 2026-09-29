@@ -20,6 +20,10 @@
 //   commit({ upserts: Array<[pathKey, row]>, deletes: pathKey[],
 //            replica?: { id, seq, seen, owner? }, forgetReplicas?: replicaId[], version, epoch, schema,
 //            log?: { v, diff }, logFloor?: number })
+//   commitMany(changes) -> void   optional: several commits, in order, as
+//                          one, all or none: a turn's changes (see the
+//                          store's groupCommit). Without it the store
+//                          commits them one by one
 //   flush() -> void   (write out anything buffered; called on dispose)
 //   replace(doc) -> void   optional: take a document as load() gives it
 //                          (or store.export() makes it) as the store's

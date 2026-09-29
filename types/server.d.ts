@@ -62,6 +62,12 @@ export interface ServerStorage {
   /** null means never seen: the store starts from `initial` */
   load(): StorageDocument | null;
   commit(change: StorageCommit): void;
+  /**
+   * Optional: several commits, in order, as one, all or none: what one turn
+   * of the event loop merged (see `groupCommit`). Without it the store
+   * commits them one by one
+   */
+  commitMany?(changes: StorageCommit[]): void;
   /** Write out anything buffered; called on dispose */
   flush(): void;
   /** Optional: the store let go of this storage (on dispose); a SQLite adapter gives up its lease */
@@ -181,6 +187,15 @@ export interface StoreOptions<S extends object = any> {
   rateLimit?: RateLimit | false;
   storage?: ServerStorage;
   /**
+   * Commit what one turn of the event loop merged in one go at its end,
+   * holding back what the store sends (acks, patches, answers) until then;
+   * default true. `patch` and `apply` return before their change is stored,
+   * and a commit that fails unloads the store and reports to `onError`;
+   * `flush()` commits at once, and throws. false commits every change as it
+   * is made, and a failed commit throws from the call that made it
+   */
+  groupCommit?: boolean;
+  /**
    * Changes to the state's shape, in order, each run once per store before
    * it serves anyone: handed a copy of the state, it returns a diff applied
    * as the server's own patch, or nothing. A new store starts with every
@@ -208,7 +223,7 @@ export interface OpEvent {
   /** Leaves the op lost */
   rejected: number;
   version: number;
-  /** Milliseconds from the op reaching the store to its patch handed to the sessions: the gates, the merge, the commit call, the broadcast (not an adapter's later asynchronous write) */
+  /** Milliseconds the store spent on the op: the gates and the merge (its commit, grouped with the turn's, and its broadcast come after; see `groupCommit`) */
   ms: number;
 }
 
@@ -316,6 +331,11 @@ export interface Store<S extends object = any> {
    * document under a new epoch. With a registry, use `stores.restore`
    */
   restore(doc: StorageDocument): void;
+  /**
+   * Store what is pending now (see `groupCommit`) and send what waited for
+   * it, then have the adapter write out what it buffers. Throws code
+   * 'unavailable' when the commit failed: the store has unloaded
+   */
   flush(): void;
   dispose(): void;
   /** True once dispose() ran (a registry's idle sweep does): patch, apply and session throw from then on */

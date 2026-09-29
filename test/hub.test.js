@@ -186,6 +186,7 @@ test('given a channel, a broadcast is one publish to the sockets subscribed per 
   assert.equal(a.filter(m => m.t === 'snapshot').length, 1, 'the snapshot went to its socket alone');
 
   store.patch({ tasks: { x: { id: 'x' } } });
+  store.flush();   // sent once stored: at the end of the turn (see groupCommit), or now
   assert.equal(published.length, 1, 'one publish, however many sockets');
   assert.equal(published[0].store, 's', 'tagged with the store');
   assert.equal(patches(a) + patches(b), 2, 'and both sockets got it');
@@ -194,6 +195,7 @@ test('given a channel, a broadcast is one publish to the sockets subscribed per 
   hubB.receive({ t: 'leave', store: 's' });
   assert.deepEqual([...topics.get('s')], [a], 'leave unsubscribes');
   store.patch({ tasks: { y: { id: 'y' } } });
+  store.flush();
   assert.equal(published.length, 2);
   assert.equal(patches(b), 1, 'the socket that left hears no more');
   assert.equal(patches(direct), 2);
@@ -201,6 +203,7 @@ test('given a channel, a broadcast is one publish to the sockets subscribed per 
   hubA.close();
   assert.deepEqual([...topics.get('s')], [], 'closing the connection unsubscribes');
   store.patch({ tasks: { z: { id: 'z' } } });
+  store.flush();
   assert.equal(published.length, 2, 'nothing to publish to once no session came through the channel');
   assert.equal(patches(direct), 3, 'the direct session still hears everything');
   store.dispose();
@@ -222,6 +225,7 @@ test('leaving and reopening a store while authorization is in flight opens one s
   verdicts[1](true);
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(store.stats().sessions, 1, 'the disowned attempt opened nothing');
+  store.flush();   // the answer follows the replica's claim once stored: at the end of the turn (see groupCommit), or now
   assert.equal(sent.filter(m => m.t === 'snapshot').length, 1);
   hub.close();
   assert.equal(store.stats().sessions, 0, 'and closing the hub leaves no session behind');
@@ -313,6 +317,7 @@ test('authorizeId runs before the store is loaded: a refusal loads nothing and r
   hub.receive({ t: 'share', store: 'team-1', data: null });   // queued while the verdicts are out
   await new Promise(resolve => setImmediate(resolve));
   assert.deepEqual(loaded, ['team-1']);
+  stores.get('team-1').flush();   // the answer follows the replica's claim once stored (see groupCommit)
   assert.equal(sent[0].t, 'snapshot', 'then authorize, then the session');
   assert.deepEqual(hub.stores, ['team-1']);
 

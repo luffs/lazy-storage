@@ -97,6 +97,7 @@ test('one process serves a store: a second is refused until the first lets it go
     const faults = [];
     const other = createStore({ initial: INITIAL, storage: second.store('team-2'), onError: err => faults.push(err.code) });
     other.patch({ tasks: { b: { id: 'b' } } });   // another store in the same file is served there
+    other.flush();                                 // and stored now, not at the end of the turn (see groupCommit)
 
     // Through a hub, a client of the second process hears 'unavailable', not a final refusal
     const sent = [];
@@ -112,8 +113,10 @@ test('one process serves a store: a second is refused until the first lets it go
     first.db.prepare('UPDATE leases SET holder = ?, host = ?, pid = ?, until = ? WHERE store = ?').run('dead', hostname(), 2 ** 22 + 12345, Date.now() + 60_000, 'team-2');
     const revived = createStore({ initial: INITIAL, storage: first.store('team-2') });
     assert.deepEqual(revived.state.tasks, { b: { id: 'b' } });
-    // ...and the process it was taken from can no longer write: its store unloads instead
-    assert.throws(() => other.patch({ tasks: { late: { id: 'late' } } }), err => err.code === 'unavailable');
+    // ...and the process it was taken from can no longer write: its store unloads instead, when
+    // the change is stored (at the end of the turn, see groupCommit, or at flush(), which throws)
+    other.patch({ tasks: { late: { id: 'late' } } });
+    assert.throws(() => other.flush(), err => err.code === 'unavailable');
     assert.equal(other.disposed, true);
     assert.deepEqual(faults, ['lease-lost'], 'reported as the fault it is');
     assert.equal(revived.state.tasks.late, undefined);
@@ -141,11 +144,14 @@ test('a commit reads its lease, and writes it only when it runs low', { skip: !s
     const fresh = Date.now() + ttl - 60_000;
     setUntil(fresh);
     store.patch({ tasks: { a: { id: 'a' } } });
+    store.flush();
     store.patch({ tasks: { b: { id: 'b' } } });
+    store.flush();
     assert.equal(until(), fresh, 'a lease with more than half its time left is only read');
 
     setUntil(Date.now() + ttl / 4);   // the timer fell behind
     store.patch({ tasks: { c: { id: 'c' } } });
+    store.flush();
     assert.ok(until() > Date.now() + ttl - 60_000, 'one running low is renewed with the commit');
     store.dispose();
     sqlite.close();

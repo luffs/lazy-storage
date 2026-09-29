@@ -91,6 +91,7 @@ test('shared data must be JSON within maxShare; a refusal is an error on the sha
   const raw = store.session({ send: m => received.push(m), user: { id: 'u3' } });
   raw.receive({ t: 'hello', replicaId: 'raw', ops: [] });
   raw.receive({ t: 'share', data: () => {} });
+  store.flush();   // what it heard, as the turn ends (see groupCommit)
   assert.deepEqual(received.filter(m => m.t === 'error').map(m => m.code), ['invalid']);
   raw.close();
   assert.throws(() => createStore({ initial: INITIAL, presence: { maxShare: 0 } }), /maxShare/);
@@ -135,6 +136,7 @@ function observer(store, replicaId = 'obs') {
   const messages = [];
   const session = store.session({ send: m => { if (m.t === 'presence') messages.push(m); }, user: { id: replicaId } });
   session.receive({ t: 'hello', replicaId, ops: [] });
+  store.flush();   // the answer and the list follow its replica's claim once stored: at the end of the turn (see groupCommit), or now
   assert.ok(Array.isArray(messages[0]?.peers), 'the whole list comes first');
   let start = 1;
   return {

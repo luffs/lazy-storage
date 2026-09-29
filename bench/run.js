@@ -46,6 +46,7 @@ function seeded(n, options = {}) {
   const tasks = {};
   for (const id of all) tasks[id] = { id, title: `task ${id}`, done: false, n: 1 };
   store.patch({ tasks, order: all });
+  store.flush();   // the seed stored before the timing starts, not with the first case's commit
   return { store, ids: all, clock: createClock('bench'), seq: 0, dispose: () => store.dispose() };
 }
 
@@ -56,6 +57,7 @@ bench('merge: one-leaf op into a 10k-task store', {
   iterations: 5000,
   run: (c, n) => {
     for (let i = 0; i < n; i++) c.store.apply({ replicaId: 'bench', seq: ++c.seq, ts: c.clock.now(), diff: { tasks: { [c.ids[i % c.ids.length]]: { title: `edit ${i}` } } } });
+    c.store.flush();   // the commit (grouped: see the store's groupCommit) and what waited for it, timed too
   }
 });
 
@@ -66,6 +68,7 @@ bench('merge: ten-leaf record add', {
     for (let i = 0; i < n; i++) {
       c.store.apply({ replicaId: 'bench', seq: ++c.seq, ts: c.clock.now(), diff: { tasks: { [`new${i}`]: { id: `new${i}`, title: 'x', done: false, a: 1, b: 2, c: 3, d: 4, e: 5, f: 6, g: 7 } } } });
     }
+    c.store.flush();
   }
 });
 
@@ -74,6 +77,7 @@ bench('merge: register write, 1000 ids', {
   iterations: 2000,
   run: (c, n) => {
     for (let i = 0; i < n; i++) c.store.apply({ replicaId: 'bench', seq: ++c.seq, ts: c.clock.now(), diff: { order: i % 2 ? c.ids : [...c.ids].reverse() } });
+    c.store.flush();
   }
 });
 
@@ -86,6 +90,7 @@ bench('session: one-leaf op through the gates (read-only paths, validate, skew, 
   iterations: 5000,
   run: (c, n) => {
     for (let i = 0; i < n; i++) c.session.receive({ t: 'op', op: { replicaId: 'bench', seq: ++c.seq, ts: c.clock.now(), diff: { tasks: { [c.ids[i % c.ids.length]]: { title: `edit ${i}` } } } } });
+    c.store.flush();
   }
 });
 
@@ -102,6 +107,7 @@ for (const sockets of [100, 1000]) {
     iterations: 200,
     run: (c, n) => {
       for (let i = 0; i < n; i++) c.store.patch({ tasks: { [c.ids[i % c.ids.length]]: { title: `edit ${i}` } } });
+      c.store.flush();
     }
   });
 }
@@ -179,6 +185,7 @@ bench('hello: answered with a snapshot after an op, 10k-task store (encoded)', {
       c.store.patch({ tasks: { [c.ids[i]]: { title: `edit ${i}` } } });   // the cached encoding is stale
       c.session.receive({ t: 'hello', replicaId: `r${i}`, ops: [] });
     }
+    c.store.flush();
   }
 });
 

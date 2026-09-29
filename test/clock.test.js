@@ -45,6 +45,7 @@ test('an op stamped an hour ahead is refused, the client adopts the server time,
 
   // The server's own clock was never dragged forward by the refused stamp
   store.patch({ marker: 1 });
+  store.flush();   // stored at the end of the turn (see groupCommit), or now
   assert.ok(rowTs(storage, '["marker"]')[0] < START + MINUTE);
 });
 
@@ -79,6 +80,7 @@ test('the refusal names the skew and carries the server time and the refused sta
   const session = store.session({ send: m => { if (m.t !== 'presence' && m.t !== 'patch') sent.push(m); } });
   session.receive({ t: 'op', op: { replicaId: 'r', seq: 1, ts: [START + 3 * MINUTE, 0, 'r'], diff: { tasks: { a: { id: 'a' } } } } });
   session.receive({ t: 'op', op: { replicaId: 'r', seq: 2, ts: [START + MINUTE, 0, 'r'], diff: { tasks: { b: { id: 'b' } } } } });
+  store.flush();   // the ack waits for the op to be stored: at the end of the turn (see groupCommit), or now
   assert.deepEqual(sent[0], {
     t: 'error', seq: 1, code: 'clock-skew', message: "The op is stamped 180 s ahead of the server's clock", now: START, ts: [START + 3 * MINUTE, 0, 'r']
   });

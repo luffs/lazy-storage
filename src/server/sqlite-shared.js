@@ -198,7 +198,8 @@ export function sqliteStorageOn({ exec, prepare, transaction, close, db }, { fil
     if (typeof renewer?.unref === 'function') renewer.unref();
   }
 
-  const commit = transaction((id, change, prune) => {
+  /** One change's rows, inside a transaction (see commit and commitMany) */
+  function commitRows(id, change, prune) {
     // The version first: every commit writes it, and that first write takes
     // the file's write lock, so the lease read below is the latest
     q.setVersion.run(id, change.version, change.epoch, Number.isInteger(change.schema) ? change.schema : null);
@@ -222,6 +223,12 @@ export function sqliteStorageOn({ exec, prepare, transaction, close, db }, { fil
     for (const replica of change.forgetReplicas ?? []) q.forgetReplica.run(id, replica);
     if (change.log) q.putLog.run(id, change.log.v, JSON.stringify(change.log.diff));
     if (prune) q.pruneLog.run(id, change.logFloor);
+  }
+  const commit = transaction(commitRows);
+  // A store's changes of one turn (see the store's groupCommit), in one
+  // transaction: a page they share is written once
+  const commitMany = transaction((id, list) => {
+    for (const [change, prune] of list) commitRows(id, change, prune);
   });
 
   const replace = transaction((id, doc) => {
@@ -274,6 +281,17 @@ export function sqliteStorageOn({ exec, prepare, transaction, close, db }, { fil
           const prune = Number.isInteger(change.logFloor) && (pruned === null || change.logFloor - pruned >= PRUNE_EVERY);
           commit(id, change, prune);
           if (prune) pruned = change.logFloor;
+        },
+        /** Several changes, in order, in one transaction: all of them or none */
+        commitMany(changes) {
+          let floor = pruned;
+          const list = changes.map(change => {
+            const prune = Number.isInteger(change.logFloor) && (floor === null || change.logFloor - floor >= PRUNE_EVERY);
+            if (prune) floor = change.logFloor;
+            return [change, prune];
+          });
+          commitMany(id, list);
+          pruned = floor;
         },
         flush() {},
         /**

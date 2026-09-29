@@ -79,6 +79,7 @@ test('SQLite takes a document in one transaction, never under a live store, and 
     assert.throws(() => elsewhere.store('team-1').replace(doc), err => err.code === 'store-locked', 'nor one another process serves');
 
     loaded.patch({ tasks: { c: { id: 'c', title: 'after the copy' } } });
+    loaded.flush();   // a backup holds what is stored: this turn's patch is, at its end (see groupCommit), or now
     const backupFile = join(dir, 'backup.sqlite');
     sqlite.backup(backupFile);                 // while the store is live
     const restored = sqliteStorage(backupFile);

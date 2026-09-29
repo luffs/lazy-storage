@@ -358,15 +358,34 @@ has already seen.
 
 A store persists as **rows, one per leaf path**: a live row holds the
 value and the timestamp that won it, a tombstone holds the timestamp only.
-Every accepted op commits exactly the rows it won and the entries it
-dropped, inside one transaction, so the write cost of an edit is a few
-rows rather than the state. On load the state is `initial` with the rows
+Every accepted op writes exactly the rows it won and the entries it
+dropped, so the write cost of an edit is a few rows rather than the
+state, and what one turn of the event loop accepted is committed in one
+transaction (below). On load the state is `initial` with the rows
 applied on top: `initial` is the skeleton an app expects to exist (its
 top-level containers), the rows carry the data, and a container added to
 `initial` later simply appears. A client may empty one of those
 containers but not delete it (refused with `forbidden`), since its
 tombstone would refuse every write under it for the retention window;
 the server's own `patch` may.
+
+**Group commit.** A store commits what one turn of the event loop merged
+together, at the end of the turn: the ops every socket brought in that
+poll, the server's own patches, the replicas hellos claimed. What it
+would have sent meanwhile (acks, patches, the answers to hellos,
+presence) waits for that commit and then goes out in the order it was
+made, so no client hears of a change the storage does not have. SQLite
+writes whole 4 KB pages, and a commit touches several however small the
+op; a busy store's ops share them, a page written once for the turn, and
+the disk stops being what holds the store back. A store with nothing
+pending sends at once, so a quiet one answers as it always did.
+`patch()` and `apply()` return before their change is stored:
+`store.flush()` commits at once (and throws `unavailable` when the
+commit failed), and so do creating a session, an eviction, a snapshot
+over HTTP, `export()` and `dispose()`. `groupCommit: false` commits every
+change as it is made. A backup holds what is stored: a change from the
+turn it runs in is not in it yet, and nothing acknowledged is missing
+from it.
 
 Adapters:
 
@@ -387,8 +406,9 @@ One process serves a store at a time. Two processes on one SQLite file,
 a deploy whose old and new process overlap or a server started twice,
 would each load the same store, commit versions that collide, and keep
 their clients in states that never meet again. So the SQLite adapters
-take a **lease** on a store when it loads: a row in the file, renewed
-with every commit and on a timer, given up when the store is disposed
+take a **lease** on a store when it loads: a row in the file, renewed on
+a timer (a commit checks it still holds it, and renews it only when it
+runs low), given up when the store is disposed
 (a registry's release, a graceful shutdown) or the file is closed. A
 process that finds a store leased elsewhere cannot load it (code
 `store-locked`); a hub tells the client `unavailable`, and the client
@@ -401,16 +421,19 @@ Stores are leased one by one: processes may share a file on purpose by
 serving different stores. `lease: false` turns it off.
 
 A custom adapter implements `load()`, `commit(change)`, and `flush()`,
-and optionally `close()` (the store let go of it) and `replace(doc)`;
-`change` carries the rows an op won and dropped, the replica's progress,
-the version and epoch, and optionally the accepted diff as a `log` entry
-with the `logFloor` below which the store no longer needs entries. See
-the header of `src/server/storage.js` for the exact shapes. A `commit`
-that throws unloads the store (the error goes to `onError`): memory
-would otherwise be ahead of disk. Its sessions are told `unavailable`
-and say hello again with their unacknowledged ops, and a registry loads
-the store afresh from what is on disk. The SQLite adapters wait up to
-five seconds for another connection's lock before a commit fails.
+and optionally `commitMany(changes)` (a turn's changes in one
+transaction, all or none; without it the store commits them one by one),
+`close()` (the store let go of it) and `replace(doc)`; `change` carries
+the rows an op won and dropped, the replica's progress, the version and
+epoch, and optionally the accepted diff as a `log` entry with the
+`logFloor` below which the store no longer needs entries. See the header
+of `src/server/storage.js` for the exact shapes. A commit that throws
+unloads the store (the error goes to `onError`): memory would otherwise
+be ahead of disk. Nothing it held was sent: its sessions are told
+`unavailable` and say hello again with their unacknowledged ops, and a
+registry loads the store afresh from what is on disk. The SQLite
+adapters wait up to five seconds for another connection's lock before a
+commit fails.
 
 Two things would otherwise grow without bound: tombstones, and the
 progress kept per replica (every browser tab that ever connected). A store
@@ -1335,11 +1358,10 @@ each write (which also resets its idle clock), or keep the stores a
 server writes out of the registry.
 
 **Watching a store.** `store.observe('op' | 'refused' | 'session', fn)`
-reports every merged op (`{ replicaId, seq, user, accepted, rejected,
-version, ms }`, `ms` the time from the op reaching the store to its patch
-handed to the sessions: the gates, the merge, the call that commits it
-to storage, the broadcast; an adapter that writes asynchronously later
-does so outside it),
+reports every merged op once it is stored (`{ replicaId, seq, user,
+accepted, rejected, version, ms }`, `ms` the time the store spent on it:
+the gates and the merge; its commit, grouped with the turn's, and its
+broadcast come after),
 every client op turned away (`{ replicaId, seq, user, code,
 message }`), and sessions opening and closing, for logs, audits, and
 metrics; `store.stats()` counts version, sessions, replicas, rows,
@@ -1506,14 +1528,14 @@ runs on the synced state and shows in the array view like any other change.
 
 **Server** (`lazy-storage/server`)
 
-- `createStore({ initial, registers, readOnly, validate, maxSkew, retention, compactEvery, deltaLog, maxLeaves, rateLimit, storage, migrations, presence, onError, now })` — `migrations` see [Migrations](#migrations); — `presence` is `false` (default), `true`, or `{ key, user, validate, every, maxShare }`; `store.epoch` — this life of the storage
+- `createStore({ initial, registers, readOnly, validate, maxSkew, retention, compactEvery, deltaLog, maxLeaves, rateLimit, storage, groupCommit, migrations, presence, onError, now })` — `groupCommit` (default true) see [Persistence](#persistence); `migrations` see [Migrations](#migrations); — `presence` is `false` (default), `true`, or `{ key, user, validate, every, maxShare }`; `store.epoch` — this life of the storage
 - `store.observe(event, fn)` → unsubscribe — `'op'`, `'refused'`, `'session'`; `store.stats()` → `{ version, epoch, schema, sessions, replicas, rows, tombstones, log }`
 - `store.session({ send, user, onEvict, broadcast, httpSnapshot })` → `{ receive(message), close(), user, replicaId }` — one per connection, transport-agnostic; `broadcast` is a transport's fan-out to every session at once, `httpSnapshot` `{ url, threshold }` where a client that can fetch gets a large snapshot
 - `store.snapshotJSON()` — the state as JSON, encoded once per change; `snapshotResponse(store, request)` — the snapshot route's Response (`{ v, epoch, state }`, brotli or gzip as accepted, an ETag and 304s), for a server of your own
 - `store.closeSessions(predicate, message)` — evict sessions; `store.presence()` — distinct users with a live session; `store.peers()` — every live session as `{ replicaId, user, data }`
 - `store.patch(diff)` — a server-side change, timestamped and broadcast, never held back by a tombstone; `store.patchFrom(diff, state)` — a lazy-watch batch from state kept elsewhere, its array fragments replaced with the whole arrays read from `state` (see [Serving state the server owns](#serving-state-the-server-owns)); `store.apply(op)` — a trusted op, gates skipped
 - `store.on(listener)`, `store.snapshot()`, `store.state`, `store.version`, `store.replicas`
-- `store.compact()` → `{ tombstones, replicas }` removed; `store.export()` → the store as a JSON document, `store.restore(doc)` puts one in its storage and ends the store (see [Backups](#backups-restores-and-moving-a-store)); `store.flush()`, `store.dispose()`
+- `store.compact()` → `{ tombstones, replicas }` removed; `store.export()` → the store as a JSON document, `store.restore(doc)` puts one in its storage and ends the store (see [Backups](#backups-restores-and-moving-a-store)); `store.flush()` stores what is pending now and sends what waited for it (throws `unavailable` when the commit failed), `store.dispose()`
 - `memoryStorage()`, `jsonFileStorage(path, { debounce, onError })` — `onError` hears a debounced write that failed, which is tried again a second later
 - `createStores(factory, { idle, sweepEvery, now })` → `get(id)`, `has(id)`, `ids()`, `stats()` — the live stores' stats rolled up: `{ stores, idle, sessions, replicas, rows, tombstones, log }` — `release(id)`, `restore(id, doc)`, `sweep()`, `dispose()`; `isStoreId(id)`
 - `createHub(resolveStore, { send, user, authorizeId, authorize, channel, httpSnapshots, onError })` → `{ receive(message), close(), revalidate(filter), stores, user }` — the server side of a multiplexed connection, session-shaped; `channel` is a transport's topic fan-out, `httpSnapshots` `{ url(id), threshold }` its snapshot route

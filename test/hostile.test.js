@@ -7,12 +7,19 @@ import { createStore, memoryStorage } from '../src/server/index.js';
 import { leaves, rebuild, ModelError } from '../src/core/model.js';
 import { registerSet, setAt } from '../src/core/paths.js';
 
-/** A raw session on the store, speaking the protocol by hand */
+/**
+ * A raw session on the store, speaking the protocol by hand. What it heard
+ * is read as the turn ends (see groupCommit): the store is flushed first
+ */
 function rawSession(store, replicaId = 'r1', user = { id: 'u' }) {
   const sent = [];
   const session = store.session({ send: m => sent.push(m), user });
   session.receive({ t: 'hello', replicaId, ops: [] });
-  return { session, sent, last: () => sent.at(-1) };
+  const heard = () => {
+    store.flush();
+    return sent;
+  };
+  return { session, heard, last: () => heard().at(-1) };
 }
 
 test('a reserved name in an op is refused and never reaches Object.prototype', () => {
@@ -66,9 +73,9 @@ test('a session speaks for one replica: another id, the server\'s, or a live use
   const victim = rawSession(store, 'victim', { id: 'ann' });
   const thief = rawSession(store, 'victim', { id: 'mallory' });
   assert.deepEqual([thief.last().t, thief.last().code], ['closed', 'replica-taken']);
-  const heard = thief.sent.length;
+  const heard = thief.heard().length;
   thief.session.receive({ t: 'op', op: { replicaId: 'victim', seq: 1e12, ts: ts('victim'), diff: {} } });
-  assert.equal(thief.sent.length, heard, 'the refused session hears nothing more');
+  assert.equal(thief.heard().length, heard, 'the refused session hears nothing more');
   const other = rawSession(store, 'm2', { id: 'mallory' });
   other.session.receive({ t: 'op', op: { replicaId: 'victim', seq: 1e12, ts: ts('victim'), diff: {} } });
   assert.equal(other.last().code, 'forbidden', 'nor through another session of its own');

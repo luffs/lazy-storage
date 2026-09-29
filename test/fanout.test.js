@@ -504,6 +504,7 @@ test('the store: a write-only session is only for a replica a relay serves; a re
   assert.deepEqual(store.presence(), [{ id: 'u1' }], 'nor is it listed');
 
   writer.receive({ t: 'op', op: { replicaId: 'r1', seq: 1, ts: [Date.now(), 0, 'r1'], diff: { tasks: { w: { id: 'w' } } } } });
+  store.flush();   // the ack and the patch follow the op once stored: at the end of the turn (see groupCommit), or now
   const ack = write.find(m => m.t === 'ack');
   assert.equal(ack.v, store.version, 'the ack carries the version');
   assert.ok(relaySent.some(m => m.t === 'patch'), 'the relay hears the patch');
