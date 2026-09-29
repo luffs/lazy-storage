@@ -174,16 +174,29 @@ export function rollUpSockets(sockets, { cutOff, disconnected, expired, revoked 
 }
 
 /**
+ * Marks a message with a lazy property (a getter: a snapshot's `state`,
+ * decoded only when something reads it), for tagStore to copy as the getter
+ * it is; set, not enumerable, by whoever defines one
+ */
+export const LAZY = Symbol('lazy-storage.lazy');
+
+/**
  * `{ ...message, store }`, keeping the payload's JSON: the payload is
  * encoded (once, and remembered on it, where the store counts its size)
- * and the id spliced in as the first key. A lazy property of the message
- * (a snapshot's `state`, decoded only when something reads it) is copied
- * as the getter it is, not invoked.
+ * and the id spliced in as the first key. A message marked LAZY has its
+ * properties copied as they are defined, its getter as a getter, not
+ * invoked; the rest (every patch and ack) are spread, which copying each
+ * property's descriptor cost some 8% of a busy server's time
  */
 export function tagStore(message, store) {
-  const tagged = {};
-  for (const key of Object.keys(message)) Object.defineProperty(tagged, key, Object.getOwnPropertyDescriptor(message, key));
-  tagged.store = store;
+  let tagged;
+  if (message[LAZY]) {
+    tagged = {};
+    for (const key of Object.keys(message)) Object.defineProperty(tagged, key, Object.getOwnPropertyDescriptor(message, key));
+    tagged.store = store;
+  } else {
+    tagged = { ...message, store };
+  }
   if (Object.hasOwn(message, 'store')) return tagged;
   const inner = toJSON(message);
   if (inner.length > 2) {

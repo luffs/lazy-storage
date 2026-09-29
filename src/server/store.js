@@ -105,7 +105,7 @@ import { leaves, assertModel, rebuild, expandRegisters, replacingRegisters } fro
 import { mergeOp, compactTombstones } from '../core/merge.js';
 import { ClockMap } from '../core/clocks.js';
 import { memoryStorage, assertDocument } from './storage.js';
-import { toJSON, presetJSON, encodedBytes, utf8Bytes, SNAPSHOT_THRESHOLD, TALLY } from './wire.js';
+import { toJSON, presetJSON, encodedBytes, utf8Bytes, SNAPSHOT_THRESHOLD, TALLY, LAZY } from './wire.js';
 import { randomId } from '../core/ids.js';
 
 const { Utils } = LazyWatch;
@@ -813,6 +813,7 @@ export function createStore({
     if (route && json.length >= route.threshold) return { ...message, fetch: route.url };
     let decoded;
     Object.defineProperty(message, 'state', { enumerable: true, configurable: true, get: () => (decoded ??= JSON.parse(json)) });
+    Object.defineProperty(message, LAZY, { value: true });   // for tagStore: the getter is copied, not invoked
     const head = '{"t":"snapshot","state":';
     const tail = `,"ts":${JSON.stringify(ts)},"seq":${seq},"registers":${JSON.stringify(registerPatterns)},"v":${version},"epoch":${JSON.stringify(epoch)}${lost.length ? `,"lost":${JSON.stringify(lost)}` : ''}}`;
     // Its size for the count (see `sent`): the state's, measured once per
