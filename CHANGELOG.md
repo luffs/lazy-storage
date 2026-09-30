@@ -4,6 +4,15 @@ All notable changes to lazy-storage are documented here. The format follows Keep
 
 ## [Unreleased]
 
+## [0.23.2] - 2026-09-30
+
+The README is now a pitch and a quickstart, and the manual it was is a
+page per topic in `docs/`, which ships in the package: what npm and
+GitHub show first is what lazy-storage is, a client and a server, what
+you get and when to use something else, rather than 1900 lines of
+reference. The code is that of 0.23.1; there is nothing to check on
+upgrade.
+
 ### Changed
 
 - **The README is a pitch and a quickstart, and the reference moved to `docs/`.** At 1900 lines the README was the whole manual, and someone meeting the library had to find the quickstart in it. It now says what lazy-storage is, shows a client and a server, lists what you get, how fast it is and when to use something else, and points to the reference: a page per topic in `docs/` (the model, offline, multiple stores, the server, authentication and presence, relays, limits, the API, the wire protocol, and examples, benchmarks and tests), with the text as it was and the links between sections now links between pages. `docs/` ships in the npm package. Earlier entries below that name a section of the README mean the page that now holds it
