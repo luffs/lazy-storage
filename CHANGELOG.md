@@ -4,6 +4,10 @@ All notable changes to lazy-storage are documented here. The format follows Keep
 
 ## [Unreleased]
 
+### Changed
+
+- **The README is a pitch and a quickstart, and the reference moved to `docs/`.** At 1900 lines the README was the whole manual, and someone meeting the library had to find the quickstart in it. It now says what lazy-storage is, shows a client and a server, lists what you get, how fast it is and when to use something else, and points to the reference: a page per topic in `docs/` (the model, offline, multiple stores, the server, authentication and presence, relays, limits, the API, the wire protocol, and examples, benchmarks and tests), with the text as it was and the links between sections now links between pages. `docs/` ships in the npm package. Earlier entries below that name a section of the README mean the page that now holds it
+
 ## [0.23.1] - 2026-09-29
 
 A reconnect storm through fan-out relays no longer costs the server the

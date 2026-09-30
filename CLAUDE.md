@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-lazy-storage is a self-hosted realtime state store with offline sync, built on [lazy-watch](https://github.com/luffs/lazy-watch). A server holds each store's state tree and merges ops into it last-writer-wins per leaf path; clients keep a synced, offline-capable mirror in a LazyWatch proxy, turn every local batch into an op, and keep an outbox that survives reconnects and reloads. Plain ES modules, no build step, one runtime dependency (lazy-watch). The README is the user-facing reference: the model, lists, conflicts, offline, persistence, multiple stores, auth and presence, the API, and the wire protocol.
+lazy-storage is a self-hosted realtime state store with offline sync, built on [lazy-watch](https://github.com/luffs/lazy-watch). A server holds each store's state tree and merges ops into it last-writer-wins per leaf path; clients keep a synced, offline-capable mirror in a LazyWatch proxy, turn every local batch into an op, and keep an outbox that survives reconnects and reloads. Plain ES modules, no build step, one runtime dependency (lazy-watch). The README is the pitch and the quickstart; `docs/` is the user-facing reference, a page per topic: `model.md` (state, lists, conflicts, undo, scope), `offline.md`, `stores.md` (many stores over one socket, one socket per browser), `server.md` (persistence, migrations, backups, server-owned state, embedding, Node), `auth.md` (authentication, presence, eviction), `relays.md` (relays, fan-out, spreading the load), `limits.md`, `api.md`, `protocol.md` (the wire protocol), `development.md` (examples, benchmarks, tests). A change to behaviour goes in the page that covers it, and in the README only when it changes the pitch.
 
 ## Development Commands
 
@@ -37,6 +37,7 @@ Run one test file with `node --test test/facade.test.js`, one test with `--test-
 - `src/testing/` — `createNetwork` (in-memory network: clients linked to a store without sockets) and `fakeTime`, published as `lazy-storage/testing`
 - `src/index.js` — the client entry; it re-exports `LazyWatch` so apps drive `db.state` with the same copy lazy-storage uses (two copies do not recognize each other's proxies)
 - `types/` — hand-written declarations, one file per export path; `test/types/` checks them
+- `docs/` — the reference (see above); it ships in the npm package
 - `examples/`, `bench/`, `test/` (`helpers.js` re-exports `createNetwork`/`fakeTime` and adds `seededRandom`; `test/fuzz/`; `test/bun/`)
 
 ## Architecture

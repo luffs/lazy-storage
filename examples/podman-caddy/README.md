@@ -66,8 +66,8 @@ sysctl is the pod's own, as its network is, and leaves the host's alone.
   connect, over loopback), and the relays compress what passes 4 KB for
   the clients, who are on the internet: a new client's snapshot above
   all. With relays on the clients' own networks it goes the other way
-  round; the repository's README ("Spreading the load") says how to
-  choose, hop by hop.
+  round; [Spreading the load](../../docs/relays.md#spreading-the-load)
+  says how to choose, hop by hop.
 - **Open files.** Every client's socket at a relay is one, and every
   writing client's socket up to the server another (it closes after 30 s
   without an edit): `--ulimit` (or `Ulimit=` in a Quadlet unit) well above
@@ -98,8 +98,9 @@ sysctl is the pod's own, as its network is, and leaves the host's alone.
   (`--insecure` for Caddy's local certificate). Each step says how long
   its clients took to be answered, how long a write took to reach every
   client of its store, and how long all took to come back when every
-  client dropped at once; the repository's README ("Examples and
-  benchmark") says more. To see what the cores were spent on, start the
+  client dropped at once;
+  [docs/development.md](../../docs/development.md#examples-and-benchmark)
+  says more. To see what the cores were spent on, start the
   container (or `main.js`) with `PROFILE=<dir>`: each process writes a
   CPU profile there when it stops (`server.md`, `relay-1.md` and on). In
   the container, put it on the volume, `-e PROFILE=/data/profiles`, so

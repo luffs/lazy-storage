@@ -64,6 +64,7 @@
   "files": [
     "src",
     "README.md",
+    "docs",
     "CHANGELOG.md",
     "LICENSE",
     "types"
