@@ -249,7 +249,13 @@ export function sqliteStorageOn({ exec, prepare, transaction, close, db, driver 
     const others = current && current.holder !== holder && current.until > now;
     const gone = others && current.host === host && current.pid !== pid && !alive(current.pid);
     if (others && !gone) {
-      const err = new Error(`Store "${id}" is open in another process (${current.host ?? 'a host'}, pid ${current.pid}); it is served here once that process lets it go, or ${Math.ceil((current.until - now) / 1000)} s after it stops renewing`);
+      // On another host (another container, say) whether that process still runs cannot be told from here: one that
+      // was killed, or stopped without closing the file, holds the store until its lease runs out, and the message
+      // says so, as that is what a deploy's wait usually is
+      const elsewhere = current.host !== host
+        ? '; from here it cannot be told whether that process still runs: one killed without closing the file holds the store until its lease runs out'
+        : '';
+      const err = new Error(`Store "${id}" is open in another process (${current.host ?? 'a host'}, pid ${current.pid}); it is served here once that process lets it go, or ${Math.ceil((current.until - now) / 1000)} s after it stops renewing${elsewhere}`);
       err.code = 'store-locked';
       throw err;
     }

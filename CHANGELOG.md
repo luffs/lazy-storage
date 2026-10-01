@@ -4,6 +4,10 @@ All notable changes to lazy-storage are documented here. The format follows Keep
 
 ## [Unreleased]
 
+### Changed
+
+- **A store leased on another host says why it may wait.** A new container finding a store leased by the one before it cannot tell whether that process still runs, so it waits out the lease (`lease.ttl`, 30 s) whenever the old one was killed, or stopped without closing the file; the `store-locked` message only said it would be served "N s after it stops renewing". When the lease's host is not this one, it now says too that from here it cannot be told whether that process still runs, and that one killed without closing the file holds the store until its lease runs out. docs/server.md says what a deploy needs for the wait not to happen: the storage closed on SIGTERM, the signal reaching the process, and its stop ending before the platform kills it
+
 ## [0.23.2] - 2026-09-30
 
 The README is now a pitch and a quickstart, and the manual it was is a

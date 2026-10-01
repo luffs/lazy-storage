@@ -131,6 +131,40 @@ test('one process serves a store: a second is refused until the first lets it go
   }
 });
 
+test('a store leased on another host says it cannot tell whether that process runs; one on this host does not', { skip: !sqliteStorage }, async () => {
+  const { hostname } = await import('node:os');
+  const dir = mkdtempSync(join(tmpdir(), 'lazy-storage-node-sqlite-'));
+  const first = sqliteStorage(join(dir, 'hosts.sqlite'));
+  const second = sqliteStorage(join(dir, 'hosts.sqlite'));
+  const one = createStore({ initial: INITIAL, storage: first.store('team-1') });
+  const refusal = () => {
+    try {
+      createStore({ initial: INITIAL, storage: second.store('team-1') });
+    } catch (err) {
+      return err;
+    }
+    assert.fail('the store was served twice');
+  };
+  try {
+    // A process on this host, which runs: it is waited for, and nothing is said of telling
+    const here = refusal();
+    assert.equal(here.code, 'store-locked');
+    assert.ok(here.message.includes(`is open in another process (${hostname()}, pid ${process.pid})`), here.message);
+    assert.ok(!here.message.includes('cannot be told'), here.message);
+    // On another host (the container before this one): whether it runs cannot be told, and a killed one holds the store until its lease runs out
+    first.db.prepare('UPDATE leases SET host = ? WHERE store = ?').run('f812a3c6b6b5', 'team-1');
+    const elsewhere = refusal();
+    assert.equal(elsewhere.code, 'store-locked');
+    assert.ok(elsewhere.message.startsWith('Store "team-1" is open in another process (f812a3c6b6b5, pid '), elsewhere.message);
+    assert.ok(elsewhere.message.endsWith('s after it stops renewing; from here it cannot be told whether that process still runs: one killed without closing the file holds the store until its lease runs out'), elsewhere.message);
+  } finally {
+    one.dispose();
+    first.close();
+    second.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('a batch of changes leaves each row as the last of them left it, and is stored whole or not at all', { skip: !sqliteStorage }, () => {
   const dir = mkdtempSync(join(tmpdir(), 'lazy-storage-node-sqlite-'));
   try {

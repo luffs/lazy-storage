@@ -100,6 +100,16 @@ that took over. A crashed process's lease runs out after `lease.ttl`
 Stores are leased one by one: processes may share a file on purpose by
 serving different stores. `lease: false` turns it off.
 
+A deploy that starts a new container is another machine as far as the
+lease can tell: whether the old process still runs cannot be checked from
+there, so a lease it did not give back holds the new server up for as
+long as `lease.ttl`, and the `store-locked` message says so. Close the
+storage (`close()`, which gives every lease back) when the process is
+told to stop, and make sure it is told: SIGTERM has to reach it (run it as
+the container's main process, or behind an init that passes signals on),
+and its stop has to end before the platform kills it (Docker waits 10 s),
+so give whatever it waits for there a time limit.
+
 A custom adapter implements `load()`, `commit(change)`, and `flush()`,
 and optionally `commitMany(changes)` (a turn's changes in one
 transaction, all or none; without it the store commits them one by one),
