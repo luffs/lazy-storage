@@ -4,6 +4,18 @@ All notable changes to lazy-storage are documented here. The format follows Keep
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-10-07
+
+A collection can now be followed record by record: `db.collection(name)
+.watch()` hears each record a batch inserted, changed or removed, with
+plain copies of what it is and what it was, for a view that keeps rows
+of its own. On the server, `store.observe('op')` carries the diff the op
+made, so a log, an index or a store kept from others forwards what is
+stored rather than catching changes before they are. Both are
+additions: on upgrade, an observer that copied the whole event (to a log
+or a metric) now copies the diff with it; leave it out if that is too
+much.
+
 ### Added
 
 - **`db.collection(name).watch(listener)` follows a collection record by record.** Once per batch, the listener hears every record under `state[name]` the batch changed, as `{ type: 'insert', id, record }`, `{ type: 'update', id, record, previous }` or `{ type: 'remove', id, previous }`, with the batch's `meta` second. A view that keeps rows of its own (a data table, a search index, a cache keyed by id) had to read record ids out of every diff and rebuild what a record was from the inverse; `record` and `previous` are plain copies, new objects each time, so a view that compares rows by identity sees the changed one, and `previous` tells a filtered list whether a row just started or stopped matching
