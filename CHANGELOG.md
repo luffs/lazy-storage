@@ -4,6 +4,10 @@ All notable changes to lazy-storage are documented here. The format follows Keep
 
 ## [Unreleased]
 
+### Fixed
+
+- **A tab on a shared connection says `online` only once its store is current.** The browser's replica answered a tab's hello at once from whatever it had, and the tab took the answer as its store synced, so with the socket up it reported `online` while the replica had not had the store from the server yet: for a store the browser had not opened before, with an empty state. An app that waits for `online` before it reads or edits (to find a record and change it) found nothing, and an edit to a record it expected was never made. With the socket up, the replica now answers once it has the store from the server, as the server answers a plain client; with the socket down, at once from what it has, as before
+
 ## [0.24.0] - 2026-10-07
 
 A collection can now be followed record by record: `db.collection(name)

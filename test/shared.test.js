@@ -860,3 +860,18 @@ test('a page let go of a store it never opened makes no replica of it: no hello 
   assert.deepEqual(w.said('u1', 'hello', 'aux'), [], 'the replica never said hello on aux');
   assert.equal(stores.get('aux').sessions, 0, 'and holds no session there');
 });
+
+test('a tab is online only once the browser\'s replica has the store from the server: its state is current by then, as a plain client\'s is', async t => {
+  const store = createStore({ initial: INITIAL });
+  store.patch({ tasks: { x: { id: 'x', title: 'on the server' } } });
+  const net = createNetwork(store);
+  const b = browser(net);
+  t.after(() => b.close());
+  const a = b.tab('a');
+  const atOnline = [];
+  a.db.on('status', status => { if (status === 'online') atOnline.push(a.db.state.tasks.x?.title); });
+  await b.until(() => a.db.status === 'online', 'the tab online');
+  assert.deepEqual(atOnline, ['on the server'], 'online with the server\'s state, not the replica\'s empty one');
+  a.db.state.tasks.x.done = true;
+  await b.until(() => store.snapshot().tasks.x?.done === true, 'an edit made at online reaches the server');
+});

@@ -539,6 +539,23 @@ function createReplicaRelay({ tabId, transport, storage, reconnect, keepalive, w
     else then();
   }
 
+  /**
+   * Run `then` once the replica's client for a store is not still connecting:
+   * 'online' (the server's snapshot or delta applied, its state current) or
+   * 'offline' (the socket down: what the replica has is what there is). A
+   * replica made for a tab's first hello starts empty, or from its storage,
+   * and answering from that while the server's answer is on its way would
+   * have the tab report 'online' with a state that is not
+   */
+  function settled(client, then) {
+    if (client.status !== 'connecting') return void then();
+    const stop = client.on('status', status => {
+      if (status === 'connecting') return;
+      stop();
+      then();
+    });
+  }
+
   /** Apply a follower's op to the replica (once per seq): a register it writes is replaced, as the server would */
   function apply(entry, session, op) {
     if (!Utils.isPlainObject(op) || !Number.isInteger(op.seq)) return;
@@ -593,13 +610,16 @@ function createReplicaRelay({ tabId, transport, storage, reconnect, keepalive, w
           for (const op of Array.isArray(message.ops) ? message.ops : []) apply(entry, session, op);
           if (message.share !== undefined) client.share(message.share);
           if (entry.warning) send(tab, entry.warning);
-          // The answer acknowledges the hello's ops: sent once they are stored
-          durable(entry, () => {
+          // The answer acknowledges the hello's ops: sent once they are stored, and once the replica
+          // has the store from the server while the socket is up (a tab says 'online' on this answer,
+          // as a plain client does on the server's, so its state has to be current by then); with the
+          // socket down or failing, at once, from whatever the replica has
+          durable(entry, () => settled(client, () => {
             if (entry.sessions.get(tab) !== session) return;
             send(tab, { t: 'snapshot', store, state: LazyWatch.snapshot(client.wire), ts: clock.now(), seq: session.lastSeq, registers: entry.registers, v: client.version, epoch: null });
             if (client.relayed) send(tab, { t: 'relay', store, status: 'local' });
             if (session.presence) send(tab, { t: 'presence', store, peers: client.peers });
-          });
+          }));
           return;
         case 'op':
           apply(entry, session, message.op);

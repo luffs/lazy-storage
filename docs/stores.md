@@ -72,6 +72,12 @@ that tab closing, which a tab with a replica of its own could not offer.
 Each tab keeps its own undo history. A tab's `db.status` and `db.pending`
 are the browser's: the socket's status, and the replica's unsent ops
 (`connection.upstream` and `connection.pending(store)` say the same).
+`online` means what it does for a plain client, that the state is
+current: with the socket up, the replica answers a tab's hello once it
+has the store from the server itself, so a store the browser has not
+opened before stays `connecting` until the server's answer is in; with
+the socket down, it answers at once from what it has, and the tab says
+`offline`.
 When the leader tab closes, the next tab acquires the lock, loads the
 replica's outbox and state from `storage`, reconnects, and the other tabs
 follow it, resending whatever the old leader had not acknowledged. A
