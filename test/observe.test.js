@@ -38,8 +38,8 @@ test('observe reports every op, refusal, and session; a throwing observer goes t
   }
   assert.deepEqual(events, [
     ['session', { event: 'open', kind: 'client', user: { id: 'u1' }, replicaId: null, sessions: 1 }],
-    ['op', { replicaId: 'a', seq: 1, user: { id: 'u1' }, accepted: true, rejected: 0, version: 1 }],
-    ['op', { replicaId: 'server', seq: 1, user: undefined, accepted: true, rejected: 0, version: 2 }],
+    ['op', { replicaId: 'a', seq: 1, user: { id: 'u1' }, accepted: true, rejected: 0, version: 1, diff: { tasks: { t1: { id: 't1' } } } }],
+    ['op', { replicaId: 'server', seq: 1, user: undefined, accepted: true, rejected: 0, version: 2, diff: { tasks: { s1: { id: 's1' } } } }],
     ['refused', { replicaId: 'a', seq: 2, user: { id: 'u1' }, code: 'forbidden', message: '"locked" is read-only' }],
     ['session', { event: 'close', kind: 'client', user: { id: 'u1' }, replicaId: 'a', sessions: 0 }]
   ]);

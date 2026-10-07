@@ -4,6 +4,11 @@ All notable changes to lazy-storage are documented here. The format follows Keep
 
 ## [Unreleased]
 
+### Added
+
+- **`db.collection(name).watch(listener)` follows a collection record by record.** Once per batch, the listener hears every record under `state[name]` the batch changed, as `{ type: 'insert', id, record }`, `{ type: 'update', id, record, previous }` or `{ type: 'remove', id, previous }`, with the batch's `meta` second. A view that keeps rows of its own (a data table, a search index, a cache keyed by id) had to read record ids out of every diff and rebuild what a record was from the inverse; `record` and `previous` are plain copies, new objects each time, so a view that compares rows by identity sees the changed one, and `previous` tells a filtered list whether a row just started or stopped matching
+- **`store.observe('op')` says what the op changed.** The event carries `diff`, the op's change as merged and broadcast (a register whole, `null` where it deleted), or null when nothing was accepted. It was the hook to forward stored changes from (an audit log, a search index, a store the server keeps from others), but said only that an op was accepted; the diff it needs had to be caught in `store.on` before the change was stored. It is the object the delta log keeps: read it, do not change it
+
 ## [0.23.3] - 2026-10-01
 
 A deploy that finds its stores leased by the container before it now

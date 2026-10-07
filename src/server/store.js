@@ -758,7 +758,8 @@ export function createStore({
     const lost = [...rejected, ...stripped];
     if (observers.op.size) {
       // Told once the op is stored, as its author is
-      const event = { replicaId: op.replicaId, seq: op.seq, user: session?.user, accepted: accepted !== null, rejected: lost.length, version, ms: performance.now() - started };
+      // `diff` is what the op changed, as merged and broadcast (registers whole): read-only, shared with the delta log
+      const event = { replicaId: op.replicaId, seq: op.seq, user: session?.user, accepted: accepted !== null, rejected: lost.length, version, diff: applied, ms: performance.now() - started };
       later(() => notify('op', event));
     }
     return { duplicate: false, accepted, rejected: lost, correction: lost.length ? correction(lost) : null };

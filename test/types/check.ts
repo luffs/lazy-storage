@@ -42,6 +42,16 @@ const tasks = db.collection<Task>('tasks');
 const id: string = tasks.add({ title: 'new', done: false });
 tasks.update(id, { done: true });
 const maybe: Task | undefined = tasks.get(id);
+const stopWatching = tasks.watch((changes, meta) => {
+  const remote: boolean = meta?.origin === 'remote';
+  for (const change of changes) {
+    if (change.type === 'remove') { const gone: Task = change.previous; void gone; }
+    else { const now: Task = change.record; void now; }
+    if (change.type === 'update') { const was: Task = change.previous; void was; }
+  }
+  void remote;
+});
+stopWatching();
 const pending: number = db.pending;
 const { oldestPendingMs, ackMs, remoteAgeMs } = db.stats();
 const slow: boolean = (oldestPendingMs ?? 0) > 5000 || (ackMs ?? 0) > 1000 || (remoteAgeMs ?? 0) > 2000;

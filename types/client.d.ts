@@ -298,7 +298,18 @@ export interface Collection<T extends { id?: string } = any> {
   has(id: string): boolean;
   ids(): string[];
   all(): T[];
+  /**
+   * The records a batch changed, once per batch: plain copies of each as it
+   * is (`record`) and as it was (`previous`), and the batch's meta
+   */
+  watch(listener: (changes: RecordChange<T>[], meta?: { origin?: string } & Record<string, unknown>) => void): Unsubscribe;
 }
+
+/** One record a batch changed: added, changed, or removed */
+export type RecordChange<T> =
+  | { type: 'insert'; id: string; record: T }
+  | { type: 'update'; id: string; record: T; previous: T }
+  | { type: 'remove'; id: string; previous: T };
 
 /** Where a record goes: before or after another, at an index, or (nothing) at the end */
 export interface ListSlot {

@@ -57,8 +57,8 @@ What that asks of code on the server:
 - **`store.on(listener)` hears a change as it is merged, before it is
   stored.** A listener that passes changes on (a webhook, an audit log, a
   search index) can pass on one whose commit then fails. `store.observe('op',
-  fn)` is told of an op once it is stored, as its author is: the one to
-  forward from.
+  fn)` is told of an op once it is stored, as its author is, with what
+  it changed (`diff`, as merged and broadcast): the one to forward from.
 
 Adapters:
 

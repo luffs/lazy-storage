@@ -223,6 +223,12 @@ export interface OpEvent {
   /** Leaves the op lost */
   rejected: number;
   version: number;
+  /**
+   * What the op changed, as merged and broadcast (a register whole; `null`
+   * where it deleted), or null when nothing was accepted. Read-only: the
+   * same object the delta log keeps
+   */
+  diff: Diff | null;
   /** Milliseconds the store spent on the op: the gates and the merge (its commit, grouped with the turn's, and its broadcast come after; see `groupCommit`) */
   ms: number;
 }

@@ -874,8 +874,49 @@ function build({
       get: id => (Utils.isPlainObject(state[name]) ? state[name][id] : undefined),
       has: id => Utils.isPlainObject(state[name]) && Object.hasOwn(state[name], id),
       ids,
-      all: () => ids().map(id => state[name][id])
+      all: () => ids().map(id => state[name][id]),
+      watch: listener => watchRecords(name, listener)
     };
+  }
+
+  /**
+   * The records under `state[name]` that a batch changed, one entry per
+   * record: `insert` and `update` carry a plain copy of the record as it
+   * now is, `update` and `remove` the record as it was (`previous`). A
+   * list, a table or a cache keyed by id follows the collection from this
+   * instead of reading paths out of every diff. The copies are new
+   * objects each time, so a view that compares rows by identity sees a
+   * changed one; the batch's `meta` comes along (`origin: 'remote'` for
+   * the server's).
+   */
+  function watchRecords(name, listener) {
+    return LazyWatch.on(state, (diff, inverse, meta) => {
+      if (!diff || !Object.hasOwn(diff, name)) return;
+      const now = Utils.isPlainObject(state[name]) ? state[name] : {};
+      const was = inverse?.[name];
+      // The whole collection written, or deleted, in one go: every id it held before or holds now
+      const ids = Utils.isPlainObject(diff[name]) ? Object.keys(diff[name]) : [...new Set([...Object.keys(now), ...Object.keys(Utils.isPlainObject(was) ? was : {})])];
+      const changes = [];
+      for (const id of ids) {
+        const current = Object.hasOwn(now, id) ? now[id] : undefined;
+        // What the record was: its inverse laid back over a copy of it; null in the inverse means it did not exist
+        const reverse = Utils.isPlainObject(was) ? was[id] : was;
+        let previous;
+        if (reverse === null || (was === null && reverse === undefined)) previous = undefined;
+        else if (current === undefined) previous = reverse === undefined ? undefined : LazyWatch.Utils.deepClone(reverse);
+        else if (Utils.isPlainObject(reverse) && Utils.isPlainObject(current)) {
+          previous = LazyWatch.snapshot(current);
+          LazyWatch.patchObject(previous, reverse);
+        } else previous = reverse === undefined ? undefined : LazyWatch.Utils.deepClone(reverse);
+        if (current === undefined) {
+          if (previous !== undefined) changes.push({ type: 'remove', id, previous });
+        } else {
+          const record = LazyWatch.isProxy(current) ? LazyWatch.snapshot(current) : structuredClone(current);
+          changes.push(previous === undefined ? { type: 'insert', id, record } : { type: 'update', id, record, previous });
+        }
+      }
+      if (changes.length) listener(changes, meta);
+    });
   }
 
   return {

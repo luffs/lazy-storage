@@ -112,7 +112,8 @@ server writes out of the registry.
 
 **Watching a store.** `store.observe('op' | 'refused' | 'session', fn)`
 reports every merged op once it is stored (`{ replicaId, seq, user,
-accepted, rejected, version, ms }`, `ms` the time the store spent on it:
+accepted, rejected, version, diff, ms }`, `diff` what the op changed as
+merged and broadcast, read-only, `ms` the time the store spent on it:
 the gates and the merge; its commit, grouped with the turn's, and its
 broadcast come after),
 every client op turned away (`{ replicaId, seq, user, code,

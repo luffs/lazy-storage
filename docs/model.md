@@ -141,6 +141,24 @@ Five hundred rows on `useClient` all re-render for an edit to one of
 them, or a peer moving a cursor; on `useClientSelector` one row does,
 and none for the cursor (`npm run bench:client`).
 
+A view that keeps rows of its own (a data table, a search index, a
+cache keyed by id) follows a collection record by record instead:
+`db.collection('screens').watch(changes => ...)` hears, once per batch,
+every record under `state.screens` the batch changed, as `{ type:
+'insert', id, record }`, `{ type: 'update', id, record, previous }` or
+`{ type: 'remove', id, previous }`. `record` and `previous` are plain
+copies, new objects each time, so a view that compares rows by identity
+sees the changed one, and `previous` is the record as it was before the
+batch, for a filtered list that wants to know whether a row just started
+or stopped matching. The batch's `meta` comes second, `origin: 'remote'`
+for the server's:
+
+```js
+const stop = db.collection('screens').watch((changes, meta) => {
+  for (const change of changes) table.apply(change);   // insert, update, remove by id
+});
+```
+
 An app that keeps its own arrays instead, as a Vue store or a
 drag-and-drop list does, overwrites the view's arrays with them after a
 change (`LazyWatch.overwrite(db.state.tasks, plainTasks)`) and copies them
