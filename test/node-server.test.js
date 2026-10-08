@@ -303,7 +303,7 @@ test('idleTimeout closes a socket that has gone quiet; a client that pings stays
 
 test('sockets() shows how far behind each socket is; one that stopped reading is cut off at maxBuffered, and the rest stay', async () => {
   const store = createStore({ initial: { blob: '' }, storage: memoryStorage() });
-  const server = serve({ stores: () => store, port: 0, maxBuffered: 1024 * 1024, authenticate: req => ({ id: new URL(req.url).searchParams.get('token') }) });
+  const server = serve({ stores: () => store, port: 0, maxBuffered: 1024 * 1024, authenticate: req => ({ id: new URL(req.url).searchParams.get('token') ?? 'stalled' }) });
   const port = await listening(server);
   const healthy = createConnection({ transport: webSocketTransport(`ws://localhost:${port}/ws?token=ann`), reconnect: false, keepalive: false });
   const a = createClient({ connection: healthy, store: 'main', initial: { blob: '' }, replicaId: 'a' });

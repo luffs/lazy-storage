@@ -50,7 +50,7 @@ const open = [];
 
 test('sockets() shows how far behind each socket is; one that stopped reading is cut off at maxBuffered, broadcasts included, and the rest stay', async () => {
   const store = createStore({ initial: { blob: '' }, storage: memoryStorage() });
-  const lagServer = serve({ port: 0, stores: () => store, maxBuffered: 1024 * 1024, authenticate: req => ({ id: new URL(req.url).searchParams.get('token') }) });
+  const lagServer = serve({ port: 0, stores: () => store, maxBuffered: 1024 * 1024, authenticate: req => ({ id: new URL(req.url).searchParams.get('token') ?? 'stalled' }) });
   const healthy = createConnection({ transport: webSocketTransport(`ws://localhost:${lagServer.port}/ws?token=ann`), reconnect: false, keepalive: false });
   const a = createClient({ connection: healthy, store: 'main', initial: { blob: '' }, replicaId: 'a' });
   a.connect();

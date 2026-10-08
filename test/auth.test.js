@@ -204,3 +204,34 @@ test('a socket that is down retries at once when the network comes back or the p
     else globalThis.addEventListener = had;
   }
 });
+
+test('a user without an id is told apart by its whole value, and the store says so once', () => {
+  // Sessions as an app's transport hands them in: the user as authenticate returned it
+  const hello = (store, user, replicaId) => {
+    const sent = [];
+    const session = store.session({ send: m => sent.push(m), user });
+    session.receive({ t: 'hello', replicaId, ops: [] });
+    store.flush();
+    return sent.at(-1);
+  };
+
+  // A session's token in the user: the same person signing in again is another user to the store
+  const errors = [];
+  const unkeyed = createStore({ initial: INITIAL, onError: err => errors.push(err) });
+  assert.notEqual(hello(unkeyed, { email: 'ann@example.com', token: 't1' }, 'browser').t, 'closed');
+  assert.equal(hello(unkeyed, { email: 'ann@example.com', token: 't2' }, 'browser').code, 'replica-taken');
+  hello(unkeyed, { email: 'bo@example.com', token: 't3' }, 'phone');
+  assert.equal(errors.length, 1, 'said once');
+  assert.match(errors[0].message, /stable "id"/);
+
+  // With an id the replica is the person's in every session, and nothing is said
+  const keyed = createStore({ initial: INITIAL, onError: err => errors.push(err) });
+  hello(keyed, { id: 'ann', token: 't1' }, 'browser');
+  assert.notEqual(hello(keyed, { id: 'ann', token: 't2' }, 'browser').t, 'closed');
+  // So with presence's key, and with a user that is a plain value
+  const byKey = createStore({ initial: INITIAL, presence: { key: user => user.email }, onError: err => errors.push(err) });
+  hello(byKey, { email: 'ann@example.com', token: 't1' }, 'browser');
+  assert.notEqual(hello(byKey, { email: 'ann@example.com', token: 't2' }, 'browser').t, 'closed');
+  hello(createStore({ initial: INITIAL, onError: err => errors.push(err) }), 'ann', 'browser');
+  assert.equal(errors.length, 1);
+});

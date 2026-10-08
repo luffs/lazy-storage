@@ -255,7 +255,8 @@ const defaultPresenceKey = user =>
  * @param {number} [options.presence.maxShare=4096] - the most a session
  *   may share, in bytes of JSON; more is refused with 'too-large'
  * @param {(error: any) => void} [options.onError] - where faults that are
- *   not a client's (an observer that throws) are reported; default console
+ *   not a client's (an observer that throws, users told apart by their
+ *   whole value for want of an `id`) are reported; default console
  * @param {() => number} [options.now] - wall clock (injectable for tests)
  */
 export function createStore({
@@ -903,7 +904,19 @@ export function createStore({
   const bucketOf = (s, replicaId) => (s.user === undefined ? `r:${replicaId}` : `u:${ownerKey(s.user)}`);
 
   /** What a replica's user is told apart by, as a string: presence's key when set, else the default */
-  const ownerKey = user => (user === undefined ? undefined : String((pres?.key ?? defaultPresenceKey)(user)));
+  const keyOf = pres?.key ?? defaultPresenceKey;
+  let unkeyedReported = false;
+  const ownerKey = user => {
+    if (user === undefined) return undefined;
+    // The default tells a user without an `id` apart by its whole value, and anything in it that changes between
+    // sign-ins (a session token, an expiry) makes the same person another user: their replicas from the last session
+    // are refused with 'replica-taken', and their rate limit starts over. Said once, to the app, which is the one to fix it
+    if (keyOf === defaultPresenceKey && !unkeyedReported && Utils.isPlainObject(user) && user.id == null) {
+      unkeyedReported = true;
+      onError(new TypeError('A user without an "id" is told apart by its whole value: give the user authenticate returns a stable "id", or set presence.key. Anything in it that changes between sign-ins (a session token, an expiry) makes the same person another user, whose replicas are refused with "replica-taken"'));
+    }
+    return String(keyOf(user));
+  };
 
   /**
    * Attach a session. `send` receives message objects; feed the session

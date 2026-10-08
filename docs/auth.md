@@ -99,7 +99,12 @@ gives each socket's `expiresAt`.
 
 A replica belongs to the user who first says hello with it (by
 presence's `key`, or the user's `id`), recorded with its progress and
-kept across restarts. A session speaks for its own replica only, and
+kept across restarts. Give the user `authenticate` returns an `id` that
+is the same in every session: without one (and without presence's
+`key`) a user is told apart by its whole value, so a session token or
+an expiry in it makes the same person another user at every sign-in,
+and the browser's replicas from the last session are refused. The store
+says so once, through `onError`. A session speaks for its own replica only, and
 another user cannot take one over, connected or away, so a replica id
 seen in presence is of no use to anyone else: such a hello is closed with
 `replica-taken`. That is also what a browser meets when someone else

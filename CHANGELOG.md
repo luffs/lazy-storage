@@ -4,6 +4,10 @@ All notable changes to lazy-storage are documented here. The format follows Keep
 
 ## [Unreleased]
 
+### Added
+
+- **A store says when it tells users apart by their whole value.** Without presence's `key`, a replica belongs to the user's `id`, and a user without one is told apart by its JSON. Anything in it that changes between sign-ins, a session token or an expiry, then makes the same person another user: the browser's replicas from the last session are closed with `replica-taken`, and an app that waits for its stores to come online waits for good, with nothing said. The store now reports it once through `onError` (default console), naming the fix: a stable `id` on the user `authenticate` returns, or `presence.key`. What the store does is unchanged
+
 ## [0.24.1] - 2026-10-07
 
 A tab on a shared connection says `online` only once its store is
