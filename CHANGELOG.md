@@ -4,6 +4,18 @@ All notable changes to lazy-storage are documented here. The format follows Keep
 
 ## [Unreleased]
 
+## [0.24.2] - 2026-10-08
+
+A store now says when it tells users apart by their whole value. A
+replica belongs to the user's `id` (or presence's `key`); a user without
+one is told apart by its JSON, and a session token in it made the same
+person another user at every sign-in, whose browser replicas were closed
+with `replica-taken` without a word. The store reports it once through
+`onError`; nothing it does has changed. On upgrade: if the report shows,
+give the user `authenticate` returns a stable `id`, and expect replicas
+recorded under the old key to be refused once (clear the browser's
+storage for the app).
+
 ### Added
 
 - **A store says when it tells users apart by their whole value.** Without presence's `key`, a replica belongs to the user's `id`, and a user without one is told apart by its JSON. Anything in it that changes between sign-ins, a session token or an expiry, then makes the same person another user: the browser's replicas from the last session are closed with `replica-taken`, and an app that waits for its stores to come online waits for good, with nothing said. The store now reports it once through `onError` (default console), naming the fix: a stable `id` on the user `authenticate` returns, or `presence.key`. What the store does is unchanged
