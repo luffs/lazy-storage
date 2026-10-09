@@ -875,3 +875,25 @@ test('a tab is online only once the browser\'s replica has the store from the se
   a.db.state.tasks.x.done = true;
   await b.until(() => store.snapshot().tasks.x?.done === true, 'an edit made at online reaches the server');
 });
+
+test('a tab that signs in after the socket was turned away brings the browser back: its connect() reaches the leader\'s socket', async t => {
+  const store = createStore({ initial: INITIAL, presence: true });
+  const net = createNetwork(store);
+  const b = browser(net);
+  t.after(() => b.close());
+  const a = b.tab('a');
+  const c = b.tab('c');
+  await b.until(() => a.db.status === 'online' && c.db.status === 'online', 'both online');
+  const leader = a.connection.leader ? a : c;
+  const follower = leader === a ? c : a;
+  // The leader's credentials ran out (a session that ended, a store wiped under it): the socket is turned away
+  leader.link.current.onmessage({ t: 'closed', code: 'unauthorized', message: 'Unauthorized' });
+  await b.until(() => follower.db.closed?.code === 'unauthorized' && leader.db.closed?.code === 'unauthorized', 'both told');
+  await sleep(20);
+  await net.settle();
+  assert.equal(follower.db.status, 'offline', 'nothing happens on its own: the same credentials would be turned away again');
+  // Later, the other tab signs in: its connect() reaches the browser's socket, which tries again
+  follower.db.connect();
+  await b.until(() => follower.db.status === 'online' && follower.db.closed === null, 'the tab that signed in is back');
+  assert.equal(store.sessions, 1, 'one socket');
+});
