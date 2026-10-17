@@ -108,6 +108,15 @@ const undoable: boolean = view.canUndo.value;
 view.stop();
 // @ts-expect-error the mirror's status is a ref
 const notARef: string = view.status;
+// @ts-expect-error the mirror is read-only
+view.state.order = [];
+const editable = useClientVue(db, { writable: true });
+editable.state.order = ['a'];
+editable.state.tasks.a.done = true;
+const stillRefs: number = editable.pending.value;
+const readOnlyAgain = useClientVue(db, { writable: false });
+// @ts-expect-error writable: false is the read-only mirror
+readOnlyAgain.state.order = [];
 // @ts-expect-error the mirror is read-only: write to db.state
 view.state.tasks.a = { title: 'no' };
 

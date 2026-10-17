@@ -23,7 +23,7 @@
 
 **Bun client** (`lazy-storage/client/sqlite`): `sqliteClientStorage(file, { wal })` → a row adapter on bun:sqlite, plus `db` and `close()`.
 
-**Vue** (`lazy-storage/vue`): `useClient(db)` → `{ state, status, presence, pending, closed, canUndo, canRedo, restored, stop }` — `state` a read-only reactive mirror patched on every batch, the rest shallow refs, all one per client and shared by every caller; each call lets go with the current effect scope (a component's), else by `stop()`, and the last to let go stops the mirror.
+**Vue** (`lazy-storage/vue`): `useClient(db, { writable })` → `{ state, status, presence, pending, closed, canUndo, canRedo, restored, stop }` — `state` a read-only reactive mirror patched on every batch (with `writable: true`, a view that reads and writes `db.state`, tracked through the mirror; see [With a UI framework](model.md#with-a-ui-framework)), the rest shallow refs, all one per client and shared by every caller; each call lets go with the current effect scope (a component's), else by `stop()`, and the last to let go stops the mirror.
 
 **React** (`lazy-storage/react`): `useClient(db)` → `{ state, status, presence, pending, closed, canUndo, canRedo, restored }`, a new object per change, through `useSyncExternalStore`; `useClientSelector(db, select(state, db), isEqual?)` → what `select` picks, as plain data, re-rendering only when it changes (deep equality by default); `trackClient(db)` → the `{ subscribe, getSnapshot, version }` underneath, one per client.
 

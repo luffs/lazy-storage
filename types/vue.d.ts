@@ -24,11 +24,24 @@ export interface ClientView<S extends object = any> {
   stop(): void;
 }
 
+/** What useClient returns with `writable: true`: the state is a view to read and write */
+export interface WritableClientView<S extends object = any> extends Omit<ClientView<S>, 'state'> {
+  /** Reads come from `db.state` (a write reads back at once) and are tracked by Vue through the mirror; writes go to `db.state`. One per client, shared by every caller */
+  state: S;
+}
+
+export interface UseClientOptions {
+  /** `state` is a writable view rather than the read-only mirror */
+  writable?: boolean;
+}
+
 /**
  * A read-only reactive mirror of the client's state, patched on every
  * batch, and refs for its status, presence, outbox size, closed reason,
  * and undo state: one of each per client, shared by every caller. Lets go
  * with the current effect scope (a component's), else by `stop()`. Works
- * as `data()` in the Options API too
+ * as `data()` in the Options API too. With `writable: true` the state is a
+ * view that reads and writes the client, tracked through the mirror
  */
-export function useClient<S extends object = any>(db: Client<S>): ClientView<S>;
+export function useClient<S extends object = any>(db: Client<S>, options: UseClientOptions & { writable: true }): WritableClientView<S>;
+export function useClient<S extends object = any>(db: Client<S>, options?: UseClientOptions): ClientView<S>;

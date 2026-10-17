@@ -105,6 +105,32 @@ of the state and patches it once per batch), and it stops following the
 client when the last of them unmounts. The mirror is read-only; writes
 go to `db.state`.
 
+A component that edits what it shows asks for a writable state instead,
+and binds it like any data:
+
+```js
+const { state } = useClient(db, { writable: true });   // or in data()
+state.title = 'Renamed';                                // goes to the client
+state.tasks.push({ title: 'Ship it' });                 // a list's methods run on the client's array
+```
+
+```html
+<input v-model="state.title">
+```
+
+That state is a view, not a copy. Reads come from `db.state`, so a write
+is read back at once, before its batch has closed; each read also
+touches the same path in the shared mirror, which is what Vue tracks, so
+the component renders again when a batch lands, its own, a teammate's,
+or an undo. A view or a Vue object assigned into it is copied in as plain
+data. The views are one per path and client, so the same path is the
+same object (`indexOf` finds it), and Vue leaves them as they are in
+`data()` and `reactive()`. Two things to know: a `computed` over the view
+catches up when the batch lands (in the same tick), while a direct read
+is current at once; and every read goes through two proxies, so a list of
+many thousands of rows renders faster from the read-only mirror. Writing
+to a path that has been deleted throws.
+
 `lazy-storage/react` needs no mirror: `useClient(db)` subscribes through
 `useSyncExternalStore`, so a component reads `db.state` directly and
 re-renders on every batch, outbox change, and event, with one

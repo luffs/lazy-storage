@@ -4,6 +4,10 @@ All notable changes to lazy-storage are documented here. The format follows Keep
 
 ## [Unreleased]
 
+### Added
+
+- **A writable state for Vue: `useClient(db, { writable: true })`.** The mirror is read-only, so a component that edited what it showed wrote to `db.state` by hand or kept a copy of its own in step with the mirror, with a flush after every write so the mirror followed. With `writable: true`, `state` is a view instead: reads come from `db.state`, so a write reads back at once, and each read touches the same path in the shared mirror, which is what Vue tracks, so the component renders again when any batch lands; writes go to `db.state`, a list's methods run on the client's array, and a view or a Vue object assigned in is copied as plain data. One view per path and client (the same path is the same object), left alone by `data()` and `reactive()`. Without the option nothing changes. Documented in `docs/model.md`, with `WritableClientView` in the declarations
+
 ## [0.24.2] - 2026-10-08
 
 A store now says when it tells users apart by their whole value. A
