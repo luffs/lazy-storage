@@ -444,6 +444,10 @@ function createReplicaRelay({ tabId, transport, storage, reconnect, keepalive, w
         client.on('rejected', rejected => all({ t: 'rejected', ...rejected })),
         // The store started over (a backup restored): only the replica can tell, by the epoch
         client.on('reset', reset => all({ t: 'reset', ...reset })),
+        // An answer that moved the versions to another epoch without changing the state (a copy restored that
+        // equals it, the server back after a relay answered alone) forwards no batch: the followers are given the
+        // new numbering by a patch of nothing, or they would stay below the floor until something changed
+        client.on('sync', () => { if (renumber(entry)) all({ t: 'patch', diff: {}, ts: clock.now(), v: fv(entry) }); }),
         // A relay on the way answers on its own (lazy-storage/relay), or no longer does: every tab's to know
         client.on('relay', relayed => all({ t: 'relay', status: relayed ? 'local' : 'through' })),
         client.on('sync', () => onPending(store, client.pending))
@@ -569,13 +573,18 @@ function createReplicaRelay({ tabId, transport, storage, reconnect, keepalive, w
    * and an op below the floor was made in sight of an earlier epoch
    */
   function fv(entry) {
+    renumber(entry);
+    return (entry.lastFv = Math.max(entry.lastFv, entry.base + entry.client.version));
+  }
+
+  /** Whether the replica's versions count in another epoch than the followers' numbering does; if so, count on from the last number sent */
+  function renumber(entry) {
     const { client } = entry;
-    if (client.epoch !== entry.epoch) {
-      entry.epoch = client.epoch;
-      entry.floor = entry.lastFv + 1;
-      entry.base = entry.floor - client.version;
-    }
-    return (entry.lastFv = Math.max(entry.lastFv, entry.base + client.version));
+    if (client.epoch === entry.epoch) return false;
+    entry.epoch = client.epoch;
+    entry.floor = entry.lastFv + 1;
+    entry.base = entry.floor - client.version;
+    return true;
   }
 
   /**
@@ -591,6 +600,7 @@ function createReplicaRelay({ tabId, transport, storage, reconnect, keepalive, w
     if (!Utils.isPlainObject(op) || !Number.isInteger(op.seq)) return;
     if (op.seq > session.lastSeq) {
       session.lastSeq = op.seq;
+      renumber(entry);   // the numbering may have moved since anything was sent
       const seen = Number.isInteger(op.v) && op.v >= entry.floor ? Math.max(0, op.v - entry.base) : 0;
       if (Utils.isPlainObject(op.diff)) LazyWatch.patch(entry.client.wire, replacingRegisters(op.diff, entry.regs, entry.client.wire), { origin: 'follower', seen, made: op.made });
     }
