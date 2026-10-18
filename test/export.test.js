@@ -48,10 +48,10 @@ test('an exported store is a JSON document; any adapter that takes it serves the
   const doc = JSON.parse(JSON.stringify(original.export()));
   assert.equal(doc.format, 'lazy-storage/store');
   assert.deepEqual(doc.rows.find(([key]) => key === '["tasks","e"]')[1].value, {}, 'an empty-object leaf stays one');
-  assert.deepEqual(Object.keys(doc.rows.find(([key]) => key === '["tasks","d"]')[1]).sort(), ['made', 'since', 'ts', 'v'], 'a barrier is a row of two timestamps, a version and no value');
+  assert.deepEqual(Object.keys(doc.rows.find(([key]) => key === '["tasks","d"]')[1]).sort(), ['by', 'made', 'since', 'ts', 'v'], 'a barrier is a row of two timestamps, a version, the replicas that re-added, and no value');
 
   // A barrier row without what it stands on is no document: the adapter says so rather than serve a store that judges wrong
-  for (const broken of [{ ts: [1, 0, 'x'], made: true }, { ts: [1, 0, 'x'], made: true, since: [0, 0, 'x'] }, { made: true, since: [0, 0, 'x'], v: 1 }]) {
+  for (const broken of [{ ts: [1, 0, 'x'], made: true }, { ts: [1, 0, 'x'], made: true, since: [0, 0, 'x'], v: 1 }, { ts: [1, 0, 'x'], made: true, since: [0, 0, 'x'], by: ['x'] }, { made: true, since: [0, 0, 'x'], v: 1, by: ['x'] }]) {
     assert.throws(() => memoryStorage().replace({ ...doc, rows: [['["tasks","d"]', broken]] }), TypeError, `refused: ${JSON.stringify(broken)}`);
   }
   const memory = memoryStorage();

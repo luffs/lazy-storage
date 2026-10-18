@@ -11,7 +11,7 @@ export type { ClientMessage, ServerMessage, Tagged } from './core.js';
 export type StoredRow =
   | { value: unknown; ts: Timestamp; deleted?: false; made?: false }
   | { ts: Timestamp; deleted: true }
-  | { ts: Timestamp; made: true; since: Timestamp; v: number };
+  | { ts: Timestamp; made: true; since: Timestamp; v: number; by: string[] };
 
 export interface ReplicaProgress {
   seq: number;
@@ -34,6 +34,8 @@ export interface StorageDocument {
   epoch: string;
   /** How many of the store's migrations the rows have been through; absent before any were given */
   schema?: number;
+  /** The highest version among the barriers settled; an op made in sight of less is refused. Absent before any settled */
+  horizon?: number;
   /** The persisted delta log, ascending by version, when the adapter keeps it */
   log?: LogEntry[];
 }
@@ -42,6 +44,7 @@ export interface StorageDocument {
 export interface StoreDocument extends StorageDocument {
   format: 'lazy-storage/store';
   schema: number;
+  horizon: number;
 }
 
 export interface StorageCommit {
@@ -53,6 +56,8 @@ export interface StorageCommit {
   epoch: string;
   /** How many migrations the rows have been through, stored with them */
   schema: number;
+  /** The highest version among the barriers settled so far, stored with the rows */
+  horizon: number;
   /** The accepted diff this op made, for adapters that keep the delta log */
   log?: LogEntry;
   /** Entries below this version are no longer needed */
@@ -265,6 +270,8 @@ export interface StoreStats {
   epoch: string;
   /** How many migrations the store has been through */
   schema: number;
+  /** The highest version among the barriers settled; an op made in sight of less is refused as expired */
+  horizon: number;
   sessions: number;
   replicas: number;
   rows: number;

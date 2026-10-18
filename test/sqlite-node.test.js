@@ -38,7 +38,7 @@ test('a store round-trips through node:sqlite: rows, replicas, epoch, and the de
     const loaded = sqlite.store('team-1').load();
     assert.equal(loaded.epoch, epoch);
     assert.deepEqual(loaded.log.map(e => e.v), [3, 4, 5], 'the turn\'s five patches, one commit, pruned to the floor they left');
-    assert.deepEqual(Object.keys(loaded.rows.find(([key]) => key === '["tasks","b"]')[1]).sort(), ['made', 'since', 'ts', 'v'], 'the barrier is a row of its own kind');
+    assert.deepEqual(Object.keys(loaded.rows.find(([key]) => key === '["tasks","b"]')[1]).sort(), ['by', 'made', 'since', 'ts', 'v'], 'the barrier is a row of its own kind');
     const two = createStore({ initial: INITIAL, registers: ['order'], storage: sqlite.store('team-1'), deltaLog: 3 });
     assert.deepEqual(two.snapshot(), { tasks: { a: { id: 'a', title: 'Kept', done: true }, b: { id: 'b', title: 'Back' }, c: { id: 'c' } }, order: ['a'], settings: { theme: 'dark' } });
     assert.equal(two.version, 5);
@@ -300,7 +300,7 @@ test('a commit reads its lease, and writes it only when it runs low', { skip: !s
   }
 });
 
-test('a file from before barriers gains the since and v columns: its rows read as before, and a barrier row round-trips', { skip: !sqliteStorage }, async () => {
+test('a file from before barriers gains the since, v, made_by and horizon columns: its rows read as before, and a barrier row round-trips', { skip: !sqliteStorage }, async () => {
   const dir = mkdtempSync(join(tmpdir(), 'lazy-storage-node-sqlite-'));
   const file = join(dir, 'old-leaves.sqlite');
   try {
@@ -318,11 +318,12 @@ test('a file from before barriers gains the since and v columns: its rows read a
     const rows = new Map(storage.load().rows);
     assert.deepEqual(rows.get('["tasks","a","title"]'), { value: 'A', ts: [5, 0, 'x'] });
     assert.deepEqual(rows.get('["tasks","b"]'), { ts: [6, 0, 'x'], deleted: true });
-    storage.commit({ upserts: [['["tasks","b"]', { ts: [8, 0, 'y'], made: true, since: [6, 0, 'x'], v: 2 }]], deletes: [], version: 2, epoch: 'e1' });
+    storage.commit({ upserts: [['["tasks","b"]', { ts: [8, 0, 'y'], made: true, since: [6, 0, 'x'], v: 2, by: ['y'] }]], deletes: [], version: 2, epoch: 'e1', horizon: 1 });
     sqlite.close();
 
     const again = sqliteStorage(file);
-    assert.deepEqual(new Map(again.store('main').load().rows).get('["tasks","b"]'), { ts: [8, 0, 'y'], made: true, since: [6, 0, 'x'], v: 2 }, 'the barrier, both timestamps and the version');
+    assert.deepEqual(new Map(again.store('main').load().rows).get('["tasks","b"]'), { ts: [8, 0, 'y'], made: true, since: [6, 0, 'x'], v: 2, by: ['y'] }, 'the barrier, both timestamps, the version and the re-adder');
+    assert.equal(again.store('main').load().horizon, 1, 'the horizon, kept');
     again.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });

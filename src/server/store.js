@@ -99,7 +99,7 @@
 //       the server's `now` and the op's `ts`), 'expired', 'forbidden'
 //   { t: 'pong' }
 import { LazyWatch } from 'lazy-watch';
-import { createClock, isTimestamp } from '../core/hlc.js';
+import { createClock, isTimestamp, compareTs } from '../core/hlc.js';
 import { PROTOCOL } from '../core/protocol.js';
 import { registerSet, pathKey, parsePathKey, valueAt, correctionAt } from '../core/paths.js';
 import { leaves, assertModel, rebuild, expandRegisters, replacingRegisters } from '../core/model.js';
@@ -111,8 +111,8 @@ import { randomId } from '../core/ids.js';
 
 const { Utils } = LazyWatch;
 
-/** The row a barrier is persisted as: the re-add's timestamp and version, the deletion's timestamp, no value (`{}` at its path on load) */
-const barrierRow = entry => ({ ts: entry.ts, made: true, since: entry.since, v: entry.v });
+/** The row a barrier is persisted as: the re-add's timestamp, version and replicas, the deletion's timestamp, no value (`{}` at its path on load) */
+const barrierRow = entry => ({ ts: entry.ts, made: true, since: entry.since, v: entry.v, by: [...entry.by] });
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
@@ -301,6 +301,11 @@ export function createStore({
   if (!Array.isArray(migrations) || migrations.some(m => typeof m !== 'function')) throw new TypeError('migrations must be an array of functions');
   // How many migrations the stored rows have been through; see migrate() below
   let schema = saved ? (Number.isInteger(saved.schema) ? saved.schema : 0) : migrations.length;
+  // The HORIZON: the highest version among the barriers settled so far (see
+  // compact). An op made in sight of less is refused as expired: a settled
+  // barrier no longer tells an edit of the deleted container from one of
+  // the re-added, and the op's timestamp never could
+  let horizon = Number.isInteger(saved?.horizon) ? saved.horizon : 0;
   if (schema > migrations.length) {
     storage.close?.();
     const err = new Error(`The store's storage has run ${schema} migrations and this code knows ${migrations.length}: it was migrated by a newer version, and is not served in an older shape`);
@@ -434,7 +439,7 @@ export function createStore({
    * caller
    */
   function commit(change) {
-    changes.push({ ...change, version, epoch, schema });
+    changes.push({ ...change, version, epoch, schema, horizon });
     if (groupCommit && changes.length < GROUP_MAX) return scheduleCommit();
     if (!commitNow()) throw new RefusedError('unavailable', 'The store could not save the change and was unloaded');
   }
@@ -692,6 +697,12 @@ export function createStore({
       throw new RefusedError('expired',
         `The op is ${Math.round((wall - op.ts[0]) / DAY)} days old, older than the store keeps history for`);
     }
+    // Made in sight of a store older than the barriers settled: what it edits may be a container deleted and
+    // re-added since, which nothing can tell any more (see horizon)
+    if (op.epoch === epoch && Number.isInteger(op.v) && op.v < horizon) {
+      throw new RefusedError('expired',
+        `The op was made in sight of version ${op.v}, and the store has settled what it kept to judge edits made before ${horizon}`);
+    }
     return admitted;
   }
 
@@ -746,7 +757,7 @@ export function createStore({
     // `seen`: what the op was made in sight of, when its version counts in this storage life (one from another epoch, or a
     // relay's own counting, says nothing of what was seen here); `v`: what its patch becomes, for the barriers it leaves (core/merge.js)
     const inSight = op.epoch === epoch && Number.isInteger(op.v) ? op.v : 0;
-    const { accepted, rejected, won, dropped, barriers } = mergeOp(clocks, op.ts, diff, regs, { authority, made: op.made, seen: inSight, v: version + 1 });
+    const { accepted, rejected, won, dropped, barriers } = mergeOp(clocks, op.ts, diff, regs, { authority, made: op.made, seen: inSight, v: version + 1, author: op.replicaId });
     // A register the op writes becomes its new value whole: what the value had and the
     // new one lacks goes, here and, through the patch sent on, in every client
     const applied = accepted ? replacingRegisters(accepted, regs, state) : null;
@@ -787,18 +798,23 @@ export function createStore({
    * heard from within it, and settle barriers that old into containers
    * written empty. Safe because an op older than the window is refused,
    * so nothing can arrive that the forgotten entries would have had to
-   * judge. Returns { tombstones, barriers, replicas }: how many of each
+   * judge, and because the horizon moves up to the settled barriers'
+   * versions, so an op made in sight of less is refused too. Returns {
+   * tombstones, barriers, replicas }: how many of each
    */
   function compact() {
     lastCompaction = time();
     if (!Number.isFinite(retention)) return { tombstones: 0, barriers: 0, replicas: 0 };
-    const horizon = lastCompaction - retention;
-    const removed = compactTombstones(clocks, [horizon, 0, '']);
-    // A barrier settled is the container written empty: its row from now on
-    const settled = settleBarriers(clocks, [horizon, 0, '']);
+    const cutoff = [lastCompaction - retention, 0, ''];
+    const removed = compactTombstones(clocks, cutoff);
+    // A barrier settled is the container written empty: its row from now on, and the horizon at its version
+    for (const entry of clocks.values()) {
+      if (entry.made && compareTs(entry.ts, cutoff) < 0 && entry.v > horizon) horizon = entry.v;
+    }
+    const settled = settleBarriers(clocks, cutoff);
     const forgotten = [];
     for (const [id, r] of replicas) {
-      if (id !== 'server' && r.seen < horizon) {
+      if (id !== 'server' && r.seen < cutoff[0]) {
         replicas.delete(id);
         forgotten.push(id);
       }
@@ -1326,7 +1342,8 @@ export function createStore({
       replicas: Object.fromEntries([...replicas].map(([id, progress]) => [id, { ...progress }])),
       version,
       epoch,
-      schema
+      schema,
+      horizon
     };
   }
 
@@ -1425,14 +1442,14 @@ export function createStore({
       }
       const out = {};
       for (const [type, entry] of Object.entries(sent)) out[type] = { ...entry };
-      return { version, epoch, schema, sessions: sessions.size, replicas: replicas.size, rows: clocks.size, tombstones, barriers, log: log.length, sent: out };
+      return { version, epoch, schema, horizon, sessions: sessions.size, replicas: replicas.size, rows: clocks.size, tombstones, barriers, log: log.length, sent: out };
     },
-    /** Forget what the retention window no longer needs; returns { tombstones, replicas } removed */
+    /** Forget what the retention window no longer needs; returns { tombstones, barriers, replicas }: removed, settled and forgotten */
     compact,
     /**
      * The store as a storage document, JSON all through: every row with the
      * timestamp that won it (tombstones included), each replica's progress
-     * and owner, and the version, epoch and schema. An adapter's
+     * and owner, and the version, epoch, schema and horizon. An adapter's
      * `replace(doc)` makes a store of it that refuses what this one would:
      * a stale write, a write under a tombstone, another user's replica.
      * For backups, moving a store between adapters or servers, and looking

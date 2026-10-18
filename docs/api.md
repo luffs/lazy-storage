@@ -32,7 +32,7 @@
 **Server** (`lazy-storage/server`)
 
 - `createStore({ initial, registers, readOnly, validate, maxSkew, retention, compactEvery, deltaLog, maxLeaves, rateLimit, storage, groupCommit, migrations, presence, onError, now })` — `groupCommit` (default true) see [Persistence](server.md#persistence); `migrations` see [Migrations](server.md#migrations); — `presence` is `false` (default), `true`, or `{ key, user, validate, every, maxShare }`; `store.epoch` — this life of the storage
-- `store.observe(event, fn)` → unsubscribe — `'op'`, `'refused'`, `'session'`; `store.stats()` → `{ version, epoch, schema, sessions, replicas, rows, tombstones, barriers, log }`
+- `store.observe(event, fn)` → unsubscribe — `'op'`, `'refused'`, `'session'`; `store.stats()` → `{ version, epoch, schema, horizon, sessions, replicas, rows, tombstones, barriers, log }`
 - `store.session({ send, user, onEvict, broadcast, httpSnapshot })` → `{ receive(message), close(), user, replicaId }` — one per connection, transport-agnostic; `broadcast` is a transport's fan-out to every session at once, `httpSnapshot` `{ url, threshold }` where a client that can fetch gets a large snapshot
 - `store.snapshotJSON()` — the state as JSON, encoded once per change; `snapshotResponse(store, request)` — the snapshot route's Response (`{ v, epoch, state }`, brotli or gzip as accepted, an ETag and 304s), for a server of your own
 - `store.closeSessions(predicate, message)` — evict sessions; `store.presence()` — distinct users with a live session; `store.peers()` — every live session as `{ replicaId, user, data }`

@@ -136,7 +136,12 @@ forgets what is older, on load and then once an hour as ops arrive
 (`store.compact()` does it on demand and reports what it removed). To make
 that safe, an op stamped before the window is refused with code `expired`:
 it might be a write to a record whose deletion has since been forgotten,
-and would resurrect it. The client drops such an op and resyncs, and the
+and would resurrect it. So is an op made in sight of a store version
+below the **horizon**, the highest version among the barriers settled so
+far (`store.stats().horizon`, kept with the rows): a settled barrier no
+longer tells an edit of the deleted container from one of the re-added,
+and the op's timestamp never could, so a replica whose view is older than
+the window loses the edits it makes until it has synced. The client drops such an op and resyncs, and the
 app can listen for the error to tell the user that a change made more than
 a month ago offline could not be kept. `retention: Infinity` keeps
 everything and accepts ops of any age.
@@ -189,7 +194,7 @@ while.
 
 `store.export()` gives a store as a JSON document: every row with the
 timestamp that won it (tombstones included), each replica's progress and
-owner, and the version and schema. Every adapter takes one with
+owner, and the version, schema and horizon. Every adapter takes one with
 `replace(doc)` as a store's whole storage, as it does another adapter's
 `load()`. A store loaded from it refuses what the original would (a stale
 write, a write under a tombstone, another user's replica):

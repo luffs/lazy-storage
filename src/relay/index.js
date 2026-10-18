@@ -421,7 +421,7 @@ export function createRelay({
     setRegisters(copy, doc.registers);
     for (const entry of Array.isArray(doc.clocks) ? doc.clocks : []) {
       if (Array.isArray(entry) && typeof entry[0] === 'string' && isPlainObject(entry[1]) && isTimestamp(entry[1].ts)) {
-        if (entry[1].made && !(isTimestamp(entry[1].since) && Number.isInteger(entry[1].v))) continue;
+        if (entry[1].made && !(isTimestamp(entry[1].since) && Number.isInteger(entry[1].v) && Array.isArray(entry[1].by))) continue;
         copy.clocks.set(entry[0], clockEntry(entry[1]));
       }
     }
@@ -1365,7 +1365,7 @@ export function createRelay({
     // Judged as central will: what the op was made in sight of, when its version counts here (the copy's epoch, or the relay's
     // own, epoch null), and the version its patch becomes here
     const inSight = (op.epoch === null || op.epoch === copy.epoch) && Number.isInteger(op.v) ? op.v : 0;
-    const { accepted } = mergeOp(copy.clocks, op.ts, op.diff, copy.regs, { made: op.made, seen: inSight, v: copy.v + copy.localV + 1 });
+    const { accepted } = mergeOp(copy.clocks, op.ts, op.diff, copy.regs, { made: op.made, seen: inSight, v: copy.v + copy.localV + 1, author: op.replicaId });
     if (!accepted) {
       persist(copy);
       return null;

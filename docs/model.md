@@ -212,11 +212,14 @@ timestamp of the last accepted write per leaf path and decides per leaf:
   (offline when it was deleted) is not making it, and its edits stay
   refused. Either way the lifted tombstone becomes a **barrier** that
   remembers the deletion, the write that re-added the container, and the
-  store version that write became. Whether an edit beneath it is stale is
-  not a matter of time but of what its writer had seen: every op carries
-  the store version its replica had applied when the batch was made
-  (`v`), and a plain write or deletion under a barrier lands only from a
-  replica that had applied the re-add. So an edit of the deleted
+  store version that write became, and which replicas re-added it.
+  Whether an edit beneath it is stale is not a matter of time but of what
+  its writer had seen: every op carries the store version its replica had
+  applied when the batch was made (`v`), and a plain write or deletion
+  under a barrier lands only from a replica that had applied the re-add,
+  or that re-added the container itself (it has what it wrote, whatever
+  it has heard back since: the record it creates and fills in offline,
+  batch after batch, lands whole). So an edit of the deleted
   container is refused however late it was made (a clock that runs ahead
   cannot smuggle one in), what was re-added holds only what was written in
   sight of it, and an edit made in sight of it is judged by timestamp as
@@ -225,7 +228,11 @@ timestamp of the last accepted write per leaf path and decides per leaf:
   container is there: an empty object written at its path leaves it
   standing, and on load it is `{}` at that path. A deletion refused under
   a barrier of something no longer there is moot: refused by nothing,
-  reported to no one. Nothing is lifted beneath a tombstone that stays.
+  reported to no one. Nothing is lifted beneath a tombstone that stays,
+  nor beneath a barrier the writer may not write under. Once a barrier is
+  older than the retention window it settles into a plain container, and
+  the store's **horizon** moves up to its version: an op made in sight of
+  less is refused as expired (see [Persistence](server.md#persistence)).
   The server's
   own `store.patch` is never held back this way: it is the authority, not
   a replica that may be stale, and whatever it writes at a deleted path

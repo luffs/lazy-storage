@@ -88,7 +88,7 @@ without help from the app, which only hears an `error` event:
 |---|---|---|
 | `invalid` | The op breaks the model: an array of objects outside a register, an array fragment, a malformed op | Drops the op and resyncs from a snapshot |
 | `forbidden` | A leaf under a read-only path, `validate` refused, or a deletion of a top-level container of `initial` | Same |
-| `expired` | Stamped before the retention window | Same |
+| `expired` | Stamped before the retention window, or made in sight of a store version below the horizon (the barriers settled since; see [Persistence](server.md#persistence)) | Same |
 | `too-large` | More leaves than `maxLeaves` | Same |
 | `rate-limited` | Beyond the user's token bucket, or after such a refusal and before the next hello; `retryAfter` says how long in ms | Keeps the op, sends nothing more live, and resends its outbox in a hello after `retryAfter` |
 | `clock-skew` | Stamped more than `maxSkew` ahead of the server's clock; `now` is the server's time, `ts` the refused stamp | Adopts the server's time, re-stamps the pending ops, sends them again; no error reaches the app |

@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { createStore, memoryStorage } from '../src/server/index.js';
 import { createClient } from '../src/client/index.js';
 import { createNetwork, fakeTime } from './helpers.js';
+import { PROTOCOL } from '../src/core/index.js';
 
 const INITIAL = { tasks: {} };
 const HOUR = 3_600_000;
@@ -129,4 +130,47 @@ test('retention: Infinity keeps every tombstone and replica and accepts ops of a
   ancient.connect();
   await net.settle();
   assert.equal(store.snapshot().tasks.c.id, 'c');
+});
+
+test('a settled barrier moves the horizon up: an op made in sight of less is refused as expired, after a reload too', async () => {
+  const storage = memoryStorage();
+  const time = fakeTime(100 * DAY);
+  let store = createStore({ initial: INITIAL, storage, now: time, retention: 30 * DAY });
+  store.patch({ tasks: { x: { id: 'x', meta: { note: 'first' } } } });
+  store.patch({ tasks: { x: { meta: null } } });
+  const session = store.session({ send: () => {} });
+  // Replica a re-makes the container on day 100, at version 2 of its knowledge: the barrier becomes version 3
+  session.receive({ t: 'op', op: { replicaId: 'a', seq: 1, ts: [100 * DAY + 1000, 0, 'a'], v: 2, epoch: store.epoch, diff: { tasks: { x: { meta: { note: 'again' } } } }, made: [['tasks', 'x', 'meta']] } });
+  store.flush();
+  assert.equal(store.stats().barriers, 1);
+  assert.equal(store.stats().horizon, 0);
+  // Day 140: the barrier settles, and the horizon is its version
+  time.advance(40 * DAY);
+  assert.deepEqual(store.compact(), { tombstones: 0, barriers: 1, replicas: 1 }, 'the barrier settled, and a, idle since day 100, is forgotten');
+  assert.equal(store.stats().horizon, 3);
+  assert.equal(store.export().horizon, 3);
+  // b, whose view is from before the re-add, edits the old container on day 140 (a fresh stamp): refused, and told why
+  const heard = [];
+  const b = store.session({ send: m => heard.push(m) });
+  b.receive({ t: 'hello', proto: PROTOCOL, replicaId: 'b', ops: [] });
+  b.receive({ t: 'op', op: { replicaId: 'b', seq: 1, ts: [140 * DAY, 0, 'b'], v: 2, epoch: store.epoch, diff: { tasks: { x: { meta: { color: 'red' } } } } } });
+  store.flush();
+  const refused = heard.find(m => m.t === 'error' && m.seq === 1);
+  assert.equal(refused?.code, 'expired');
+  assert.match(refused.message, /version 2.*before 3/);
+  assert.equal(store.snapshot().tasks.x.meta.color, undefined);
+  // In sight of the re-add, the same edit lands; and a never-synced replica (no epoch) is judged by what it writes, as ever
+  b.receive({ t: 'op', op: { replicaId: 'b', seq: 2, ts: [140 * DAY, 1, 'b'], v: 3, epoch: store.epoch, diff: { tasks: { x: { meta: { color: 'red' } } } } } });
+  store.flush();
+  assert.equal(store.snapshot().tasks.x.meta.color, 'red');
+  // The horizon survives a reload
+  store.dispose();
+  store = createStore({ initial: INITIAL, storage, now: time, retention: 30 * DAY });
+  assert.equal(store.stats().horizon, 3);
+  const c = store.session({ send: m => heard.push(m) });
+  c.receive({ t: 'hello', proto: PROTOCOL, replicaId: 'c', ops: [] });
+  c.receive({ t: 'op', op: { replicaId: 'c', seq: 1, ts: [140 * DAY, 2, 'c'], v: 1, epoch: store.epoch, diff: { tasks: { x: { meta: { size: 2 } } } } } });
+  store.flush();
+  assert.equal(heard.filter(m => m.t === 'error' && m.code === 'expired').length, 2);
+  store.dispose();
 });

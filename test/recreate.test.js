@@ -204,3 +204,33 @@ test('a version from another storage life says nothing of what was seen here: su
   assert.equal(edit('r3', { v }).accepted, null, 'no epoch, no claim');
   assert.deepEqual(edit('r4', { v, epoch: store.epoch }).accepted, { state: { lists: { turns: { t2: { color: 'red' } } } } }, 'this store\'s version: seen');
 });
+
+test('a container re-made and then filled in offline, batch after batch, lands whole: the re-adder writes under its own barrier', async () => {
+  const { store, net, a, b, heard } = setup();
+  await net.settle();
+  a.state.state.lists = { turns: { t1: { text: 'x' } } };
+  await net.settle();
+  b.link.goOffline();
+  await net.settle();
+  // Offline, b deletes the container and makes it again, then edits what it made and adds to it: four ops, none answered
+  delete b.state.state.lists;
+  await net.settle();
+  b.state.state.lists = { turns: { t2: { text: 'y' } } };
+  await net.settle();
+  b.state.state.lists.turns.t2.color = 'red';
+  await net.settle();
+  b.state.state.lists.turns.t3 = { text: 'z' };
+  await net.settle();
+  assert.equal(b.pending, 4);
+  b.link.goOnline();
+  b.connect();
+  await net.settle();
+  assert.equal(b.pending, 0);
+  assert.deepEqual(store.snapshot().state.lists, { turns: { t2: { text: 'y', color: 'red' }, t3: { text: 'z' } } }, 'every batch landed');
+  assert.deepEqual(JSON.parse(JSON.stringify(a.state.state.lists)), { turns: { t2: { text: 'y', color: 'red' }, t3: { text: 'z' } } });
+  assert.deepEqual(heard.b, [], 'no conflict: the edits were of the container b made');
+  // Online again, b edits on as before
+  b.state.state.lists.turns.t3.color = 'blue';
+  await net.settle();
+  assert.equal(store.snapshot().state.lists.turns.t3.color, 'blue');
+});

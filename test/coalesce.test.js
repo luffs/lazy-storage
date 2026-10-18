@@ -7,6 +7,7 @@ import { createClient, openClient } from '../src/client/index.js';
 import { memoryOutbox } from '../src/client/storage.js';
 import { indexedDBStorage } from '../src/client/indexeddb.js';
 import { createNetwork, fakeTime } from './helpers.js';
+import { LazyWatch } from 'lazy-watch';
 
 const INITIAL = { tasks: {}, order: [] };
 const REGISTERS = ['order'];
@@ -180,4 +181,26 @@ test('a row adapter rewrites a pruned op and removes an emptied one, so a restar
   assert.deepEqual(store.snapshot().tasks.x, { id: 'x', title: 'hel' });
   b.dispose();
   await storage.destroy();
+});
+
+test('a batch replayed for a follower carries what the follower had seen and made, not what this replica has', async () => {
+  const store = createStore({ initial: INITIAL, registers: REGISTERS });
+  store.patch({ tasks: { x: { id: 'x', title: 'there' } } });
+  store.patch({ settings: { theme: 'dark' } });
+  const net = createNetwork(store);
+  const c = offlineClient(net, { replicaId: 'c' });
+  c.connect();
+  await net.settle();
+  assert.equal(c.version, 2);
+  // The leader's own batch: made from its own state, in sight of version 2
+  c.state.tasks.y = { meta: { note: 'mine' } };
+  await tick();
+  // A follower's, replayed with the version it had seen and the containers it made (shared.js): the lower version, its made
+  LazyWatch.patch(c.wire, { tasks: { x: { meta: { note: 'theirs' } } } }, { origin: 'follower', seen: 1, made: [['tasks', 'x', 'meta']] });
+  await tick();
+  // A follower that says it had seen more than this replica is held to this replica's version
+  LazyWatch.patch(c.wire, { tasks: { z: { meta: {} } } }, { origin: 'follower', seen: 9, made: [['tasks', 'z'], 'junk'] });
+  await tick();
+  c.link.goOffline();
+  assert.deepEqual(c.outbox().map(op => [op.v, op.made]), [[2, [['tasks', 'y']]], [1, [['tasks', 'x', 'meta']]], [2, [['tasks', 'z']]]]);
 });

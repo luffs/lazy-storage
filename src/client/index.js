@@ -42,6 +42,7 @@ import { PROTOCOL } from '../core/protocol.js';
 import { registerSet, valueAt, pathKey } from '../core/paths.js';
 import { leaves, expandRegisters, rebuild } from '../core/model.js';
 import { randomId } from '../core/ids.js';
+import { isMadePath } from '../core/merge.js';
 import { memoryOutbox } from './storage.js';
 import { createConnection } from './connection.js';
 import { createPersistence, isRowAdapter } from './persistence.js';
@@ -52,7 +53,7 @@ const { Utils } = LazyWatch;
 const REMOTE = { origin: 'remote' };
 const SNAPSHOT = { origin: 'remote', snapshot: true };
 const RESTORE = { origin: 'restore' };
-const HISTORY = new Set(['undo', 'redo']);
+const HISTORY = new Set(['undo', 'redo', 'follower']);
 const EVENTS = ['status', 'error', 'sync', 'closed', 'presence', 'peers', 'history', 'conflict', 'rejected', 'reset', 'relay'];
 // A hello carries at most this many ops, so it stays under any payload
 // limit after a long offline spell; the rest go as ops once the answer
@@ -478,10 +479,14 @@ function build({
       emit('rejected', { seq: null, code: err.code ?? 'invalid', message: err.message, diff: LazyWatch.Utils.deepClone(diff) });
       return;
     }
-    const made = madeContainers(expanded, inverse);
     // `v` and `epoch`: the store version this replica had applied, and the storage life it counts in (null: a relay's
-    // own counting), so the server knows what the batch was made in sight of (core/merge.js)
-    const op = { replicaId, seq: ++seq, ts: clock.now(), v: known.v, epoch: known.epoch, diff: expanded, ...(made.length ? { made } : {}) };
+    // own counting), so the server knows what the batch was made in sight of (core/merge.js). A batch replayed for a
+    // follower tab (origin 'follower', see shared.js) was made in sight of what the follower had, which may lag this
+    // replica, and made what the follower's state lacked, not what this one does
+    const follower = meta?.origin === 'follower';
+    const made = follower ? (Array.isArray(meta.made) ? meta.made.filter(isMadePath) : []) : madeContainers(expanded, inverse);
+    const v = follower && Number.isInteger(meta.seen) ? Math.min(known.v, meta.seen) : known.v;
+    const op = { replicaId, seq: ++seq, ts: clock.now(), v, epoch: known.epoch, diff: expanded, ...(made.length ? { made } : {}) };
     const superseded = supersede(op, paths);
     outbox.push(op);
     persistence.op(op, superseded);

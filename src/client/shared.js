@@ -556,12 +556,19 @@ function createReplicaRelay({ tabId, transport, storage, reconnect, keepalive, w
     });
   }
 
-  /** Apply a follower's op to the replica (once per seq): a register it writes is replaced, as the server would */
+  /**
+   * Apply a follower's op to the replica (once per seq): a register it
+   * writes is replaced, as the server would. The batch goes with what the
+   * follower had seen and made (`seen`, `made`), so the op the replica
+   * sends says what the follower's did, not what this tab has: a follower
+   * that lags (a background tab, throttled) may still hold a container
+   * this tab saw deleted, and its edit of it must be judged as such
+   */
   function apply(entry, session, op) {
     if (!Utils.isPlainObject(op) || !Number.isInteger(op.seq)) return;
     if (op.seq > session.lastSeq) {
       session.lastSeq = op.seq;
-      if (Utils.isPlainObject(op.diff)) LazyWatch.patch(entry.client.wire, replacingRegisters(op.diff, entry.regs, entry.client.wire));
+      if (Utils.isPlainObject(op.diff)) LazyWatch.patch(entry.client.wire, replacingRegisters(op.diff, entry.regs, entry.client.wire), { origin: 'follower', seen: op.v, made: op.made });
     }
   }
 

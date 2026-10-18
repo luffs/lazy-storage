@@ -121,6 +121,8 @@ export interface ClockEntry {
   since?: Timestamp;
   /** A barrier's: the store version the re-add became */
   v?: number;
+  /** A barrier's: the replicas that re-added the container; their later ops write beneath it whatever they had seen */
+  by?: string[];
 }
 
 export interface MergeResult {
@@ -151,6 +153,8 @@ export interface MergeOptions {
   seen?: number;
   /** The version the op's patch becomes, stamped on the barriers it leaves */
   v?: number;
+  /** The op's replica (its timestamp's when absent): named by the barriers it leaves or passes, which let its later ops through */
+  author?: string;
 }
 
 /** With a ClockMap descendants come from its index; with a plain Map every key is scanned */
@@ -162,7 +166,7 @@ export function settleBarriers(clocks: Map<string, ClockEntry>, olderThan: Times
 /** Whether something names a path a replica made: a non-empty array of keys */
 export function isMadePath(path: unknown): path is Path;
 /** The clock entry a persisted row stands for */
-export function clockEntry(row: { ts: Timestamp; deleted?: boolean; made?: boolean; since?: Timestamp; v?: number }): ClockEntry;
+export function clockEntry(row: { ts: Timestamp; deleted?: boolean; made?: boolean; since?: Timestamp; v?: number; by?: string[] }): ClockEntry;
 
 export function randomId(): string;
 /** The wire protocol's version, said in every hello; a server that speaks another closes the store with code 'outdated' */

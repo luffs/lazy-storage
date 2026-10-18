@@ -24,7 +24,7 @@ export interface CopyDocument {
   /** Epochs it moved on from (a restore at the server), oldest first */
   pastEpochs: string[];
   registers: string[];
-  clocks: Array<[string, { ts: [number, number, string]; deleted?: true; made?: true; since?: [number, number, string]; v?: number }]>;
+  clocks: Array<[string, { ts: [number, number, string]; deleted?: true; made?: true; since?: [number, number, string]; v?: number; by?: string[] }]>;
   seen: Array<[string, number]>;
   maxTs: [number, number, string] | null;
   presenceOn: boolean;

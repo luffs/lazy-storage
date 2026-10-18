@@ -114,16 +114,16 @@ function checkpointer({ file, driver, exec, onError }) {
 
 // What the `deleted` column says of a row: a live row (0), a tombstone (1), or a
 // barrier (2), a lifted tombstone that holds no value: the re-add's timestamp
-// and, in the `since` columns and `v`, the deletion's timestamp and the
-// re-add's version (core/merge.js)
+// and, in the `since` columns, `v` and `made_by`, the deletion's timestamp
+// and the re-add's version and replicas (core/merge.js)
 const TOMBSTONE = 1;
 const BARRIER = 2;
-/** A row's columns after (store, path): value, the timestamp's three parts, what the row is, and a barrier's `since` and `v` */
+/** A row's columns after (store, path): value, the timestamp's three parts, what the row is, and a barrier's `since`, `v` and `by` */
 const rowColumns = row => [
   row.deleted || row.made ? null : JSON.stringify(row.value),
   row.ts[0], row.ts[1], row.ts[2],
   row.made ? BARRIER : row.deleted ? TOMBSTONE : 0,
-  ...(row.made ? [...row.since, row.v] : [null, null, null, null])
+  ...(row.made ? [...row.since, row.v, JSON.stringify(row.by)] : [null, null, null, null, null])
 ];
 
 const SCHEMA = `
@@ -139,13 +139,15 @@ const SCHEMA = `
     since_count   INTEGER,
     since_replica TEXT,
     v             INTEGER,
+    made_by       TEXT,
     PRIMARY KEY (store, path)
   ) WITHOUT ROWID;
   CREATE TABLE IF NOT EXISTS stores (
     store   TEXT    PRIMARY KEY,
     version INTEGER NOT NULL DEFAULT 0,
     epoch   TEXT,
-    schema  INTEGER
+    schema  INTEGER,
+    horizon INTEGER
   ) WITHOUT ROWID;
   CREATE TABLE IF NOT EXISTS replicas (
     store   TEXT    NOT NULL,
@@ -210,27 +212,29 @@ export function sqliteStorageOn({ exec, prepare, transaction, close, db, driver 
   exec(SCHEMA);
   // Files from before replicas had owners, or stores a schema, gain the column
   if (!prepare('PRAGMA table_info(replicas)').all().some(c => c.name === 'owner')) exec('ALTER TABLE replicas ADD COLUMN owner TEXT;');
-  if (!prepare('PRAGMA table_info(stores)').all().some(c => c.name === 'schema')) exec('ALTER TABLE stores ADD COLUMN schema INTEGER;');
-  // Files from before barriers gain the columns a barrier row carries: the deletion's timestamp and the re-add's version
-  for (const column of ['since_ms INTEGER', 'since_count INTEGER', 'since_replica TEXT', 'v INTEGER']) {
+  for (const column of ['schema INTEGER', 'horizon INTEGER']) {
+    if (!prepare('PRAGMA table_info(stores)').all().some(c => c.name === column.split(' ')[0])) exec(`ALTER TABLE stores ADD COLUMN ${column};`);
+  }
+  // Files from before barriers gain the columns a barrier row carries: the deletion's timestamp, the re-add's version and replicas
+  for (const column of ['since_ms INTEGER', 'since_count INTEGER', 'since_replica TEXT', 'v INTEGER', 'made_by TEXT']) {
     if (!prepare('PRAGMA table_info(leaves)').all().some(c => c.name === column.split(' ')[0])) exec(`ALTER TABLE leaves ADD COLUMN ${column};`);
   }
   const background = wal && file !== ':memory:' && checkpoints === 'worker' && driver ? checkpointer({ file, driver, exec, onError }) : null;
 
   const q = {
     upsert: prepare(`
-      INSERT INTO leaves (store, path, value, ts_ms, ts_count, ts_replica, deleted, since_ms, since_count, since_replica, v)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO leaves (store, path, value, ts_ms, ts_count, ts_replica, deleted, since_ms, since_count, since_replica, v, made_by)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT (store, path) DO UPDATE SET
         value = excluded.value, ts_ms = excluded.ts_ms, ts_count = excluded.ts_count,
         ts_replica = excluded.ts_replica, deleted = excluded.deleted,
-        since_ms = excluded.since_ms, since_count = excluded.since_count, since_replica = excluded.since_replica, v = excluded.v`),
+        since_ms = excluded.since_ms, since_count = excluded.since_count, since_replica = excluded.since_replica, v = excluded.v, made_by = excluded.made_by`),
     del: prepare('DELETE FROM leaves WHERE store = ? AND path = ?'),
-    rows: prepare('SELECT path, value, ts_ms, ts_count, ts_replica, deleted, since_ms, since_count, since_replica, v FROM leaves WHERE store = ?'),
-    version: prepare('SELECT version, epoch, schema FROM stores WHERE store = ?'),
+    rows: prepare('SELECT path, value, ts_ms, ts_count, ts_replica, deleted, since_ms, since_count, since_replica, v, made_by FROM leaves WHERE store = ?'),
+    version: prepare('SELECT version, epoch, schema, horizon FROM stores WHERE store = ?'),
     setVersion: prepare(`
-      INSERT INTO stores (store, version, epoch, schema) VALUES (?, ?, ?, ?)
-      ON CONFLICT (store) DO UPDATE SET version = excluded.version, epoch = excluded.epoch, schema = COALESCE(excluded.schema, stores.schema)`),
+      INSERT INTO stores (store, version, epoch, schema, horizon) VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT (store) DO UPDATE SET version = excluded.version, epoch = excluded.epoch, schema = COALESCE(excluded.schema, stores.schema), horizon = COALESCE(excluded.horizon, stores.horizon)`),
     replicas: prepare('SELECT replica, seq, seen, owner FROM replicas WHERE store = ?'),
     setReplica: prepare(`
       INSERT INTO replicas (store, replica, seq, seen, owner) VALUES (?, ?, ?, ?, ?)
@@ -309,7 +313,7 @@ export function sqliteStorageOn({ exec, prepare, transaction, close, db, driver 
     const last = changes[changes.length - 1];
     // The version first: every commit writes it, and that first write takes
     // the file's write lock, so the lease read below is the latest
-    q.setVersion.run(id, last.version, last.epoch, Number.isInteger(last.schema) ? last.schema : null);
+    q.setVersion.run(id, last.version, last.epoch, Number.isInteger(last.schema) ? last.schema : null, Number.isInteger(last.horizon) ? last.horizon : null);
     if (leasing) {
       // Still ours, or another process has the store now and this one must not write
       const current = lq.get.get(id);
@@ -351,7 +355,7 @@ export function sqliteStorageOn({ exec, prepare, transaction, close, db, driver 
       q.upsert.run(id, key, ...rowColumns(row));
     }
     for (const [replica, r] of Object.entries(doc.replicas ?? {})) q.setReplica.run(id, replica, r.seq, r.seen ?? null, r.owner ?? null);
-    q.setVersion.run(id, doc.version, newEpoch(), Number.isInteger(doc.schema) ? doc.schema : null);
+    q.setVersion.run(id, doc.version, newEpoch(), Number.isInteger(doc.schema) ? doc.schema : null, Number.isInteger(doc.horizon) ? doc.horizon : null);
   });
 
   const remove = transaction(id => {
@@ -392,14 +396,14 @@ export function sqliteStorageOn({ exec, prepare, transaction, close, db, driver 
           const rows = q.rows.all(id).map(r => [
             r.path,
             r.deleted === BARRIER
-              ? { ts: [r.ts_ms, r.ts_count, r.ts_replica], made: true, since: [r.since_ms, r.since_count, r.since_replica], v: r.v }
+              ? { ts: [r.ts_ms, r.ts_count, r.ts_replica], made: true, since: [r.since_ms, r.since_count, r.since_replica], v: r.v, by: JSON.parse(r.made_by) }
               : r.deleted
                 ? { ts: [r.ts_ms, r.ts_count, r.ts_replica], deleted: true }
                 : { value: JSON.parse(r.value), ts: [r.ts_ms, r.ts_count, r.ts_replica] }
           ]);
           const replicas = Object.fromEntries(q.replicas.all(id).map(r => [r.replica, r.owner === null ? { seq: r.seq, seen: r.seen } : { seq: r.seq, seen: r.seen, owner: r.owner }]));
           const log = q.log.all(id).map(r => ({ v: r.v, diff: JSON.parse(r.diff) }));
-          return { rows, replicas, version: meta.version, epoch: meta.epoch, ...(meta.schema === null || meta.schema === undefined ? {} : { schema: meta.schema }), log };
+          return { rows, replicas, version: meta.version, epoch: meta.epoch, ...(meta.schema === null || meta.schema === undefined ? {} : { schema: meta.schema }), ...(meta.horizon === null || meta.horizon === undefined ? {} : { horizon: meta.horizon }), log };
         },
         commit: change => commitMany([change]),
         commitMany,

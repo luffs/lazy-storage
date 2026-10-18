@@ -1,13 +1,15 @@
 // storage.js - Server persistence adapters
 //
 // A store persists as ROWS, one per leaf path: { value, ts } for a live
-// value, { ts, deleted: true } for a tombstone, { ts, made: true, since, v }
-// for a barrier (a tombstone lifted by a write that re-added what was
-// there, core/merge.js: `ts` and `v` the re-add's timestamp and version,
-// `since` the deletion's timestamp; no value, and `{}` at its path on
-// load). Alongside the rows: each replica's progress
-// (the last sequence number seen from it, and when, and the user it
-// belongs to), and the store's version.
+// value, { ts, deleted: true } for a tombstone, { ts, made: true, since,
+// v, by } for a barrier (a tombstone lifted by a write that re-added what
+// was there, core/merge.js: `ts` and `v` the re-add's timestamp and
+// version, `by` the replicas that re-added it, `since` the deletion's
+// timestamp; no value, and `{}` at its path on load). Alongside the rows:
+// each replica's progress (the last sequence number seen from it, and
+// when, and the user it belongs to), the store's version, and its horizon
+// (the version below which barriers have been settled; an op made in
+// sight of less is refused).
 //
 // An empty object is a leaf too (`assignees: {}` is one row). When such a
 // container later gains children, its `{}` row stays next to the child
@@ -19,9 +21,9 @@
 // The interface is incremental so a row-oriented backend (SQLite) writes
 // only what an op touched:
 //
-//   load()  -> null | { rows: Array<[pathKey, row]>, replicas: { replicaId: { seq, seen, owner? } }, version, epoch, schema?, log? }
+//   load()  -> null | { rows: Array<[pathKey, row]>, replicas: { replicaId: { seq, seen, owner? } }, version, epoch, schema?, horizon?, log? }
 //   commit({ upserts: Array<[pathKey, row]>, deletes: pathKey[],
-//            replica?: { id, seq, seen, owner? }, forgetReplicas?: replicaId[], version, epoch, schema,
+//            replica?: { id, seq, seen, owner? }, forgetReplicas?: replicaId[], version, epoch, schema, horizon,
 //            log?: { v, diff }, logFloor?: number })
 //   commitMany(changes) -> void   optional: several commits, in order, as
 //                          one, all or none: a turn's changes (see the
@@ -43,7 +45,8 @@
 // client can tell whether its cached version means anything here.
 // `schema` is how many of the store's `migrations` the rows have been
 // through; an adapter that does not keep it has every migration run again
-// on each load, so it keeps it.
+// on each load, so it keeps it. `horizon` is kept the same way: an adapter
+// that drops it lets an op from before the settled barriers through.
 // `log` in a commit is the accepted diff this op made, at version `v`;
 // an adapter may keep these (pruning below `logFloor`) and hand them back
 // as `log: [{ v, diff }]` on load, so a restarted server still answers
@@ -76,8 +79,11 @@ export function assertDocument(doc) {
   for (const entry of doc.rows) {
     const row = Array.isArray(entry) && typeof entry[0] === 'string' ? entry[1] : null;
     if (!row || typeof row !== 'object' || !isTimestamp(row.ts)) throw new TypeError(`A row is [path key, { ts, ... }] with a timestamp: ${JSON.stringify(entry)}`);
-    if (row.made && !(isTimestamp(row.since) && Number.isInteger(row.v))) throw new TypeError(`A barrier row carries the deletion's timestamp (since) and the re-add's version (v): ${JSON.stringify(entry)}`);
+    if (row.made && !(isTimestamp(row.since) && Number.isInteger(row.v) && Array.isArray(row.by) && row.by.every(id => typeof id === 'string'))) {
+      throw new TypeError(`A barrier row carries the deletion's timestamp (since), the re-add's version (v) and its replicas (by): ${JSON.stringify(entry)}`);
+    }
   }
+  if (doc.horizon !== undefined && !(Number.isInteger(doc.horizon) && doc.horizon >= 0)) throw new TypeError('A store document\'s horizon is a version');
 }
 
 /** The in-memory document shared by the memory and JSON-file adapters */
@@ -88,10 +94,11 @@ function document(initial = null, { keepLog = false } = {}) {
   let version = initial ? initial.version : 0;
   let epoch = initial?.epoch ?? null;
   let schema = Number.isInteger(initial?.schema) ? initial.schema : undefined;
+  let horizon = Number.isInteger(initial?.horizon) ? initial.horizon : undefined;
   let seen = initial !== null;
   return {
     load: () => (seen
-      ? { rows: [...rows].map(([k, r]) => [k, structuredClone(r)]), replicas: structuredClone(replicas), version, epoch, ...(schema === undefined ? {} : { schema }), ...(keepLog ? { log: structuredClone(log) } : {}) }
+      ? { rows: [...rows].map(([k, r]) => [k, structuredClone(r)]), replicas: structuredClone(replicas), version, epoch, ...(schema === undefined ? {} : { schema }), ...(horizon === undefined ? {} : { horizon }), ...(keepLog ? { log: structuredClone(log) } : {}) }
       : null),
     commit(change) {
       seen = true;
@@ -105,12 +112,13 @@ function document(initial = null, { keepLog = false } = {}) {
       version = change.version;
       if (change.epoch !== undefined) epoch = change.epoch;
       if (Number.isInteger(change.schema)) schema = change.schema;
+      if (Number.isInteger(change.horizon)) horizon = change.horizon;
       if (keepLog) {
         if (change.log) log.push(structuredClone(change.log));
         if (Number.isInteger(change.logFloor)) log = log.filter(e => e.v >= change.logFloor);
       }
     },
-    serialize: () => ({ rows: [...rows], replicas, version, epoch, ...(schema === undefined ? {} : { schema }), ...(keepLog ? { log } : {}) }),
+    serialize: () => ({ rows: [...rows], replicas, version, epoch, ...(schema === undefined ? {} : { schema }), ...(horizon === undefined ? {} : { horizon }), ...(keepLog ? { log } : {}) }),
     replace(doc) {
       assertDocument(doc);
       rows = new Map(doc.rows.map(([k, r]) => [k, structuredClone(r)]));
@@ -118,6 +126,7 @@ function document(initial = null, { keepLog = false } = {}) {
       version = doc.version;
       epoch = newEpoch();
       schema = Number.isInteger(doc.schema) ? doc.schema : undefined;
+      horizon = Number.isInteger(doc.horizon) ? doc.horizon : undefined;
       log = [];
       seen = true;
     }

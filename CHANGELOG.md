@@ -10,15 +10,20 @@ container) names the path in its op as `made`, and the server lifts the
 tombstone there, as it did only for an object carrying an `id`; undoing
 a deletion makes the container again, so it comes back. A lifted
 tombstone is no longer removed but becomes a barrier that remembers the
-deletion, the re-add, and the store version the re-add became; and every
-op now says which store version its replica had applied when the batch
-was made (`v`). Beneath a barrier, a plain write or deletion lands only
-from a replica that had applied the re-add: an edit of the deleted
+deletion, the re-add, the store version the re-add became and the
+replicas that re-added; and every op now says which store version its
+replica had applied when the batch was made (`v`). Beneath a barrier, a
+plain write or deletion lands only from a replica that had applied the
+re-add, or that re-added the container itself: an edit of the deleted
 container is refused however late it was made (before, one from before
 the deletion that arrived late landed in the re-added record, and a clock
-running ahead could have put a stale edit past any timestamp), while two
-replicas re-adding the same container after one deletion both land,
-whichever arrives first. The protocol is now versioned: a hello says
+running ahead could have put a stale edit past any timestamp), while a
+record created and filled in offline, batch after batch, lands whole,
+and two replicas re-adding the same container after one deletion both
+land, whichever arrives first. Once a barrier is older than the
+retention window it settles, and the store's horizon moves up to its
+version: an op made in sight of less is refused as `expired`, as one
+stamped before the window is. The protocol is now versioned: a hello says
 which one the client speaks, and a server that speaks another closes the
 store for it with code `outdated`, so a page left open across a deploy
 learns to reload rather than have its edits judged by rules it does not
@@ -40,7 +45,9 @@ memory document. Do not open such storage with an older version.
 
 ### Changed
 
-- **A lifted tombstone leaves a barrier, and what lands beneath it is decided by what the writer had seen.** Re-adding a record (an object with an `id`), making a container, or the server's own patch at a deleted path turns the tombstone into `{ ts, made: true, since, v }`: `since` the deletion's timestamp, `ts` the re-add's, `v` the store version the re-add became. A plain write or deletion beneath it from a replica that had not applied `v` is refused, whatever its timestamp (before, the entry was removed and a stale edit could land in the re-added record); one from a replica that had is judged by timestamp as anywhere. A write that re-adds the container itself passes when newer than `since`, so concurrent re-adds land in any order, and the barrier is the first to arrive. The server's own patch is held back by no barrier. A barrier says the container is there: an empty object written at its path leaves it standing, and on load it is `{}` at that path. A deletion refused under a barrier of something no longer there is moot, in neither the winning nor the losing leaves, so no conflict is reported for it. Nothing is lifted beneath a tombstone that stays. `mergeOp` reports barriers as `barriers` (a lifted tombstone is no longer among `dropped`), the store persists them as rows of their own, `assertDocument` refuses a restore whose barrier rows lack `since` or `v`, and `compactTombstones` leaves barriers to `settleBarriers`, which turns one older than the retention window into the row of a container written empty
+- **A lifted tombstone leaves a barrier, and what lands beneath it is decided by what the writer had seen.** Re-adding a record (an object with an `id`), making a container, or the server's own patch at a deleted path turns the tombstone into `{ ts, made: true, since, v, by }`: `since` the deletion's timestamp, `ts` the re-add's, `v` the store version the re-add became, `by` the replicas that re-added it. A plain write or deletion beneath it from a replica that had not applied `v` is refused, whatever its timestamp (before, the entry was removed and a stale edit could land in the re-added record); one from a replica that had, or that is among `by` (it has the container it wrote, whatever it has heard back: the batches that fill in a record created offline land), is judged by timestamp as anywhere. A write that re-adds the container itself passes when newer than `since`, so concurrent re-adds land in any order; the barrier is the first to arrive, and names every re-adder. The server's own patch is held back by no barrier. A barrier says the container is there: an empty object written at its path leaves it standing, and on load it is `{}` at that path. A deletion refused under a barrier of something no longer there is moot, in neither the winning nor the losing leaves, so no conflict is reported for it. Nothing is lifted beneath a tombstone that stays, nor beneath a barrier the op may not write under. `mergeOp` takes the op's replica as `options.author` (its timestamp's when absent) and reports barriers as `barriers` (a lifted tombstone is no longer among `dropped`), the store persists them as rows of their own, `assertDocument` refuses a restore whose barrier rows lack `since`, `v` or `by`, and `compactTombstones` leaves barriers to `settleBarriers`, which turns one older than the retention window into the row of a container written empty
+- **A store keeps a horizon, and refuses an op made in sight of less.** Settling a barrier loses what told an edit of the deleted container from one of the re-added, and a timestamp never could, so `store.compact()` moves `horizon` (in `stats()`, the export and every commit; SQLite keeps it in the `stores` table, memory and JSON documents as a field) up to the highest version among the barriers it settled, and an op of the store's epoch with `v` below it is refused with code `expired`, as one stamped before the window is: a replica whose view is older than the retention window loses the edits it makes until it has synced
+- **A browser's tabs: a batch replayed for a follower carries what the follower had seen and made.** The leader's replica used to stamp the op with its own version and compute `made` from its own state, so a follower tab that lagged (throttled in the background) and still held a container the leader had seen deleted and re-added would have its edit land, or even re-add the container. The op now carries the lower of the two versions and the follower's `made`. Tabs of one browser are one replica, so an edit a lagging tab makes beneath a container its own browser re-added still lands, by authorship
 
 ## [0.25.0] - 2026-10-17
 

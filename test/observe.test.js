@@ -61,7 +61,7 @@ test('stats counts what the store holds', async () => {
   a.collection('tasks').remove('t1');
   await net.settle();
   const { sent, ...counts } = store.stats();
-  assert.deepEqual(counts, { version: 2, epoch: store.epoch, schema: 0, sessions: 1, replicas: 1, rows: 1, tombstones: 1, barriers: 0, log: 2 });
+  assert.deepEqual(counts, { version: 2, epoch: store.epoch, schema: 0, horizon: 0, sessions: 1, replicas: 1, rows: 1, tombstones: 1, barriers: 0, log: 2 });
   assert.equal(sent.ack.messages, 2, 'two ops acknowledged');
 });
 
