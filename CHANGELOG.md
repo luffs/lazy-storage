@@ -4,6 +4,8 @@ All notable changes to lazy-storage are documented here. The format follows Keep
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-10-18
+
 A container deleted and made again now lands. A replica that writes an
 object at a path it had nothing at (it saw the deletion, or never had the
 container) names the path in its op as `made`, and the server lifts the
