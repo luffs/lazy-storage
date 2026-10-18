@@ -999,6 +999,8 @@ function build({
     },
     /** The store version this client has seen everything up to */
     get version() { return known.v; },
+    /** The storage life `version` counts in: the server's epoch, or null for a relay's own counting, or before any answer */
+    get epoch() { return known.epoch; },
     /**
      * True while a relay answers this store from its own copy, the server
      * being away (lazy-storage/relay): edits reach the others behind the

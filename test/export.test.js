@@ -165,13 +165,22 @@ test('a restore starts from the document\'s horizon, or none: the replaced store
   }
 });
 
-test('a barrier row from before re-adders were named loads, naming nobody', () => {
-  const memory = memoryStorage();
-  const now = Date.now();   // within the retention window, or the barrier would settle on load
-  memory.replace({ rows: [['["tasks","d"]', { ts: [now, 0, 'x'], made: true, since: [now - 1, 0, 'x'], v: 1 }]], replicas: {}, version: 2 });
-  const store = createStore({ initial: INITIAL, registers: ['order'], storage: memory });
-  assert.equal(store.stats().barriers, 1);
-  assert.deepEqual(store.snapshot().tasks.d, {}, 'the container the barrier stands for');
-  assert.deepEqual(store.export().rows.find(([key]) => key === '["tasks","d"]')[1].by, [], 'written again with nobody named');
-  store.dispose();
+test('a barrier row from before re-adders were named loads, naming nobody, from any adapter', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'lazy-storage-export-'));
+  const sqlite = sqliteStorage?.(join(dir, 'stores.sqlite'));
+  try {
+    const now = Date.now();   // within the retention window, or the barrier would settle on load
+    const adapters = [['memory', memoryStorage()], ['json', jsonFileStorage(join(dir, 'store.json'))], ...(sqlite ? [['sqlite', sqlite.store('team-1')]] : [])];
+    for (const [label, storage] of adapters) {
+      storage.replace({ rows: [['["tasks","d"]', { ts: [now, 0, 'x'], made: true, since: [now - 1, 0, 'x'], v: 1 }]], replicas: {}, version: 2 });
+      const store = createStore({ initial: INITIAL, registers: ['order'], storage });
+      assert.equal(store.stats().barriers, 1, label);
+      assert.deepEqual(store.snapshot().tasks.d, {}, `${label}: the container the barrier stands for`);
+      assert.deepEqual(store.export().rows.find(([key]) => key === '["tasks","d"]')[1].by, [], `${label}: written again with nobody named`);
+      store.dispose();
+    }
+  } finally {
+    sqlite?.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

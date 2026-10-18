@@ -899,7 +899,7 @@ test('a tab that signs in after the socket was turned away brings the browser ba
   assert.equal(store.sessions, 1, 'one socket');
 });
 
-test('a follower\'s op from before the replica\'s reset is taken as made in sight of nothing: the versions followers hear count on across epochs', async t => {
+test('a follower\'s op from before the replica\'s reset is taken as made in sight of nothing, and one from the reset on as made in sight of the new epoch', async t => {
   const storages = new Map();   // one per store id, so the store put back from the copy is served from it
   const stores = createStores(id => createStore({ initial: INITIAL, storage: storages.get(id) ?? storages.set(id, memoryStorage()).get(id) }));
   const net = createNetwork({ session: ({ send, user }) => createHub(id => stores.get(id), { send, user }) });
@@ -912,19 +912,12 @@ test('a follower\'s op from before the replica\'s reset is taken as made in sigh
   const stop = a.connection.follow(port1, [{ store: 'main', initial: INITIAL }]);
   const heard = [];
   port2.onmessage = e => heard.push(e.data);
+  const label = () => heard.filter(m => Number.isInteger(m.v)).at(-1).v;
   port2.postMessage({ t: 'hello', proto: PROTOCOL, store: 'main', replicaId: 'raw', ops: [] });
   await b.until(() => heard.some(m => m.t === 'snapshot'), 'the follower is answered');
   a.db.state.tasks.x = { id: 'x', meta: { note: 'first' } };
   await b.until(() => stores.get('main').snapshot().tasks.x?.meta?.note === 'first', 'x on the server');
-  const before = heard.filter(m => Number.isInteger(m.v)).at(-1).v;
-  const copy = stores.get('main').export();
-
-  // The store is put back from the copy: the replica resets, and the follower hears of it
-  a.db.state.tasks.y = { id: 'y' };
-  await b.until(() => stores.get('main').snapshot().tasks.y, 'y on the server');
-  stores.restore('main', copy);
-  await b.until(() => heard.some(m => m.t === 'reset') && a.db.state.tasks.y === undefined, 'reset, and the copy held');
-  // Another replica deletes x's meta and makes it again in the new epoch
+  // Another replica deletes x's meta and makes it again: a barrier, in the copy taken next
   const o = net.client({ replicaId: 'o', initial: INITIAL });
   await b.until(() => o.status === 'online', 'o online');
   delete o.state.tasks.x.meta;
@@ -932,8 +925,18 @@ test('a follower\'s op from before the replica\'s reset is taken as made in sigh
   o.state.tasks.x.meta = { note: 'again' };
   await net.settle();
   await b.until(() => a.db.state.tasks.x?.meta?.note === 'again', 'the leader has the re-add');
-  const after = heard.filter(m => Number.isInteger(m.v)).at(-1).v;
-  assert.ok(after > before, 'the versions the follower hears went on up through the reset');
+  assert.equal(stores.get('main').stats().barriers, 1);
+  const before = label();
+  const copy = stores.get('main').export();
+
+  // The store is put back from the copy: the replica resets, and the follower hears of it, with the copy's state
+  a.db.state.tasks.y = { id: 'y' };
+  await b.until(() => stores.get('main').snapshot().tasks.y, 'y on the server');
+  stores.restore('main', copy);
+  await b.until(() => heard.some(m => m.t === 'reset') && a.db.state.tasks.y === undefined && a.db.status === 'online', 'reset, and the copy held');
+  await net.settle();
+  const atReset = label();
+  assert.ok(atReset > before, 'the versions the follower hears went on up through the reset');
 
   // The follower, still behind the reset, edits the old meta: judged as made in sight of nothing, and refused under o's barrier
   port2.postMessage({ t: 'op', store: 'main', op: { replicaId: 'raw', seq: 1, ts: [Date.now(), 0, 'raw'], v: before, epoch: null, diff: { tasks: { x: { meta: { color: 'stale' } } } } } });
@@ -941,8 +944,8 @@ test('a follower\'s op from before the replica\'s reset is taken as made in sigh
   await net.settle();
   assert.equal(stores.get('main').snapshot().tasks.x.meta.color, undefined, 'the edit of the deleted container did not land');
   assert.equal(a.db.state.tasks.x.meta.color, undefined, 'and the leader was corrected');
-  // Caught up, the same edit lands
-  port2.postMessage({ t: 'op', store: 'main', op: { replicaId: 'raw', seq: 2, ts: [Date.now() + 1, 0, 'raw'], v: after, epoch: null, diff: { tasks: { x: { meta: { color: 'fresh' } } } } } });
+  // Having heard the snapshot that brought the new epoch, and nothing since, the same edit is made in sight of the barrier: it lands
+  port2.postMessage({ t: 'op', store: 'main', op: { replicaId: 'raw', seq: 2, ts: [Date.now() + 1, 0, 'raw'], v: atReset, epoch: null, diff: { tasks: { x: { meta: { color: 'fresh' } } } } } });
   await b.until(() => stores.get('main').snapshot().tasks.x.meta.color === 'fresh', 'the edit made in sight of the re-add landed');
   stop();
   o.dispose();

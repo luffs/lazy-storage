@@ -415,6 +415,8 @@ export interface Client<S extends object = any> {
   stats(): ClientStats;
   /** The store version this client has seen everything up to */
   readonly version: number;
+  /** The storage life `version` counts in: the server's epoch, null for a relay's own counting, or before any answer */
+  readonly epoch: string | null;
   /** True while a relay (lazy-storage/relay) answers this store from its own copy, the server being away: edits reach the others behind the relay but stay pending until the server has them */
   readonly relayed: boolean;
   /** Distinct users with a live session on this store (empty while offline) */

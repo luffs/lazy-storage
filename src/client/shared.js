@@ -418,8 +418,8 @@ function createReplicaRelay({ tabId, transport, storage, reconnect, keepalive, w
     if (entry) return entry;
     const info = infos.get(store) ?? { initial: {}, registers: [] };
     const regs = registerSet(info.registers);
-    // `base` and `floor`: the versions followers hear count on from the replica's across its epochs (see fv)
-    entry = { store, client: null, adapter: null, regs, registers: regs.patterns.map(p => p.join('/')), sessions: new Map(), queue: [], stops: [], timer: null, base: 0, floor: 0, lastFv: 0 };
+    // `base`, `floor` and `epoch`: the versions followers hear count on from the replica's across its epochs (see fv)
+    entry = { store, client: null, adapter: null, regs, registers: regs.patterns.map(p => p.join('/')), sessions: new Map(), queue: [], stops: [], timer: null, base: 0, floor: 0, lastFv: 0, epoch: undefined };
     entries.set(store, entry);
     const adapter = storage(store);
     entry.adapter = adapter;
@@ -428,6 +428,7 @@ function createReplicaRelay({ tabId, transport, storage, reconnect, keepalive, w
       if (entries.get(store) !== entry) return void client.dispose();   // let go while it was opening
       if (!saved && persisted) persistIdentity(adapter, client);
       entry.client = client;
+      entry.epoch = client.epoch;
       // Over a copy: a follower told may leave and come back from inside the event, which must not have it told again
       const all = message => { for (const s of [...entry.sessions.values()]) send(s.tab, { ...message, store }); };
       entry.stops = [
@@ -441,13 +442,8 @@ function createReplicaRelay({ tabId, transport, storage, reconnect, keepalive, w
         // What the replica's ops lost or had refused: the browser's, so every tab hears it
         client.on('conflict', conflict => all({ t: 'conflict', ...conflict })),
         client.on('rejected', rejected => all({ t: 'rejected', ...rejected })),
-        // The store started over (a backup restored): only the replica can tell, by the epoch. The versions the
-        // followers hear count on past the last one sent, so a follower's op from before the reset is told apart
-        client.on('reset', reset => {
-          entry.floor = entry.lastFv + 1;
-          entry.base = entry.floor - client.version;
-          all({ t: 'reset', ...reset });
-        }),
+        // The store started over (a backup restored): only the replica can tell, by the epoch
+        client.on('reset', reset => all({ t: 'reset', ...reset })),
         // A relay on the way answers on its own (lazy-storage/relay), or no longer does: every tab's to know
         client.on('relay', relayed => all({ t: 'relay', status: relayed ? 'local' : 'through' })),
         client.on('sync', () => onPending(store, client.pending))
@@ -564,13 +560,23 @@ function createReplicaRelay({ tabId, transport, storage, reconnect, keepalive, w
 
   /**
    * The version a follower hears: the replica's, counted on across the
-   * replica's epochs. A restore starts the server's versions over (lower,
-   * as often as not), and a follower's op says only a number, so the
-   * numbers followers hear never go back: after a reset they count on from
-   * the last one sent (`floor`), offset from the replica's by `base`. An
-   * op below the floor was made in sight of an earlier epoch
+   * epochs its versions count in. A restore starts the server's versions
+   * over (lower, as often as not), and a relay answering on its own counts
+   * past the server's; a follower's op says only a number. So the numbers
+   * followers hear never go back: at the first message of a new epoch (the
+   * snapshot that brought it, before anything else goes out) they count on
+   * from the last one sent (`floor`), offset from the replica's by `base`,
+   * and an op below the floor was made in sight of an earlier epoch
    */
-  const fv = entry => (entry.lastFv = Math.max(entry.lastFv, entry.base + entry.client.version));
+  function fv(entry) {
+    const { client } = entry;
+    if (client.epoch !== entry.epoch) {
+      entry.epoch = client.epoch;
+      entry.floor = entry.lastFv + 1;
+      entry.base = entry.floor - client.version;
+    }
+    return (entry.lastFv = Math.max(entry.lastFv, entry.base + client.version));
+  }
 
   /**
    * Apply a follower's op to the replica (once per seq): a register it

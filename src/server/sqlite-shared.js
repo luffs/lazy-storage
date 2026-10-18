@@ -123,7 +123,7 @@ const rowColumns = row => [
   row.deleted || row.made ? null : JSON.stringify(row.value),
   row.ts[0], row.ts[1], row.ts[2],
   row.made ? BARRIER : row.deleted ? TOMBSTONE : 0,
-  ...(row.made ? [...row.since, row.v, JSON.stringify(row.by)] : [null, null, null, null, null])
+  ...(row.made ? [...row.since, row.v, JSON.stringify(row.by ?? [])] : [null, null, null, null, null])
 ];
 
 const SCHEMA = `
