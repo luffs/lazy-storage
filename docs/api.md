@@ -75,5 +75,5 @@ quickstart's `tasks: []` takes records; give the type argument
 
 **Core** (`lazy-storage/core`): the pieces both sides share — `createClock`,
 `compareTs`, `mergeOp`, `leaves`, `expandRegisters`, `rebuild`, `registerSet`,
-`compactTombstones`, `settleBarriers`, `isMadePath`, `clockEntry`, `randomId`, and the position keys: `keyBetween(a, b)`,
+`compactTombstones`, `settleBarriers` (returns the settled keys, each with the barrier it was), `isMadePath`, `clockEntry`, `randomId`, and the position keys: `keyBetween(a, b)`,
 `keysBetween(a, b, n)`, `comparePositions`, `isPositionKey`.

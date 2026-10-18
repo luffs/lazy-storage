@@ -79,8 +79,8 @@ export function assertDocument(doc) {
   for (const entry of doc.rows) {
     const row = Array.isArray(entry) && typeof entry[0] === 'string' ? entry[1] : null;
     if (!row || typeof row !== 'object' || !isTimestamp(row.ts)) throw new TypeError(`A row is [path key, { ts, ... }] with a timestamp: ${JSON.stringify(entry)}`);
-    if (row.made && !(isTimestamp(row.since) && Number.isInteger(row.v) && Array.isArray(row.by) && row.by.every(id => typeof id === 'string'))) {
-      throw new TypeError(`A barrier row carries the deletion's timestamp (since), the re-add's version (v) and its replicas (by): ${JSON.stringify(entry)}`);
+    if (row.made && !(isTimestamp(row.since) && Number.isInteger(row.v) && (row.by === undefined || (Array.isArray(row.by) && row.by.every(id => typeof id === 'string'))))) {
+      throw new TypeError(`A barrier row carries the deletion's timestamp (since), the re-add's version (v) and, when known, its replicas (by): ${JSON.stringify(entry)}`);
     }
   }
   if (doc.horizon !== undefined && !(Number.isInteger(doc.horizon) && doc.horizon >= 0)) throw new TypeError('A store document\'s horizon is a version');

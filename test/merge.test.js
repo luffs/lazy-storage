@@ -135,7 +135,7 @@ test('compactTombstones forgets old tombstones and keeps live entries; settleBar
   assert.deepEqual(settleBarriers(clocks, T(15)), [], 'so is the barrier');
   assert.deepEqual(compactTombstones(clocks, T(25)), ['["a"]']);
   assert.deepEqual(clocks.get('["c"]'), { ts: T(22, 'a'), made: true, since: T(20), v: 3, by: ['a'] }, 'a barrier is no tombstone');
-  assert.deepEqual(settleBarriers(clocks, T(25)), ['["c"]']);
+  assert.deepEqual(settleBarriers(clocks, T(25)), [['["c"]', { ts: T(22, 'a'), made: true, since: T(20), v: 3, by: ['a'] }]], 'the key, with the barrier it was');
   assert.deepEqual(clocks.get('["c"]'), { ts: T(22, 'a') }, 'the entry of a container written empty at the lift');
   assert.deepEqual([...clocks.keys()].sort(), ['["b"]', '["c","x"]', '["c"]']);
   // Settled, the container is edited on timestamps alone, whatever the writer had seen (the store's horizon stands in for the barrier)

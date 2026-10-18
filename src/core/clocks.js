@@ -17,7 +17,7 @@ import { pathKey, parsePathKey } from './paths.js';
  */
 export function clockEntry(row) {
   if (row.deleted) return { ts: row.ts, deleted: true };
-  if (row.made) return { ts: row.ts, made: true, since: row.since, v: row.v, by: [...row.by] };
+  if (row.made) return { ts: row.ts, made: true, since: row.since, v: row.v, by: Array.isArray(row.by) ? [...row.by] : [] };
   return { ts: row.ts };
 }
 

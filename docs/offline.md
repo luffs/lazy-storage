@@ -80,3 +80,17 @@ in flight are re-applied on top and sent. Nothing is lost on a reload
 while offline: the replica id, sequence numbers, pending ops, and the
 version are restored with the outbox, and the server ignores an op it
 has already seen.
+
+A replica away for longer than the server's **retention window** (30 days
+by default) is out of the game until it has synced: the ops it made before
+the window are refused as `expired`, since the deletions they might
+resurrect have been forgotten, and so are the ops it makes after, whatever
+they touch, until a snapshot has brought it up to date. The server keeps
+a **horizon**, the highest version among the barriers (re-added
+containers) it has settled, and an op made in sight of a lower version
+could be an edit of a container deleted and re-added since, which nothing
+tells apart any more. The client drops each refused op and resyncs, and
+the app hears `error` with code `expired` for each (see [What happened to
+my edit](model.md#what-happened-to-my-edit)); a replica that was online
+within the window is never caught by this, since its version is past any
+barrier that old.

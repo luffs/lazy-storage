@@ -51,7 +51,7 @@ test('an exported store is a JSON document; any adapter that takes it serves the
   assert.deepEqual(Object.keys(doc.rows.find(([key]) => key === '["tasks","d"]')[1]).sort(), ['by', 'made', 'since', 'ts', 'v'], 'a barrier is a row of two timestamps, a version, the replicas that re-added, and no value');
 
   // A barrier row without what it stands on is no document: the adapter says so rather than serve a store that judges wrong
-  for (const broken of [{ ts: [1, 0, 'x'], made: true }, { ts: [1, 0, 'x'], made: true, since: [0, 0, 'x'], v: 1 }, { ts: [1, 0, 'x'], made: true, since: [0, 0, 'x'], by: ['x'] }, { made: true, since: [0, 0, 'x'], v: 1, by: ['x'] }]) {
+  for (const broken of [{ ts: [1, 0, 'x'], made: true }, { ts: [1, 0, 'x'], made: true, since: [0, 0, 'x'], by: ['x'] }, { ts: [1, 0, 'x'], made: true, since: [0, 0, 'x'], v: 1, by: 'x' }, { made: true, since: [0, 0, 'x'], v: 1, by: ['x'] }]) {
     assert.throws(() => memoryStorage().replace({ ...doc, rows: [['["tasks","d"]', broken]] }), TypeError, `refused: ${JSON.stringify(broken)}`);
   }
   const memory = memoryStorage();
@@ -139,4 +139,39 @@ test('a client that saw more than a restored copy holds gets a snapshot, not a d
   assert.ok(answers.includes('snapshot') && !answers.includes('delta'));
   assert.deepEqual(JSON.parse(JSON.stringify(client.state)), current.snapshot(), 'the client holds what the server holds');
   current.dispose();
+});
+
+test('a restore starts from the document\'s horizon, or none: the replaced store\'s belongs to another lineage', { skip: !sqliteStorage }, () => {
+  const dir = mkdtempSync(join(tmpdir(), 'lazy-storage-export-'));
+  try {
+    const sqlite = sqliteStorage(join(dir, 'stores.sqlite'));
+    try {
+      // A load opens the store, so each sequence of restores is loaded once, at its end
+      for (const [label, open] of [['sqlite', id => sqlite.store(id)], ['memory', () => memoryStorage()]]) {
+        const none = open('none');
+        none.replace({ rows: [], replicas: {}, version: 5000, horizon: 4000 });
+        none.replace({ rows: [], replicas: {}, version: 1000 });
+        assert.ok(!none.load().horizon, `${label}: a document without a horizon restores a store without one`);
+        const some = open('some');
+        some.replace({ rows: [], replicas: {}, version: 5000, horizon: 4000 });
+        some.replace({ rows: [], replicas: {}, version: 1000, horizon: 700 });
+        assert.equal(some.load().horizon, 700, `${label}: a document's horizon is the store's`);
+      }
+    } finally {
+      sqlite.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a barrier row from before re-adders were named loads, naming nobody', () => {
+  const memory = memoryStorage();
+  const now = Date.now();   // within the retention window, or the barrier would settle on load
+  memory.replace({ rows: [['["tasks","d"]', { ts: [now, 0, 'x'], made: true, since: [now - 1, 0, 'x'], v: 1 }]], replicas: {}, version: 2 });
+  const store = createStore({ initial: INITIAL, registers: ['order'], storage: memory });
+  assert.equal(store.stats().barriers, 1);
+  assert.deepEqual(store.snapshot().tasks.d, {}, 'the container the barrier stands for');
+  assert.deepEqual(store.export().rows.find(([key]) => key === '["tasks","d"]')[1].by, [], 'written again with nobody named');
+  store.dispose();
 });

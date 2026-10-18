@@ -418,7 +418,8 @@ function createReplicaRelay({ tabId, transport, storage, reconnect, keepalive, w
     if (entry) return entry;
     const info = infos.get(store) ?? { initial: {}, registers: [] };
     const regs = registerSet(info.registers);
-    entry = { store, client: null, adapter: null, regs, registers: regs.patterns.map(p => p.join('/')), sessions: new Map(), queue: [], stops: [], timer: null };
+    // `base` and `floor`: the versions followers hear count on from the replica's across its epochs (see fv)
+    entry = { store, client: null, adapter: null, regs, registers: regs.patterns.map(p => p.join('/')), sessions: new Map(), queue: [], stops: [], timer: null, base: 0, floor: 0, lastFv: 0 };
     entries.set(store, entry);
     const adapter = storage(store);
     entry.adapter = adapter;
@@ -431,7 +432,7 @@ function createReplicaRelay({ tabId, transport, storage, reconnect, keepalive, w
       const all = message => { for (const s of [...entry.sessions.values()]) send(s.tab, { ...message, store }); };
       entry.stops = [
         // Every batch the replica sees, its followers' own included, reaches every follower
-        client.watch(diff => all({ t: 'patch', diff, ts: clock.now(), v: client.version })),
+        client.watch(diff => all({ t: 'patch', diff, ts: clock.now(), v: fv(entry) })),
         client.on('peers', peers => { for (const s of entry.sessions.values()) if (s.presence) send(s.tab, { t: 'presence', peers, store }); }),
         // A store the server closed for us. The socket turned away is the hidden client's closed too,
         // but reaches the followers once, as the socket's (above), after every hidden client has heard
@@ -440,8 +441,13 @@ function createReplicaRelay({ tabId, transport, storage, reconnect, keepalive, w
         // What the replica's ops lost or had refused: the browser's, so every tab hears it
         client.on('conflict', conflict => all({ t: 'conflict', ...conflict })),
         client.on('rejected', rejected => all({ t: 'rejected', ...rejected })),
-        // The store started over (a backup restored): only the replica can tell, by the epoch
-        client.on('reset', reset => all({ t: 'reset', ...reset })),
+        // The store started over (a backup restored): only the replica can tell, by the epoch. The versions the
+        // followers hear count on past the last one sent, so a follower's op from before the reset is told apart
+        client.on('reset', reset => {
+          entry.floor = entry.lastFv + 1;
+          entry.base = entry.floor - client.version;
+          all({ t: 'reset', ...reset });
+        }),
         // A relay on the way answers on its own (lazy-storage/relay), or no longer does: every tab's to know
         client.on('relay', relayed => all({ t: 'relay', status: relayed ? 'local' : 'through' })),
         client.on('sync', () => onPending(store, client.pending))
@@ -557,18 +563,30 @@ function createReplicaRelay({ tabId, transport, storage, reconnect, keepalive, w
   }
 
   /**
+   * The version a follower hears: the replica's, counted on across the
+   * replica's epochs. A restore starts the server's versions over (lower,
+   * as often as not), and a follower's op says only a number, so the
+   * numbers followers hear never go back: after a reset they count on from
+   * the last one sent (`floor`), offset from the replica's by `base`. An
+   * op below the floor was made in sight of an earlier epoch
+   */
+  const fv = entry => (entry.lastFv = Math.max(entry.lastFv, entry.base + entry.client.version));
+
+  /**
    * Apply a follower's op to the replica (once per seq): a register it
    * writes is replaced, as the server would. The batch goes with what the
    * follower had seen and made (`seen`, `made`), so the op the replica
    * sends says what the follower's did, not what this tab has: a follower
    * that lags (a background tab, throttled) may still hold a container
-   * this tab saw deleted, and its edit of it must be judged as such
+   * this tab saw deleted, and its edit of it must be judged as such; one
+   * from before the replica's last reset had seen nothing of this epoch
    */
   function apply(entry, session, op) {
     if (!Utils.isPlainObject(op) || !Number.isInteger(op.seq)) return;
     if (op.seq > session.lastSeq) {
       session.lastSeq = op.seq;
-      if (Utils.isPlainObject(op.diff)) LazyWatch.patch(entry.client.wire, replacingRegisters(op.diff, entry.regs, entry.client.wire), { origin: 'follower', seen: op.v, made: op.made });
+      const seen = Number.isInteger(op.v) && op.v >= entry.floor ? Math.max(0, op.v - entry.base) : 0;
+      if (Utils.isPlainObject(op.diff)) LazyWatch.patch(entry.client.wire, replacingRegisters(op.diff, entry.regs, entry.client.wire), { origin: 'follower', seen, made: op.made });
     }
   }
 
@@ -623,7 +641,7 @@ function createReplicaRelay({ tabId, transport, storage, reconnect, keepalive, w
           // socket down or failing, at once, from whatever the replica has
           durable(entry, () => settled(client, () => {
             if (entry.sessions.get(tab) !== session) return;
-            send(tab, { t: 'snapshot', store, state: LazyWatch.snapshot(client.wire), ts: clock.now(), seq: session.lastSeq, registers: entry.registers, v: client.version, epoch: null });
+            send(tab, { t: 'snapshot', store, state: LazyWatch.snapshot(client.wire), ts: clock.now(), seq: session.lastSeq, registers: entry.registers, v: fv(entry), epoch: null });
             if (client.relayed) send(tab, { t: 'relay', store, status: 'local' });
             if (session.presence) send(tab, { t: 'presence', store, peers: client.peers });
           }));

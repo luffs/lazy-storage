@@ -99,7 +99,7 @@
 //       the server's `now` and the op's `ts`), 'expired', 'forbidden'
 //   { t: 'pong' }
 import { LazyWatch } from 'lazy-watch';
-import { createClock, isTimestamp, compareTs } from '../core/hlc.js';
+import { createClock, isTimestamp } from '../core/hlc.js';
 import { PROTOCOL } from '../core/protocol.js';
 import { registerSet, pathKey, parsePathKey, valueAt, correctionAt } from '../core/paths.js';
 import { leaves, assertModel, rebuild, expandRegisters, replacingRegisters } from '../core/model.js';
@@ -808,10 +808,8 @@ export function createStore({
     const cutoff = [lastCompaction - retention, 0, ''];
     const removed = compactTombstones(clocks, cutoff);
     // A barrier settled is the container written empty: its row from now on, and the horizon at its version
-    for (const entry of clocks.values()) {
-      if (entry.made && compareTs(entry.ts, cutoff) < 0 && entry.v > horizon) horizon = entry.v;
-    }
     const settled = settleBarriers(clocks, cutoff);
+    for (const [, barrier] of settled) if (barrier.v > horizon) horizon = barrier.v;
     const forgotten = [];
     for (const [id, r] of replicas) {
       if (id !== 'server' && r.seen < cutoff[0]) {
@@ -819,7 +817,7 @@ export function createStore({
         forgotten.push(id);
       }
     }
-    if (removed.length || settled.length || forgotten.length) commit({ upserts: settled.map(key => [key, { value: {}, ts: clocks.get(key).ts }]), deletes: removed, forgetReplicas: forgotten });
+    if (removed.length || settled.length || forgotten.length) commit({ upserts: settled.map(([key, barrier]) => [key, { value: {}, ts: barrier.ts }]), deletes: removed, forgetReplicas: forgotten });
     return { tombstones: removed.length, barriers: settled.length, replicas: forgotten.length };
   }
 

@@ -355,7 +355,8 @@ export function sqliteStorageOn({ exec, prepare, transaction, close, db, driver 
       q.upsert.run(id, key, ...rowColumns(row));
     }
     for (const [replica, r] of Object.entries(doc.replicas ?? {})) q.setReplica.run(id, replica, r.seq, r.seen ?? null, r.owner ?? null);
-    q.setVersion.run(id, doc.version, newEpoch(), Number.isInteger(doc.schema) ? doc.schema : null, Number.isInteger(doc.horizon) ? doc.horizon : null);
+    // The document's horizon, or none: the replaced store's belongs to a lineage the new epoch is not in
+    q.setVersion.run(id, doc.version, newEpoch(), Number.isInteger(doc.schema) ? doc.schema : null, Number.isInteger(doc.horizon) ? doc.horizon : 0);
   });
 
   const remove = transaction(id => {

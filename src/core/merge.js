@@ -289,14 +289,14 @@ export function compactTombstones(clocks, olderThan) {
  * of less (the server's `horizon`), since a settled barrier can no longer
  * tell an edit of the deleted container from one of the re-added, and
  * timestamps never could.
- * @returns {string[]} the settled keys
+ * @returns {Array<[string, object]>} the settled keys, each with the barrier it was
  */
 export function settleBarriers(clocks, olderThan) {
   const settled = [];
   for (const [k, entry] of [...clocks]) {
     if (entry.made && compareTs(entry.ts, olderThan) < 0) {
       clocks.set(k, { ts: entry.ts });
-      settled.push(k);
+      settled.push([k, entry]);
     }
   }
   return settled;

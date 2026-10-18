@@ -421,7 +421,7 @@ export function createRelay({
     setRegisters(copy, doc.registers);
     for (const entry of Array.isArray(doc.clocks) ? doc.clocks : []) {
       if (Array.isArray(entry) && typeof entry[0] === 'string' && isPlainObject(entry[1]) && isTimestamp(entry[1].ts)) {
-        if (entry[1].made && !(isTimestamp(entry[1].since) && Number.isInteger(entry[1].v) && Array.isArray(entry[1].by))) continue;
+        if (entry[1].made && !(isTimestamp(entry[1].since) && Number.isInteger(entry[1].v))) continue;
         copy.clocks.set(entry[0], clockEntry(entry[1]));
       }
     }

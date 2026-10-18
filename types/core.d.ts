@@ -161,8 +161,8 @@ export interface MergeOptions {
 export function mergeOp(clocks: Map<string, ClockEntry>, ts: Timestamp, diff: Diff, registers: RegisterSet, options?: MergeOptions): MergeResult;
 /** Forget tombstones older than a timestamp; returns the removed keys */
 export function compactTombstones(clocks: Map<string, ClockEntry>, olderThan: Timestamp): string[];
-/** Turn barriers older than a timestamp into the live entries of containers written empty; returns their keys */
-export function settleBarriers(clocks: Map<string, ClockEntry>, olderThan: Timestamp): string[];
+/** Turn barriers older than a timestamp into the live entries of containers written empty; returns their keys, each with the barrier it was */
+export function settleBarriers(clocks: Map<string, ClockEntry>, olderThan: Timestamp): Array<[string, ClockEntry]>;
 /** Whether something names a path a replica made: a non-empty array of keys */
 export function isMadePath(path: unknown): path is Path;
 /** The clock entry a persisted row stands for */
