@@ -4,6 +4,10 @@ All notable changes to lazy-storage are documented here. The format follows Keep
 
 ## [Unreleased]
 
+### Fixed
+
+- **A register written at a deleted path landed nowhere.** The merge took the object a register holds for a container to re-add, turned the tombstone at its path into a barrier, and then refused the register itself, a leaf at that very path, as no newer than its own barrier: the write was lost, and the barrier stayed. A register is one leaf whatever its value, so a tombstone at its path is now an older entry a newer write out-writes, on timestamp, as before 0.26.0; nothing is lifted there and no barrier left. Seen in Mageek, where a spell's `server` record (a register) is deleted and written again at every cast
+
 ## [0.26.0] - 2026-10-18
 
 A container deleted and made again now lands. A replica that writes an

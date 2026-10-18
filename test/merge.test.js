@@ -300,6 +300,24 @@ test('two replicas re-adding the same deleted container both land, whichever arr
   assert.deepEqual(mergeOp(clocks, T(46, 'b'), { lists: { turns: { t3: { color: 'blue' } } } }, NONE, { seen: 0 }).accepted, { lists: { turns: { t3: { color: 'blue' } } } });
 });
 
+test('a register at a deleted path is written whole, as any leaf: judged by timestamp, lifted by nothing, no barrier', () => {
+  const regs = registerSet(['spells/*/server']);
+  const clocks = new Map();
+  mergeOp(clocks, T(10), { spells: { x: { id: 'x', server: { state: 'running', at: 1 } } } }, regs);
+  mergeOp(clocks, T(20), { spells: { x: { server: null } } }, regs);
+  assert.deepEqual(clocks.get('["spells","x","server"]'), { ts: T(20), deleted: true });
+  // The authority writes it again, in the same op that would have lifted a container: the value lands, the entry is a leaf's
+  let r = mergeOp(clocks, T(21, 'server'), { spells: { x: { server: { state: 'failed', at: 2, error: 'nope' } } } }, regs, { authority: true, v: 3 });
+  assert.deepEqual(r.accepted, { spells: { x: { server: { state: 'failed', at: 2, error: 'nope' } } } });
+  assert.deepEqual(r.barriers, []);
+  assert.deepEqual(clocks.get('["spells","x","server"]'), { ts: T(21, 'server') });
+  // A replica's write at the path, older than the deletion, loses; newer, wins: as any leaf, made or not
+  mergeOp(clocks, T(30), { spells: { x: { server: null } } }, regs);
+  assert.equal(mergeOp(clocks, T(25, 'b'), { spells: { x: { server: { state: 'stale' } } } }, regs, { made: [['spells', 'x', 'server']] }).accepted, null);
+  assert.deepEqual(mergeOp(clocks, T(35, 'b'), { spells: { x: { server: { state: 'new' } } } }, regs).accepted, { spells: { x: { server: { state: 'new' } } } });
+  assert.deepEqual(clocks.get('["spells","x","server"]'), { ts: T(35, 'b') });
+});
+
 test('a deletion refused under a barrier is moot when nothing is there: refused by nothing, and nothing lost', () => {
   const clocks = new Map();
   mergeOp(clocks, T(10), { lists: { turns: { t1: { text: 'x' }, t2: { text: 'y' } } } }, NONE);

@@ -43,7 +43,9 @@
 //   every descendant entry and leaves a tombstone at P.
 // - A write that changes a container into a leaf (or a register) drops the
 //   descendant entries the container had. An empty object is the one
-//   exception: it ensures a container and keeps what is under it.
+//   exception: it ensures a container and keeps what is under it. A
+//   register is one leaf whatever its value: a tombstone at its path is an
+//   older entry a newer write out-writes, no lifting and no barrier.
 //
 // Besides the accepted diff, the merge reports exactly which entries it
 // set and dropped, so a storage adapter can persist the op as row upserts
@@ -100,7 +102,7 @@ export function mergeOp(clocks, ts, diff, registers, { authority = false, made =
   const madeKeys = new Set(madePaths(made).map(pathKey));
   const sees = authority ? Infinity : Number.isInteger(seen) && seen >= 0 ? seen : 0;
   const under = { passed, sees, author: typeof author === 'string' ? author : ts[2] };
-  liftTombstones(diff, clocks, ts, [], { authority, madeKeys, barriers, v, under });
+  liftTombstones(diff, clocks, ts, [], { authority, madeKeys, barriers, v, under, registers });
 
   const won = [];
   const rejected = [];
@@ -138,7 +140,8 @@ const madePaths = made => (Array.isArray(made) ? made : []).filter(isMadePath);
  * too: both re-adds land, and the author joins the barrier's. Beneath a
  * tombstone that stays, or a barrier the op may not write under (see
  * mayWriteUnder), nothing is lifted (`blocked`): what is under it is
- * refused whole
+ * refused whole. A register is one leaf, written whole: a tombstone at its
+ * path is an older entry, out-written on timestamp as any, not lifted
  */
 function liftTombstones(node, clocks, ts, path, lifting, made = false, blocked = false) {
   if (!Utils.isPlainObject(node)) return;
@@ -147,6 +150,7 @@ function liftTombstones(node, clocks, ts, path, lifting, made = false, blocked =
     const value = node[key];
     if (!Utils.isPlainObject(value)) continue;
     const p = [...path, key];
+    if (lifting.registers.matches(p)) continue;
     const k = pathKey(p);
     const here = made || lifting.madeKeys.has(k);
     const lifts = !blocked && (lifting.authority || here || Object.hasOwn(value, 'id'));
