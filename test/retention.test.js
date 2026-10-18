@@ -35,10 +35,10 @@ test('compaction forgets tombstones and replicas older than the window, runs on 
   assert.equal(rows(storage)['["tasks","a"]'], undefined, 'day 140: forgotten with the next op');
   assert.deepEqual(store.replicas, ['server']);
   assert.deepEqual(Object.keys(storage.load().replicas), ['server'], 'and gone from storage');
-  assert.deepEqual(store.compact(), { tombstones: 0, replicas: 0 }, 'nothing left to do');
+  assert.deepEqual(store.compact(), { tombstones: 0, barriers: 0, replicas: 0 }, 'nothing left to do');
 
   time.advance(40 * DAY);
-  assert.deepEqual(store.compact(), { tombstones: 0, replicas: 0 });
+  assert.deepEqual(store.compact(), { tombstones: 0, barriers: 0, replicas: 0 });
   assert.deepEqual(store.replicas, ['server'], 'the server replica stays however long it was quiet');
   store.dispose();
 
@@ -118,7 +118,7 @@ test('retention: Infinity keeps every tombstone and replica and accepts ops of a
   store.patch({ tasks: { a: null } });
   time.advance(400 * DAY);
   store.patch({ tasks: { b: { id: 'b' } } });
-  assert.deepEqual(store.compact(), { tombstones: 0, replicas: 0 });
+  assert.deepEqual(store.compact(), { tombstones: 0, barriers: 0, replicas: 0 });
   store.flush();
   assert.equal(rows(storage)['["tasks","a"]'], 'tombstone');
 

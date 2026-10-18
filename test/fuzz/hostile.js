@@ -28,6 +28,7 @@ import { createStore, createHub, memoryStorage } from '../../src/server/index.js
 import { createClient } from '../../src/client/index.js';
 import { createConnection } from '../../src/client/connection.js';
 import { createNetwork, fakeTime, seededRandom } from '../helpers.js';
+import { PROTOCOL } from '../../src/core/index.js';
 
 const INITIAL = { tasks: {}, notes: {} };
 const USERS = ['alice', 'bob', 'carol'];
@@ -152,7 +153,7 @@ export async function runHostile({ seed = 1, runs = 20, steps = 40, log = () => 
         const replicaId = someReplica();
         const many = rng.chance(0.1);
         const list = Array.from({ length: many ? 1200 : rng.int(4) }, () => ({ ...someOp(), replicaId }));
-        send({ t: 'hello', store: 'main', replicaId, ops: list, since: rng.pick([0, 5, 1e9, 'x', undefined]), epoch: rng.pick(['bogus', null, undefined, store.epoch]), share: rng.pick([undefined, { cursor: 1 }, 'x'.repeat(5000), own('__proto__', { p: 1 })]) });
+        send({ t: 'hello', proto: PROTOCOL, store: 'main', replicaId, ops: list, since: rng.pick([0, 5, 1e9, 'x', undefined]), epoch: rng.pick(['bogus', null, undefined, store.epoch]), share: rng.pick([undefined, { cursor: 1 }, 'x'.repeat(5000), own('__proto__', { p: 1 })]) });
         return `attacker hello as ${replicaId} with ${list.length} ops`;
       }
       if (roll < 7) {
@@ -161,18 +162,18 @@ export async function runHostile({ seed = 1, runs = 20, steps = 40, log = () => 
       }
       if (roll < 8) {
         send({ t: 'leave', store: 'main' });
-        send({ t: 'hello', store: 'main', replicaId: someReplica(), ops: [] });
+        send({ t: 'hello', proto: PROTOCOL, store: 'main', replicaId: someReplica(), ops: [] });
         return 'attacker leave + hello';
       }
       if (roll < 9) {
         const garbage = rng.pick([
           { t: 'op', store: 'main' },
           { t: 'op', store: 'main', op: 'x' },
-          { t: 'hello', store: 'main' },
+          { t: 'hello', proto: PROTOCOL, store: 'main' },
           { t: 'nonsense', store: 'main' },
-          { t: 'hello', store: 'secret', replicaId: attacker.replicaId, ops: [] },
-          { t: 'hello', store: '../etc/passwd', replicaId: attacker.replicaId, ops: [] },
-          { t: 'hello', replicaId: attacker.replicaId, ops: [] },
+          { t: 'hello', proto: PROTOCOL, store: 'secret', replicaId: attacker.replicaId, ops: [] },
+          { t: 'hello', proto: PROTOCOL, store: '../etc/passwd', replicaId: attacker.replicaId, ops: [] },
+          { t: 'hello', proto: PROTOCOL, replicaId: attacker.replicaId, ops: [] },
           { store: 'main' },
           own('__proto__', { t: 'hello' }, { store: 'main' })
         ]);

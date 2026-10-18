@@ -39,6 +39,7 @@ import { createClient } from '../../src/client/index.js';
 import { createConnection } from '../../src/client/connection.js';
 import { createRelay, memoryCopies } from '../../src/relay/index.js';
 import { createNetwork, fakeTime, seededRandom } from '../helpers.js';
+import { PROTOCOL } from '../../src/core/index.js';
 
 const TASKS = { tasks: {}, order: [] };
 const NOTES = { notes: {} };
@@ -270,7 +271,7 @@ export async function runRelayFuzz({ seed = 1, runs = 20, steps = 30, clients: c
       const s = attacker();
       const store = rng.pick(['main', 'main', 'notes', '../etc', undefined]);
       const message = rng.pick([
-        () => ({ t: 'hello', store, replicaId: rng.pick(['rm', 'rm', 'r0', 'nm', 'x']), ops: Array.from({ length: rng.int(3) }, someOp), since: rng.pick([0, 1e9, undefined, 'x']), epoch: rng.pick([null, 'bogus', undefined]), share: rng.pick([undefined, { at: 1 }, 'x'.repeat(5000)]) }),
+        () => ({ t: 'hello', proto: PROTOCOL, store, replicaId: rng.pick(['rm', 'rm', 'r0', 'nm', 'x']), ops: Array.from({ length: rng.int(3) }, someOp), since: rng.pick([0, 1e9, undefined, 'x']), epoch: rng.pick([null, 'bogus', undefined]), share: rng.pick([undefined, { at: 1 }, 'x'.repeat(5000)]) }),
         () => ({ t: 'op', store, op: someOp() }),
         () => ({ t: 'op', store, op: someOp() }),
         () => ({ t: 'share', store, data: rng.pick([{ at: rng.int(9) }, null, 'x'.repeat(5000), own('__proto__', { p: 1 })]) }),

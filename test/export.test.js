@@ -1,4 +1,5 @@
 // export.test.js - A store as a document: export it, take it into any adapter, and back up a SQLite file whole
+import { PROTOCOL } from '../src/core/index.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -20,8 +21,11 @@ function busy() {
   const store = createStore({ initial: INITIAL, registers: ['order'], migrations: [() => {}] });
   store.patch({ tasks: { a: { id: 'a', title: 'Milk', tags: ['x'] }, b: { id: 'b', title: 'Gone' }, e: {} }, order: ['a', 'b'] });
   store.patch({ tasks: { b: null } });                                       // a tombstone
+  store.patch({ tasks: { d: { id: 'd', title: 'Was' } } });
+  store.patch({ tasks: { d: null } });
+  store.patch({ tasks: { d: { id: 'd', title: 'Back' } } });                 // a barrier: the tombstone lifted
   const session = store.session({ send() {}, user: { id: 'ann' } });
-  session.receive({ t: 'hello', replicaId: 'r1', ops: [{ replicaId: 'r1', seq: 1, ts: T(Date.now(), 'r1'), diff: { tasks: { a: { done: true } } } }] });
+  session.receive({ t: 'hello', proto: PROTOCOL, replicaId: 'r1', ops: [{ replicaId: 'r1', seq: 1, ts: T(Date.now(), 'r1'), diff: { tasks: { a: { done: true } } } }] });
   return store;
 }
 
@@ -32,9 +36,10 @@ function assertSame(copy, original, label) {
   assert.equal(copy.version, original.version, `${label}: the version`);
   assert.equal(copy.stats().schema, 1, `${label}: the schema`);
   assert.equal(copy.apply({ replicaId: 'late', seq: 1, ts: T(1, 'late'), diff: { tasks: { b: { title: 'ghost' } } } }).accepted, null, `${label}: the tombstone`);
+  assert.equal(copy.apply({ replicaId: 'late', seq: 2, ts: T(2, 'late'), diff: { tasks: { d: { color: 'red' } } } }).accepted, null, `${label}: the barrier`);
   assert.equal(copy.apply({ replicaId: 'r1', seq: 1, ts: T(Date.now(), 'r1'), diff: { tasks: { a: { done: false } } } }).duplicate, true, `${label}: replica progress`);
   const thief = [];
-  copy.session({ send: m => thief.push(m), user: { id: 'mallory' } }).receive({ t: 'hello', replicaId: 'r1', ops: [] });
+  copy.session({ send: m => thief.push(m), user: { id: 'mallory' } }).receive({ t: 'hello', proto: PROTOCOL, replicaId: 'r1', ops: [] });
   assert.equal(thief[0].code, 'replica-taken', `${label}: the replica's owner`);
 }
 
@@ -43,7 +48,12 @@ test('an exported store is a JSON document; any adapter that takes it serves the
   const doc = JSON.parse(JSON.stringify(original.export()));
   assert.equal(doc.format, 'lazy-storage/store');
   assert.deepEqual(doc.rows.find(([key]) => key === '["tasks","e"]')[1].value, {}, 'an empty-object leaf stays one');
+  assert.deepEqual(Object.keys(doc.rows.find(([key]) => key === '["tasks","d"]')[1]).sort(), ['made', 'since', 'ts', 'v'], 'a barrier is a row of two timestamps, a version and no value');
 
+  // A barrier row without what it stands on is no document: the adapter says so rather than serve a store that judges wrong
+  for (const broken of [{ ts: [1, 0, 'x'], made: true }, { ts: [1, 0, 'x'], made: true, since: [0, 0, 'x'] }, { made: true, since: [0, 0, 'x'], v: 1 }]) {
+    assert.throws(() => memoryStorage().replace({ ...doc, rows: [['["tasks","d"]', broken]] }), TypeError, `refused: ${JSON.stringify(broken)}`);
+  }
   const memory = memoryStorage();
   memory.replace(doc);
   const fromMemory = createStore({ initial: INITIAL, registers: ['order'], storage: memory, migrations: [() => {}] });

@@ -1,4 +1,5 @@
 // sqlite-node.test.js - The node:sqlite adapter (Node 22.13+); skipped where node:sqlite is missing
+import { PROTOCOL } from '../src/core/index.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -27,6 +28,7 @@ test('a store round-trips through node:sqlite: rows, replicas, epoch, and the de
     one.patch({ tasks: { a: { done: true } }, settings: { theme: 'dark' } });
     one.patch({ tasks: { b: null }, order: ['a'] });
     one.patch({ tasks: { c: { id: 'c' } } });
+    one.patch({ tasks: { b: { id: 'b', title: 'Back' } } });                 // the tombstone lifted: a barrier row
     const epoch = one.epoch;
     one.dispose();
     assert.deepEqual(sqlite.ids(), ['team-1']);
@@ -35,13 +37,14 @@ test('a store round-trips through node:sqlite: rows, replicas, epoch, and the de
     sqlite = sqliteStorage(file);
     const loaded = sqlite.store('team-1').load();
     assert.equal(loaded.epoch, epoch);
-    assert.deepEqual(loaded.log.map(e => e.v), [2, 3, 4], 'the turn\'s four patches, one commit, pruned to the floor they left');
+    assert.deepEqual(loaded.log.map(e => e.v), [3, 4, 5], 'the turn\'s five patches, one commit, pruned to the floor they left');
+    assert.deepEqual(Object.keys(loaded.rows.find(([key]) => key === '["tasks","b"]')[1]).sort(), ['made', 'since', 'ts', 'v'], 'the barrier is a row of its own kind');
     const two = createStore({ initial: INITIAL, registers: ['order'], storage: sqlite.store('team-1'), deltaLog: 3 });
-    assert.deepEqual(two.snapshot(), { tasks: { a: { id: 'a', title: 'Kept', done: true }, c: { id: 'c' } }, order: ['a'], settings: { theme: 'dark' } });
-    assert.equal(two.version, 4);
+    assert.deepEqual(two.snapshot(), { tasks: { a: { id: 'a', title: 'Kept', done: true }, b: { id: 'b', title: 'Back' }, c: { id: 'c' } }, order: ['a'], settings: { theme: 'dark' } });
+    assert.equal(two.version, 5);
     assert.equal(two.stats().log, 3, 'the store keeps its own last three');
-    const late = two.apply({ replicaId: 'late', seq: 1, ts: T(1, 'late'), diff: { tasks: { b: { title: 'ghost' } } } });
-    assert.equal(late.accepted, null, 'the tombstone survived the reopen');
+    const late = two.apply({ replicaId: 'late', seq: 1, ts: T(1, 'late'), diff: { tasks: { b: { color: 'ghost' } } } });
+    assert.equal(late.accepted, null, 'the barrier survived the reopen: an edit from before the record was re-added is refused');
     assert.equal(two.apply({ replicaId: 'server', seq: 1, ts: T(1), diff: { settings: { theme: 'x' } } }).duplicate, true, 'replica progress survived');
     two.dispose();
     sqlite.remove('team-1');
@@ -102,7 +105,7 @@ test('one process serves a store: a second is refused until the first lets it go
     // Through a hub, a client of the second process hears 'unavailable', not a final refusal
     const sent = [];
     const hub = createHub(id => createStore({ initial: INITIAL, storage: second.store(id) }), { send: m => sent.push(m), onError: err => assert.fail(err.message) });
-    hub.receive({ t: 'hello', store: 'team-1', replicaId: 'r', ops: [] });
+    hub.receive({ t: 'hello', proto: PROTOCOL, store: 'team-1', replicaId: 'r', ops: [] });
     assert.deepEqual([sent[0].t, sent[0].code], ['closed', 'unavailable']);
 
     one.dispose();                          // the first lets it go (a registry's release, a shutdown)
@@ -292,6 +295,35 @@ test('a commit reads its lease, and writes it only when it runs low', { skip: !s
     assert.ok(until() > Date.now() + ttl - 60_000, 'one running low is renewed with the commit');
     store.dispose();
     sqlite.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a file from before barriers gains the since and v columns: its rows read as before, and a barrier row round-trips', { skip: !sqliteStorage }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'lazy-storage-node-sqlite-'));
+  const file = join(dir, 'old-leaves.sqlite');
+  try {
+    const { DatabaseSync } = await import('node:sqlite');
+    const old = new DatabaseSync(file);
+    old.exec(`CREATE TABLE leaves (store TEXT NOT NULL, path TEXT NOT NULL, value TEXT, ts_ms INTEGER NOT NULL, ts_count INTEGER NOT NULL, ts_replica TEXT NOT NULL, deleted INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (store, path)) WITHOUT ROWID;
+      CREATE TABLE stores (store TEXT PRIMARY KEY, version INTEGER NOT NULL DEFAULT 0, epoch TEXT, schema INTEGER) WITHOUT ROWID;
+      INSERT INTO stores VALUES ('main', 1, 'e1', NULL);
+      INSERT INTO leaves VALUES ('main', '["tasks","a","title"]', '"A"', 5, 0, 'x', 0);
+      INSERT INTO leaves VALUES ('main', '["tasks","b"]', NULL, 6, 0, 'x', 1);`);
+    old.close();
+
+    const sqlite = sqliteStorage(file);
+    const storage = sqlite.store('main');
+    const rows = new Map(storage.load().rows);
+    assert.deepEqual(rows.get('["tasks","a","title"]'), { value: 'A', ts: [5, 0, 'x'] });
+    assert.deepEqual(rows.get('["tasks","b"]'), { ts: [6, 0, 'x'], deleted: true });
+    storage.commit({ upserts: [['["tasks","b"]', { ts: [8, 0, 'y'], made: true, since: [6, 0, 'x'], v: 2 }]], deletes: [], version: 2, epoch: 'e1' });
+    sqlite.close();
+
+    const again = sqliteStorage(file);
+    assert.deepEqual(new Map(again.store('main').load().rows).get('["tasks","b"]'), { ts: [8, 0, 'y'], made: true, since: [6, 0, 'x'], v: 2 }, 'the barrier, both timestamps and the version');
+    again.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

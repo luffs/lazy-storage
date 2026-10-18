@@ -1,11 +1,13 @@
 // hostile.test.js - What a client that does not play by the protocol can
 // and cannot do to a store: every session is authenticated, but nothing it
 // sends is taken on trust
+import { PROTOCOL } from '../src/core/index.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createStore, memoryStorage } from '../src/server/index.js';
 import { leaves, rebuild, ModelError } from '../src/core/model.js';
 import { registerSet, setAt } from '../src/core/paths.js';
+import { createNetwork } from './helpers.js';
 
 /**
  * A raw session on the store, speaking the protocol by hand. What it heard
@@ -14,7 +16,7 @@ import { registerSet, setAt } from '../src/core/paths.js';
 function rawSession(store, replicaId = 'r1', user = { id: 'u' }) {
   const sent = [];
   const session = store.session({ send: m => sent.push(m), user });
-  session.receive({ t: 'hello', replicaId, ops: [] });
+  session.receive({ t: 'hello', proto: PROTOCOL, replicaId, ops: [] });
   const heard = () => {
     store.flush();
     return sent;
@@ -66,7 +68,7 @@ test('a session speaks for one replica: another id, the server\'s, or a live use
   assert.equal(last().code, 'forbidden');
   session.receive({ t: 'op', op: { replicaId: 'mine', seq: 1, ts: ts('someone-else'), diff: { tasks: { b: { id: 'b' } } } } });
   assert.equal(last().code, 'invalid', 'the stamp names the op\'s own replica');
-  session.receive({ t: 'hello', replicaId: 'other', ops: [] });
+  session.receive({ t: 'hello', proto: PROTOCOL, replicaId: 'other', ops: [] });
   assert.equal(last().code, 'forbidden', 'a session keeps the replica it first spoke for');
 
   // A victim's replica id, as presence shows it, belongs to the victim: it cannot be borrowed
@@ -132,4 +134,41 @@ test('a replica belongs to the user who first spoke for it, while it is away and
   assert.equal(back.last().t, 'ack', 'the owner carries on');
   assert.equal(rawSession(again, 'anon', undefined).last().t, 'snapshot', 'a session without a user owns nothing and is not held back');
   again.dispose();
+});
+
+test('a hello of another protocol version is answered closed, code outdated, and the session hears nothing more', () => {
+  const store = createStore({ initial: { tasks: {} } });
+  for (const [label, hello] of [['none', { t: 'hello', replicaId: 'old', ops: [] }], ['older', { t: 'hello', proto: 1, replicaId: 'old', ops: [] }], ['newer', { t: 'hello', proto: PROTOCOL + 1, replicaId: 'old', ops: [] }]]) {
+    const sent = [];
+    const session = store.session({ send: m => sent.push(m), user: { id: 'u' } });
+    session.receive(hello);
+    session.receive({ t: 'op', op: { replicaId: 'old', seq: 1, ts: [1, 0, 'old'], diff: { tasks: { x: { id: 'x' } } } } });
+    store.flush();
+    assert.equal(sent.length, 1, `${label}: one answer`);
+    assert.equal(sent[0].t, 'closed', label);
+    assert.equal(sent[0].code, 'outdated', label);
+    assert.match(sent[0].message, new RegExp(`protocol ${PROTOCOL}`), label);
+  }
+  assert.equal(store.snapshot().tasks.x, undefined, 'nothing of theirs landed');
+  assert.equal(store.stats().sessions, 0, 'none of them stayed');
+});
+
+test('a client told outdated is closed for good: it reports the code, stays offline, and keeps its outbox for the page that reloads', async () => {
+  const store = createStore({ initial: { tasks: {} } });
+  // A server of another version, as the client meets one: every hello is read as protocol 1
+  const net = createNetwork({ session: ({ send, user }) => {
+    const session = store.session({ send, user });
+    return { ...session, receive: m => session.receive(m.t === 'hello' ? { ...m, proto: 1 } : m) };
+  } });
+  const client = net.client({ replicaId: 'c', initial: { tasks: {} } });
+  const closed = [];
+  client.on('closed', info => closed.push(info));
+  client.state.tasks.x = { id: 'x' };
+  await net.settle();
+  assert.equal(closed.length, 1);
+  assert.equal(closed[0].code, 'outdated');
+  assert.equal(client.closed.code, 'outdated');
+  assert.equal(client.status, 'offline');
+  assert.equal(client.pending, 1, "the edit waits for a client that speaks the server's protocol");
+  assert.equal(store.snapshot().tasks.x, undefined);
 });

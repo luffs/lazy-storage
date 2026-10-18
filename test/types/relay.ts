@@ -5,6 +5,7 @@ import { createRelayHandlers, upstreamSocket } from 'lazy-storage/relay/bun';
 import { createClient, createConnection, webSocketTransport, type ServerMessage } from 'lazy-storage';
 import { createNetwork } from 'lazy-storage/testing';
 import { createStore } from 'lazy-storage/server';
+import { PROTOCOL } from 'lazy-storage/core';
 
 // --- The relay ------------------------------------------------------------------
 
@@ -64,7 +65,7 @@ const session = relay.accept({
   key: 'fingerprint',
   upstream: webSocketTransport('wss://central.example/sync', { fetch: false })
 });
-session.receive({ t: 'hello', store: 'main', replicaId: 'r', ops: [] });
+session.receive({ t: 'hello', proto: PROTOCOL, store: 'main', replicaId: 'r', ops: [] });
 const state: 'dialing' | 'through' | 'local' | 'fan' | 'closed' = session.state;
 session.close();
 void state;

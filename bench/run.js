@@ -16,6 +16,7 @@ import { createStore, toJSON, snapshotResponse } from '../src/server/index.js';
 import { createClient } from '../src/client/index.js';
 import { localStorageOutbox } from '../src/client/storage.js';
 import { createClock } from '../src/core/hlc.js';
+import { PROTOCOL } from '../src/core/index.js';
 
 const args = Object.fromEntries(process.argv.slice(2).map((a, i, all) => (a.startsWith('--') ? [a.slice(2), Number(all[i + 1]) || true] : [])).filter(x => x.length));
 const ROUNDS = Number(args.rounds) || 5;
@@ -183,7 +184,7 @@ bench('hello: answered with a snapshot after an op, 10k-task store (encoded)', {
   run: (c, n) => {
     for (let i = 0; i < n; i++) {
       c.store.patch({ tasks: { [c.ids[i]]: { title: `edit ${i}` } } });   // the cached encoding is stale
-      c.session.receive({ t: 'hello', replicaId: `r${i}`, ops: [] });
+      c.session.receive({ t: 'hello', proto: PROTOCOL, replicaId: `r${i}`, ops: [] });
     }
     c.store.flush();
   }
@@ -194,12 +195,12 @@ bench('hello: answered with a snapshot while the store is quiet (cached encoding
   setup: () => {
     const c = seeded(10_000);
     c.session = c.store.session({ send: message => { toJSON(message); } });
-    c.session.receive({ t: 'hello', replicaId: 'warm', ops: [] });
+    c.session.receive({ t: 'hello', proto: PROTOCOL, replicaId: 'warm', ops: [] });
     return c;
   },
   iterations: 200,
   run: (c, n) => {
-    for (let i = 0; i < n; i++) c.session.receive({ t: 'hello', replicaId: `r${i}`, ops: [] });
+    for (let i = 0; i < n; i++) c.session.receive({ t: 'hello', proto: PROTOCOL, replicaId: `r${i}`, ops: [] });
   }
 });
 
@@ -214,7 +215,7 @@ bench('hello: answered with a delta of 10 ops, 10k-task store (encoded)', {
   },
   iterations: 200,
   run: (c, n) => {
-    for (let i = 0; i < n; i++) c.session.receive({ t: 'hello', replicaId: `r${i}`, ops: [], since: c.since, epoch: c.store.epoch });
+    for (let i = 0; i < n; i++) c.session.receive({ t: 'hello', proto: PROTOCOL, replicaId: `r${i}`, ops: [], since: c.since, epoch: c.store.epoch });
   }
 });
 
@@ -230,13 +231,13 @@ bench('hello: snapshot on the socket, compressed per socket (deflate of the cach
   setup: () => {
     const c = seeded(10_000);
     c.session = c.store.session({ send: message => { c.json = toJSON(message); } });
-    c.session.receive({ t: 'hello', replicaId: 'warm', ops: [] });
+    c.session.receive({ t: 'hello', proto: PROTOCOL, replicaId: 'warm', ops: [] });
     return c;
   },
   iterations: 20,
   run: (c, n) => {
     for (let i = 0; i < n; i++) {
-      c.session.receive({ t: 'hello', replicaId: `r${i}`, ops: [] });
+      c.session.receive({ t: 'hello', proto: PROTOCOL, replicaId: `r${i}`, ops: [] });
       deflateRawSync(c.json);   // what the socket does with the answer, per socket
     }
   }
@@ -254,7 +255,7 @@ bench('hello: snapshot over HTTP, the route answering the fetch that follows (co
   iterations: 2000,
   run: (c, n) => {
     for (let i = 0; i < n; i++) {
-      c.session.receive({ t: 'hello', replicaId: `r${i}`, ops: [], fetch: true });   // answered with the route
+      c.session.receive({ t: 'hello', proto: PROTOCOL, replicaId: `r${i}`, ops: [], fetch: true });   // answered with the route
       snapshotResponse(c.store, c.request);                                            // the fetch
     }
   }
@@ -272,7 +273,7 @@ bench('hello: snapshot over HTTP, a reload of a store that has not changed (304)
   iterations: 2000,
   run: (c, n) => {
     for (let i = 0; i < n; i++) {
-      c.session.receive({ t: 'hello', replicaId: `r${i}`, ops: [], fetch: true });
+      c.session.receive({ t: 'hello', proto: PROTOCOL, replicaId: `r${i}`, ops: [], fetch: true });
       snapshotResponse(c.store, c.request);
     }
   }
@@ -284,7 +285,7 @@ bench('hello: snapshot over HTTP, a reload of a store that has not changed (304)
 const sized = seeded(10_000);
 let snapshotJSON = '';
 sized.store.session({ send: message => { if (message.t === 'snapshot') snapshotJSON = toJSON(message); } })
-  .receive({ t: 'hello', replicaId: 'size', ops: [] });
+  .receive({ t: 'hello', proto: PROTOCOL, replicaId: 'size', ops: [] });
 const rawBytes = Buffer.byteLength(snapshotJSON);
 const deflatedBytes = deflateRawSync(Buffer.from(snapshotJSON)).length;
 const routeBytes = async encoding => (await snapshotResponse(sized.store, new Request(SNAPSHOT_ROUTE, { headers: { 'accept-encoding': encoding } })).arrayBuffer()).byteLength;

@@ -7,10 +7,11 @@ export type { ClientMessage, ServerMessage, Tagged } from './core.js';
 
 // --- Storage adapters ---------------------------------------------------------
 
-/** A persisted leaf: a live value with the timestamp that won it, or a tombstone */
+/** A persisted leaf: a live value with the timestamp that won it, a tombstone, or a barrier (the re-add's timestamp and version, the deletion's timestamp; `{}` at its path on load) */
 export type StoredRow =
-  | { value: unknown; ts: Timestamp; deleted?: false }
-  | { ts: Timestamp; deleted: true };
+  | { value: unknown; ts: Timestamp; deleted?: false; made?: false }
+  | { ts: Timestamp; deleted: true }
+  | { ts: Timestamp; made: true; since: Timestamp; v: number };
 
 export interface ReplicaProgress {
   seq: number;
@@ -268,6 +269,8 @@ export interface StoreStats {
   replicas: number;
   rows: number;
   tombstones: number;
+  /** Lifted tombstones, each standing for a container re-added after a deletion (see core/merge.js) */
+  barriers: number;
   log: number;
   /**
    * What the store has sent since it was loaded, by message type ('patch',
@@ -336,7 +339,7 @@ export interface Store<S extends object = any> {
   observe<E extends keyof StoreEvents>(event: E, fn: (payload: StoreEvents[E]) => void): Unsubscribe;
   stats(): StoreStats;
   /** Forget what the retention window no longer needs */
-  compact(): { tombstones: number; replicas: number };
+  compact(): { tombstones: number; barriers: number; replicas: number };
   /**
    * The store as a document: every row with the timestamp that won it
    * (tombstones included), each replica's progress and owner, the version,
@@ -380,7 +383,7 @@ export interface StoreRegistry<S extends object = any> {
   ids(): string[];
   /** The live stores' stats rolled up: how many are live and idle (no session), and the sums across them */
   /** The live stores' stats summed; `sent` by message type, each store counting since it was loaded */
-  stats(): { stores: number; idle: number; sessions: number; replicas: number; rows: number; tombstones: number; log: number; sent: Record<string, { messages: number; bytes: number }> };
+  stats(): { stores: number; idle: number; sessions: number; replicas: number; rows: number; tombstones: number; barriers: number; log: number; sent: Record<string, { messages: number; bytes: number }> };
   /**
    * Put `doc` in the store's storage in place of what it holds, while the
    * server runs: the store ends, its sessions say hello again, and the next

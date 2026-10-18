@@ -31,6 +31,7 @@
 // /reset?phase (only patches carrying that phase's number count),
 // /write?rate&count&writers&size&first (paced; refused while one is going), /storm
 import { clock, cpuSeconds, control, newHistogram, record, padOf } from './common.js';
+import { PROTOCOL } from '../../src/core/index.js';
 
 const TARGETS = process.env.TARGETS.split(',');
 const N = Number(process.env.N);
@@ -279,7 +280,7 @@ for (let j = 0; j < N; j++) {
   const url = new URL(TARGETS[i % TARGETS.length]);
   for (const [key, value] of QUERY) url.searchParams.set(key, value);
   url.searchParams.set(AUTH, id);
-  const helloMessage = { t: 'hello', store, replicaId: `r-${RUN}${id}`, ops: [], ...(ADMIN ? {} : { presence: false }) };
+  const helloMessage = { t: 'hello', proto: PROTOCOL, store, replicaId: `r-${RUN}${id}`, ops: [], ...(ADMIN ? {} : { presence: false }) };
   clients.push({
     id, store, replicaId: helloMessage.replicaId, url: url.href, answered: false, v: null, epoch: null,
     helloMessage, hello: JSON.stringify(helloMessage),

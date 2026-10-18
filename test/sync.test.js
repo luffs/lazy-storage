@@ -1,3 +1,4 @@
+import { PROTOCOL } from '../src/core/index.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { LazyWatch } from 'lazy-watch';
@@ -214,7 +215,7 @@ test('an outbox persisted before a reload is sent on the next connect, and dupli
 
   // A resent hello with the same ops changes nothing
   const before = store.version;
-  store.session({ send: () => {} }).receive({ t: 'hello', replicaId: 'a', ops: storage.load().ops.concat([{ replicaId: 'a', seq: 1, ts: [1, 0, 'a'], diff: { tasks: { [id]: { title: 'stale' } } } }]) });
+  store.session({ send: () => {} }).receive({ t: 'hello', proto: PROTOCOL, replicaId: 'a', ops: storage.load().ops.concat([{ replicaId: 'a', seq: 1, ts: [1, 0, 'a'], diff: { tasks: { [id]: { title: 'stale' } } } }]) });
   assert.equal(store.version, before);
   assert.equal(store.state.tasks[id].title, 'Survives reload');
 });

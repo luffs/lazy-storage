@@ -4,6 +4,44 @@ All notable changes to lazy-storage are documented here. The format follows Keep
 
 ## [Unreleased]
 
+A container deleted and made again now lands. A replica that writes an
+object at a path it had nothing at (it saw the deletion, or never had the
+container) names the path in its op as `made`, and the server lifts the
+tombstone there, as it did only for an object carrying an `id`; undoing
+a deletion makes the container again, so it comes back. A lifted
+tombstone is no longer removed but becomes a barrier that remembers the
+deletion, the re-add, and the store version the re-add became; and every
+op now says which store version its replica had applied when the batch
+was made (`v`). Beneath a barrier, a plain write or deletion lands only
+from a replica that had applied the re-add: an edit of the deleted
+container is refused however late it was made (before, one from before
+the deletion that arrived late landed in the re-added record, and a clock
+running ahead could have put a stale edit past any timestamp), while two
+replicas re-adding the same container after one deletion both land,
+whichever arrives first. The protocol is now versioned: a hello says
+which one the client speaks, and a server that speaks another closes the
+store for it with code `outdated`, so a page left open across a deploy
+learns to reload rather than have its edits judged by rules it does not
+know. Upgrade clients and servers together: an older client is closed
+with `outdated` by this server, and storage written by this version is
+not for an older one:
+it holds a third kind of row, a barrier (SQLite: `deleted = 2`, three
+`since` columns and `v`, added to an older file when it is opened), which
+an older version takes for a tombstone in SQLite, refusing every write
+under the re-added container, and for a valueless live row in a JSON or
+memory document. Do not open such storage with an older version.
+
+### Added
+
+- **A deleted container can be made again: `made` on an op.** A client's op names the containers its batch made (`op.made`, the paths where its inverse says nothing was before), and `mergeOp` lifts a newer tombstone at one of them, or at any container the op writes under one (`options.made`). When a later op of the same replica takes over the writes of one that made a container, it takes the `made` with them when it writes something there itself (a deletion re-adds nothing), so a container made and filled in while both waited lands too. Undoing a deletion makes the container again, so it comes back. A client that still holds the deleted container is not making it, and its edits stay refused, as the rule that a deleted record does not come back as one field requires
+- **An op carries the store version its replica had applied, and the storage life it counts in: `op.v` and `op.epoch`.** The server takes `v` as what the batch was made in sight of when `epoch` is its own, and as nothing otherwise (another epoch's versions, or a relay's own counting, `epoch: null`, say nothing of what was seen at the server); a relay answering alone takes its own counting as seen too. `mergeOp` takes it as `options.seen`, and the version the op's patch becomes as `options.v`, which it stamps on the barriers the op leaves. So an edit made while a relay answered alone, beneath a container another display re-made then, is refused once the server is back: the server cannot tell it from an edit of the deleted one
+- **The protocol is versioned: `PROTOCOL` in `lazy-storage/core`, said in every hello as `proto`.** A server that speaks another closes the store with the new code `outdated`, final: the app reloads the page
+- **`settleBarriers`, `isMadePath` and `clockEntry` in `lazy-storage/core`;** `store.stats()` and the registry's count `barriers`, and `store.compact()` reports the barriers it settled
+
+### Changed
+
+- **A lifted tombstone leaves a barrier, and what lands beneath it is decided by what the writer had seen.** Re-adding a record (an object with an `id`), making a container, or the server's own patch at a deleted path turns the tombstone into `{ ts, made: true, since, v }`: `since` the deletion's timestamp, `ts` the re-add's, `v` the store version the re-add became. A plain write or deletion beneath it from a replica that had not applied `v` is refused, whatever its timestamp (before, the entry was removed and a stale edit could land in the re-added record); one from a replica that had is judged by timestamp as anywhere. A write that re-adds the container itself passes when newer than `since`, so concurrent re-adds land in any order, and the barrier is the first to arrive. The server's own patch is held back by no barrier. A barrier says the container is there: an empty object written at its path leaves it standing, and on load it is `{}` at that path. A deletion refused under a barrier of something no longer there is moot, in neither the winning nor the losing leaves, so no conflict is reported for it. Nothing is lifted beneath a tombstone that stays. `mergeOp` reports barriers as `barriers` (a lifted tombstone is no longer among `dropped`), the store persists them as rows of their own, `assertDocument` refuses a restore whose barrier rows lack `since` or `v`, and `compactTombstones` leaves barriers to `settleBarriers`, which turns one older than the retention window into the row of a container written empty
+
 ## [0.25.0] - 2026-10-17
 
 A Vue component can now edit what it shows through the state it reads:

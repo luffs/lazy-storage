@@ -90,7 +90,7 @@ test('with idle set, a store with no sessions for that long is released by the s
 
 test('stats() rolls up the live stores: how many are live and idle, and the sums across them', async () => {
   const stores = createStores(id => createStore({ initial: INITIAL, storage: memoryStorage() }));
-  assert.deepEqual(stores.stats(), { stores: 0, idle: 0, sessions: 0, replicas: 0, rows: 0, tombstones: 0, log: 0, sent: {} });
+  assert.deepEqual(stores.stats(), { stores: 0, idle: 0, sessions: 0, replicas: 0, rows: 0, tombstones: 0, barriers: 0, log: 0, sent: {} });
   const a = stores.get('a');
   const b = stores.get('b');
   a.patch({ tasks: { x: { id: 'x', title: 'one' } } });
@@ -121,7 +121,7 @@ test('stats() rolls up the live stores: how many are live and idle, and the sums
   client.dispose();
   other.dispose();
   stores.dispose();
-  assert.deepEqual(stores.stats(), { stores: 0, idle: 0, sessions: 0, replicas: 0, rows: 0, tombstones: 0, log: 0, sent: {} });
+  assert.deepEqual(stores.stats(), { stores: 0, idle: 0, sessions: 0, replicas: 0, rows: 0, tombstones: 0, barriers: 0, log: 0, sent: {} });
 });
 
 test('a writer holding a store the sweep released is told so, and what to do', () => {

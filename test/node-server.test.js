@@ -1,4 +1,5 @@
 // node-server.test.js - The Node adapter (ws) end to end, over real sockets
+import { PROTOCOL } from '../src/core/index.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
@@ -141,7 +142,7 @@ test('serve: other requests reach the app, a bad token is refused, two sockets s
 
     // On the wire, by default: a message over the threshold goes compressed, a small one plain
     stores.get('t2').patch({ filler: 'x'.repeat(3000) });
-    const probed = await probeFrames(port, '/ws?token=alice', [JSON.stringify({ t: 'hello', store: 't2', replicaId: 'probe', ops: [] }), JSON.stringify({ t: 'ping', store: 't2' })]);
+    const probed = await probeFrames(port, '/ws?token=alice', [JSON.stringify({ t: 'hello', proto: PROTOCOL, store: 't2', replicaId: 'probe', ops: [] }), JSON.stringify({ t: 'ping', store: 't2' })]);
     assert.match(probed.extensions, /permessage-deflate/);
     const largest = [...probed.frames].sort((x, y) => y.bytes - x.bytes)[0];
     assert.equal(largest.compressed, true, `the snapshot frame is compressed (${largest.bytes} B)`);
@@ -174,7 +175,7 @@ test('createHandlers mounts on an existing http server; maxPayload closes a sock
     const raw = new WebSocket(`ws://localhost:${port}/sync`);
     const closeCode = await new Promise(resolve => {
       raw.onclose = e => resolve(e.code);
-      raw.onopen = () => raw.send(JSON.stringify({ t: 'hello', store: 'main', replicaId: 'r', ops: [], pad: 'x'.repeat(600) }));
+      raw.onopen = () => raw.send(JSON.stringify({ t: 'hello', proto: PROTOCOL, store: 'main', replicaId: 'r', ops: [], pad: 'x'.repeat(600) }));
     });
     assert.equal(closeCode, 1009, 'message too big');
 

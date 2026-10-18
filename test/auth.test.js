@@ -1,3 +1,4 @@
+import { PROTOCOL } from '../src/core/index.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createStore, createStores, createHub } from '../src/server/index.js';
@@ -210,7 +211,7 @@ test('a user without an id is told apart by its whole value, and the store says 
   const hello = (store, user, replicaId) => {
     const sent = [];
     const session = store.session({ send: m => sent.push(m), user });
-    session.receive({ t: 'hello', replicaId, ops: [] });
+    session.receive({ t: 'hello', proto: PROTOCOL, replicaId, ops: [] });
     store.flush();
     return sent.at(-1);
   };

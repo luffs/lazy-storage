@@ -99,10 +99,11 @@
 //   session.receive(message); ... session.close();
 import { LazyWatch } from 'lazy-watch';
 import { isTimestamp, compareTs } from '../core/hlc.js';
+import { PROTOCOL } from '../core/protocol.js';
 import { registerSet, correctionAt } from '../core/paths.js';
 import { leaves, replacingRegisters } from '../core/model.js';
 import { mergeOp } from '../core/merge.js';
-import { ClockMap } from '../core/clocks.js';
+import { ClockMap, clockEntry } from '../core/clocks.js';
 import { isStoreId } from '../server/registry.js';
 import { HELLO_OPS } from '../server/store.js';
 import { presetJSON, toJSON, utf8Bytes } from '../server/wire.js';
@@ -420,7 +421,8 @@ export function createRelay({
     setRegisters(copy, doc.registers);
     for (const entry of Array.isArray(doc.clocks) ? doc.clocks : []) {
       if (Array.isArray(entry) && typeof entry[0] === 'string' && isPlainObject(entry[1]) && isTimestamp(entry[1].ts)) {
-        copy.clocks.set(entry[0], entry[1].deleted ? { ts: entry[1].ts, deleted: true } : { ts: entry[1].ts });
+        if (entry[1].made && !(isTimestamp(entry[1].since) && Number.isInteger(entry[1].v))) continue;
+        copy.clocks.set(entry[0], clockEntry(entry[1]));
       }
     }
     for (const entry of Array.isArray(doc.seen) ? doc.seen : []) {
@@ -1179,7 +1181,7 @@ export function createRelay({
       return refollow(copy);
     }
     try {
-      if (isTimestamp(message.ts)) mergeOp(copy.clocks, message.ts, message.diff, copy.regs, { authority: true });
+      if (isTimestamp(message.ts)) mergeOp(copy.clocks, message.ts, message.diff, copy.regs, { authority: true, v: message.v });
       LazyWatch.patch(copy.state, message.diff);
     } catch (err) {
       copy.live = false;
@@ -1360,7 +1362,10 @@ export function createRelay({
     }
     copy.seen.set(op.replicaId, op.seq);
     noteTs(copy, op.ts);
-    const { accepted } = mergeOp(copy.clocks, op.ts, op.diff, copy.regs);
+    // Judged as central will: what the op was made in sight of, when its version counts here (the copy's epoch, or the relay's
+    // own, epoch null), and the version its patch becomes here
+    const inSight = (op.epoch === null || op.epoch === copy.epoch) && Number.isInteger(op.v) ? op.v : 0;
+    const { accepted } = mergeOp(copy.clocks, op.ts, op.diff, copy.regs, { made: op.made, seen: inSight, v: copy.v + copy.localV + 1 });
     if (!accepted) {
       persist(copy);
       return null;
@@ -1716,7 +1721,7 @@ export function createRelay({
       session.writing = true;
       session.awaiting.push('own');
       const copy = copies.get(id);
-      const hello = { t: 'hello', store: id, replicaId: session.replicaId, ops: [], follow: false, presence: false };
+      const hello = { t: 'hello', proto: PROTOCOL, store: id, replicaId: session.replicaId, ops: [], follow: false, presence: false };
       if (copy && !copy.diverged && typeof copy.epoch === 'string') Object.assign(hello, { since: copy.v, epoch: copy.epoch });
       writeSend(sock, hello);
     }
@@ -1897,7 +1902,7 @@ export function createRelay({
    * server takes a hello's word either way
    */
   function sharedHelloOf(copy, from) {
-    const hello = { t: 'hello', store: copy.id, replicaId: RELAY_REPLICA, ops: [], presence: copy.presence !== 'off' };
+    const hello = { t: 'hello', proto: PROTOCOL, store: copy.id, replicaId: RELAY_REPLICA, ops: [], presence: copy.presence !== 'off' };
     if (from) Object.assign(hello, { since: copy.v, epoch: copy.epoch });
     return hello;
   }

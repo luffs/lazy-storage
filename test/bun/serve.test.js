@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { test, afterAll } from 'bun:test';
 import { brotliDecompressSync } from 'node:zlib';
 import { createStore, createStores, memoryStorage } from '../../src/server/index.js';
+import { PROTOCOL } from '../../src/core/index.js';
 import { serve, createHandlers } from '../../src/server/bun.js';
 import { createClient, createConnection, webSocketTransport } from '../../src/index.js';
 import { probeFrames, stalledSocket } from '../frames.js';
@@ -146,7 +147,7 @@ test('two sockets share a store: snapshot, live patches both ways, presence, and
 
   // On the wire: a message over the threshold goes compressed, a small one plain
   stores.get('t2').patch({ filler: 'x'.repeat(3000) });
-  const probed = await probeFrames(server.port, '/ws?token=alice', [JSON.stringify({ t: 'hello', store: 't2', replicaId: 'probe', ops: [] }), JSON.stringify({ t: 'ping', store: 't2' })]);
+  const probed = await probeFrames(server.port, '/ws?token=alice', [JSON.stringify({ t: 'hello', proto: PROTOCOL, store: 't2', replicaId: 'probe', ops: [] }), JSON.stringify({ t: 'ping', store: 't2' })]);
   assert.match(probed.extensions, /permessage-deflate/);
   const largest = [...probed.frames].sort((x, y) => y.bytes - x.bytes)[0];
   assert.equal(largest.compressed, true, `the snapshot frame is compressed (${largest.bytes} B)`);
@@ -158,20 +159,20 @@ test('two sockets share a store: snapshot, live patches both ways, presence, and
 test('a broadcast goes out as one topic publish: a large patch arrives compressed, a small one plain, and a socket that left the store stops getting them', async () => {
   // A raw socket subscribes to t1 by saying hello, then watches the frames a server-side patch produces
   const big = await probeFrames(server.port, '/ws?token=alice', [
-    JSON.stringify({ t: 'hello', store: 't1', replicaId: 'watch', ops: [] })
+    JSON.stringify({ t: 'hello', proto: PROTOCOL, store: 't1', replicaId: 'watch', ops: [] })
   ], { settle: 400, after: () => stores.get('t1').patch({ blob: 'y'.repeat(4000) }) });
   assert.equal(big.caused.filter(f => f.compressed).length, 1, 'the 4 KB patch was published compressed');
   assert.ok(!big.caused.some(f => f.text.includes('blob')), 'and not also plain');
 
   const small = await probeFrames(server.port, '/ws?token=alice', [
-    JSON.stringify({ t: 'hello', store: 't1', replicaId: 'watch2', ops: [] })
+    JSON.stringify({ t: 'hello', proto: PROTOCOL, store: 't1', replicaId: 'watch2', ops: [] })
   ], { settle: 400, after: () => stores.get('t1').patch({ tasks: { z: { id: 'z' } } }) });
   const smallPatch = small.caused.find(f => f.text.includes('"z"'));
   assert.ok(smallPatch && !smallPatch.compressed, 'the small patch went plain');
 
   // After leave, the socket is unsubscribed and a later patch does not reach it
   const left = await probeFrames(server.port, '/ws?token=alice', [
-    JSON.stringify({ t: 'hello', store: 't1', replicaId: 'watch3', ops: [] }),
+    JSON.stringify({ t: 'hello', proto: PROTOCOL, store: 't1', replicaId: 'watch3', ops: [] }),
     JSON.stringify({ t: 'leave', store: 't1' })
   ], { settle: 400, after: () => stores.get('t1').patch({ tasks: { after: { id: 'after' } } }) });
   assert.ok(!left.caused.some(f => f.compressed || f.text.includes('"after"')), 'no patch after leaving the store');
@@ -215,7 +216,7 @@ test('a reconnect after a dropped socket is answered with a delta, and malformed
   await until(() => raw.readyState === 1, 'raw socket open');
   raw.send('not json');
   raw.send('[1, 2]');
-  raw.send(JSON.stringify({ t: 'hello', store: 't1' }));
+  raw.send(JSON.stringify({ t: 'hello', proto: PROTOCOL, store: 't1' }));
   await until(() => received.length >= 3, 'three errors');
   assert.deepEqual(received.map(m => m.message), ['Expected JSON', 'Expected a message object', 'hello requires a replicaId']);
   raw.close();
@@ -237,7 +238,7 @@ test('a message over maxPayload closes that socket; a store factory that throws 
     let closeCode = null;
     raw.onclose = e => { closeCode = e.code; };
     await until(() => raw.readyState === 1, 'raw open');
-    raw.send(JSON.stringify({ t: 'hello', store: 't1', replicaId: 'r', ops: [], pad: 'x'.repeat(600) }));
+    raw.send(JSON.stringify({ t: 'hello', proto: PROTOCOL, store: 't1', replicaId: 'r', ops: [], pad: 'x'.repeat(600) }));
     await until(() => closeCode !== null, 'socket closed by the server');
     assert.ok(closeCode === 1006 || closeCode === 1009, `the server ended the socket (code ${closeCode})`);
 
@@ -471,7 +472,7 @@ test('what one task sends a socket goes out in one write, in the order it was se
 test('a patch published at once reaches a socket after what was queued for it before', async () => {
   const store = createStore({ initial: INITIAL, groupCommit: false });
   const { events, receive } = await standIn(store);
-  receive({ t: 'hello', store: 'main', replicaId: 'r', ops: [] });   // its answer waits for the end of the task
+  receive({ t: 'hello', proto: PROTOCOL, store: 'main', replicaId: 'r', ops: [] });   // its answer waits for the end of the task
   store.patch({ tasks: { a: { id: 'a' } } });                       // published at once
   await Promise.resolve();
   assert.deepEqual(events, ['snapshot', 'publish patch 1'], 'the answer first, then the patch it came before');

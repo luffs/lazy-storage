@@ -1,4 +1,5 @@
 // fanout.test.js - A relay that reads each store once for all its clients, each judged by the server, each writing as itself
+import { PROTOCOL } from '../src/core/index.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createStore, createStores, createHub, memoryStorage } from '../src/server/index.js';
@@ -481,7 +482,7 @@ test('the store: a write-only session is only for a replica a relay serves; a re
   const sent = [];
   // Nobody reads unlisted: follow:false from a replica no relay serves is closed, not final
   const lone = store.session({ send: m => sent.push(m), user: { id: 'u1' } });
-  lone.receive({ t: 'hello', replicaId: 'r1', ops: [], follow: false });
+  lone.receive({ t: 'hello', proto: PROTOCOL, replicaId: 'r1', ops: [], follow: false });
   assert.equal(sent.at(-1).t, 'closed');
   assert.equal(sent.at(-1).code, 'unavailable');
   assert.equal(store.sessions, 0);
@@ -491,13 +492,13 @@ test('the store: a write-only session is only for a replica a relay serves; a re
   assert.throws(() => store.peer({ user: { id: 'u2' }, replicaId: 'r1' }), err => err.code === 'replica-taken');
   const write = [];
   const writer = store.session({ send: m => write.push(m), user: { id: 'u1' } });
-  writer.receive({ t: 'hello', replicaId: 'r1', ops: [], follow: false, share: { x: 1 } });
+  writer.receive({ t: 'hello', proto: PROTOCOL, replicaId: 'r1', ops: [], follow: false, share: { x: 1 } });
   assert.ok(write.some(m => m.t === 'error' && m.code === 'forbidden'), 'a write-only session shares nothing');
   assert.ok(write.some(m => m.t === 'snapshot'), 'answered');
   assert.equal(store.peers().length, 1, 'listed once, as the peer');
   const relaySent = [];
   const relay = store.session({ send: m => relaySent.push(m), user: { id: 'hub' }, relay: true });
-  relay.receive({ t: 'hello', replicaId: 'relay', ops: [{ replicaId: 'r9', seq: 1, ts: [1, 0, 'r9'], diff: { tasks: { a: { id: 'a' } } } }] });
+  relay.receive({ t: 'hello', proto: PROTOCOL, replicaId: 'relay', ops: [{ replicaId: 'r9', seq: 1, ts: [1, 0, 'r9'], diff: { tasks: { a: { id: 'a' } } } }] });
   relay.receive({ t: 'op', op: { replicaId: 'r9', seq: 2, ts: [1, 0, 'r9'], diff: { tasks: { b: { id: 'b' } } } } });
   assert.deepEqual(store.snapshot().tasks, {}, 'a relay\'s session writes nothing');
   assert.equal(relaySent.filter(m => m.t === 'error' && m.code === 'forbidden').length, 2);
@@ -529,14 +530,14 @@ test('the relay link: its own session is let in only while a client is, closed `
     linger: 20
   });
   const last = () => sent.at(-1);
-  link.receive({ t: 'hello', store: 'main', replicaId: 'relay' });
+  link.receive({ t: 'hello', proto: PROTOCOL, store: 'main', replicaId: 'relay' });
   assert.deepEqual([last().t, last().code], ['closed', 'unused'], 'no client let in: not yet');
   link.receive({ t: 'vouch', grant: 'g1', store: 'main', replicaId: 'r1', credential: { headers: { authorization: 'nope' } } });
   assert.deepEqual([last().t, last().code], ['refused', 'unauthorized']);
   link.receive({ t: 'vouch', grant: 'g1', socket: 's1', store: 'main', replicaId: 'r1', credential: { headers: { authorization: 'ok' } } });
   assert.equal(last().t, 'admitted');
   assert.deepEqual(last().peer, { replicaId: 'r1', user: { id: 'u1' }, key: 'u1' });
-  link.receive({ t: 'hello', store: 'main', replicaId: 'relay' });
+  link.receive({ t: 'hello', proto: PROTOCOL, store: 'main', replicaId: 'relay' });
   assert.equal(sent.find(m => m.t === 'snapshot').store, 'main');
   assert.deepEqual(link.stores, ['main']);
   const [relayEntry, client] = relaySockets(link, { buffered: 0, idleMs: 1, openMs: 2 });
@@ -550,7 +551,7 @@ test('the relay link: its own session is let in only while a client is, closed `
   assert.deepEqual([last().t, last().code], ['closed', 'unused']);
 
   link.receive({ t: 'vouch', grant: 'g2', store: 'main', replicaId: 'r1', credential: { headers: { authorization: 'ok' } } });
-  link.receive({ t: 'hello', store: 'main', replicaId: 'relay' });
+  link.receive({ t: 'hello', proto: PROTOCOL, store: 'main', replicaId: 'relay' });
   carry = false;
   assert.equal(await link.revalidate(), 1, 'the relay may no longer carry it: its client there revoked');
   assert.ok(sent.some(m => m.t === 'revoked' && m.grants.includes('g2') && m.code === 'forbidden'));
@@ -576,7 +577,7 @@ test('the relay link: clients leaving cost their own store, not every client the
   const CLIENTS = 20_000;
   const STORES = 20;
   for (let i = 0; i < CLIENTS; i++) link.receive({ t: 'vouch', grant: `g${i}`, store: `s${i % STORES}`, replicaId: `r${i}`, credential: { user: `u${i}` } });
-  for (let k = 0; k < STORES; k++) link.receive({ t: 'hello', store: `s${k}`, replicaId: 'relay' });
+  for (let k = 0; k < STORES; k++) link.receive({ t: 'hello', proto: PROTOCOL, store: `s${k}`, replicaId: 'relay' });
   assert.equal(link.grants().length, CLIENTS);
   assert.equal(link.stores.length, STORES);
 
@@ -799,7 +800,7 @@ test('the relay link turns away what does not add up, and ends a client as the s
   // Unloaded under it: revoked 'unavailable', to be judged afresh
   vouch('g10', 'main', 'u10');
   await sleep(1);
-  link.receive({ t: 'hello', store: 'main', replicaId: 'relay' });
+  link.receive({ t: 'hello', proto: PROTOCOL, store: 'main', replicaId: 'relay' });
   made.get('main').dispose();
   assert.ok(sent.some(m => m.t === 'revoked' && m.grants.includes('g10') && m.code === 'unavailable'));
   assert.ok(sent.some(m => m.t === 'closed' && m.store === 'main' && m.code === 'unavailable'), 'the relay\'s session there too');
@@ -814,7 +815,7 @@ test('the relay link turns away what does not add up, and ends a client as the s
   // A message the relay's session has no hello for, and one with no store
   link.receive({ t: 'op', store: 'other', op: {} });
   assert.deepEqual([last().t, last().code], ['closed', 'unused']);
-  link.receive({ t: 'hello', replicaId: 'relay' });
+  link.receive({ t: 'hello', proto: PROTOCOL, replicaId: 'relay' });
   assert.equal(last().code, 'invalid-store');
   link.receive('nonsense');
   assert.equal(last().t, 'error');
@@ -850,7 +851,7 @@ test('the relay\'s own session is refused where the relay may not carry the stor
     }
   });
   link.receive({ t: 'vouch', grant: 'g1', store: 'main', replicaId: 'r1', credential: {} });
-  link.receive({ t: 'hello', store: 'main', replicaId: 'relay' });
+  link.receive({ t: 'hello', proto: PROTOCOL, store: 'main', replicaId: 'relay' });
   link.receive({ t: 'ping' });
   const first = answer;
   await link.revalidate();
@@ -1253,7 +1254,7 @@ test('the link lost for less than grace: a display let in again after the relay\
   await env.until(() => env.relay.stats().link.state !== 'open', 'the link is down');
   // Someone comes to the store straight to the server meanwhile: the relay's session is not there to hear it
   const x = store.session({ send: () => {}, user: { id: 'x' } });
-  x.receive({ t: 'hello', replicaId: 'r-x', ops: [] });
+  x.receive({ t: 'hello', proto: PROTOCOL, replicaId: 'r-x', ops: [] });
   env.central.relayLink.goOnline();
   await env.until(() => a.peers.some(p => p.replicaId === 'r-x'), 'a has the new list');
   assert.ok(!b.peers.some(p => p.replicaId === 'r-x'), 'b is not let in yet');

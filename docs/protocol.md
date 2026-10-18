@@ -9,14 +9,25 @@ keeps the socket for the others. The shapes are declared as
 An **op** is one client batch:
 
 ```
-{ replicaId, seq, ts, diff }
+{ replicaId, seq, ts, v, epoch, diff, made? }
 ```
 
 `seq` counts the replica's ops from 1, and the server ignores one it has
 already merged, so a resend is safe. `ts` is a hybrid-logical-clock
 timestamp `[ms, count, replicaId]`. `diff` is a plain lazy-watch diff:
 nested objects, `null` for a deletion, and arrays as whole values (of
-primitives anywhere, of anything at a register path).
+primitives anywhere, of anything at a register path). `made`, when
+present, lists the paths (arrays of keys) of containers the batch made,
+the replica having had nothing at them before: the server re-adds what
+was deleted there rather than refusing the write as a stale edit (see
+[How conflicts are decided](model.md#how-conflicts-are-decided)). `v` is
+the store version the replica had applied when it made the batch, the
+`v` of the last snapshot, delta, patch or ack it took: what the batch was
+made in sight of, and `epoch` the storage life it counts in (null: a
+relay's own counting, see [Server to client](#server-to-client)). Beneath a re-added container
+(a barrier), a plain write or deletion lands only from a replica that had
+applied the re-add; an op without `v`, or whose `epoch` is not the
+server's, is judged as having applied nothing.
 
 ## A session, in order
 
@@ -36,7 +47,7 @@ primitives anywhere, of anything at a register path).
 
 | Message | Fields | Meaning |
 |---|---|---|
-| `hello` | `replicaId`, `ops`, `since?`, `epoch?`, `share?`, `presence?`, `fetch?`, `follow?` | Connect or reconnect. `ops` is the outbox (its first 1000 ops); `since` is the store version the client has seen everything up to and `epoch` the storage life it belongs to, asking for a delta; `share` is what this client shares with its peers, restored on reconnect; `presence: false` asks not to be sent presence, and every hello says it again either way (a later hello without it turns presence back on, and brings the whole list); `fetch: true` says the client can fetch a large snapshot over HTTP; `follow: false` (a relay's, for a client it fans out to) makes a write-only session |
+| `hello` | `proto`, `replicaId`, `ops`, `since?`, `epoch?`, `share?`, `presence?`, `fetch?`, `follow?` | Connect or reconnect. `proto` is the protocol version the client speaks (`PROTOCOL` in `lazy-storage/core`); a server that speaks another answers `closed` with code `outdated`. `ops` is the outbox (its first 1000 ops); `since` is the store version the client has seen everything up to and `epoch` the storage life it belongs to, asking for a delta; `share` is what this client shares with its peers, restored on reconnect; `presence: false` asks not to be sent presence, and every hello says it again either way (a later hello without it turns presence back on, and brings the whole list); `fetch: true` says the client can fetch a large snapshot over HTTP; `follow: false` (a relay's, for a client it fans out to) makes a write-only session |
 | `op` | `op` | One batch, live |
 | `leave` | | Close this store's session; the socket stays up |
 | `share` | `data` | What this session shares with every peer, a JSON value within `presence.maxShare` that `presence.validate` lets through; `null` clears it. Presence goes out again if it changed; refused with `forbidden` while the store's presence is off |
@@ -93,7 +104,9 @@ alphabet, or a message without one) each end one store. `unauthorized`
 did not make it. A socket closed with code 4001 was disconnected by the
 app (`disconnect()`) or its session ran out (`expiresAt`), which is not final: the client reconnects, and
 `authenticate` decides again. `replica-taken` ends one store: the hello named a
-replica another user owns (see [Authentication](auth.md)).
+replica another user owns (see [Authentication](auth.md)). `outdated` ends
+one store: the hello's `proto` is not the protocol the server speaks (a
+page left open across a deploy), and the app's answer is to reload.
 `unavailable` is the one that is not final: the store was
 disposed under an open session (a registry released it), or another
 process serves it for now (see the lease under

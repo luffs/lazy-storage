@@ -47,7 +47,7 @@
 // by predicate with a `closed` message the client treats as final.
 //
 // Protocol (client -> server):
-//   { t: 'hello', replicaId, ops: [op...], since? }   connect or reconnect:
+//   { t: 'hello', proto, replicaId, ops: [op...], since? }   connect or reconnect:
 //       the client's whole outbox, and the store version it last saw; the
 //       server merges the ops and replies with what the client is missing.
 //       `follow: false` in the first hello makes the session write-only:
@@ -100,15 +100,19 @@
 //   { t: 'pong' }
 import { LazyWatch } from 'lazy-watch';
 import { createClock, isTimestamp } from '../core/hlc.js';
+import { PROTOCOL } from '../core/protocol.js';
 import { registerSet, pathKey, parsePathKey, valueAt, correctionAt } from '../core/paths.js';
 import { leaves, assertModel, rebuild, expandRegisters, replacingRegisters } from '../core/model.js';
-import { mergeOp, compactTombstones } from '../core/merge.js';
-import { ClockMap } from '../core/clocks.js';
+import { mergeOp, compactTombstones, settleBarriers, isMadePath } from '../core/merge.js';
+import { ClockMap, clockEntry } from '../core/clocks.js';
 import { memoryStorage, assertDocument } from './storage.js';
 import { toJSON, presetJSON, encodedBytes, utf8Bytes, SNAPSHOT_THRESHOLD, TALLY, LAZY } from './wire.js';
 import { randomId } from '../core/ids.js';
 
 const { Utils } = LazyWatch;
+
+/** The row a barrier is persisted as: the re-add's timestamp and version, the deletion's timestamp, no value (`{}` at its path on load) */
+const barrierRow = entry => ({ ts: entry.ts, made: true, since: entry.since, v: entry.v });
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
@@ -284,8 +288,9 @@ export function createStore({
   const regs = registerSet(registers);
   const locked = readOnly === true ? null : registerSet(readOnly);   // null: the whole store is read-only
   const saved = storage.load();
-  const state = new LazyWatch(rebuild(initial, saved ? saved.rows.map(([key, row]) => [key, row.deleted ? null : row.value]) : [], regs));
-  const clocks = new ClockMap(saved ? saved.rows.map(([key, row]) => [key, row.deleted ? { ts: row.ts, deleted: true } : { ts: row.ts }]) : []);
+  // A barrier row (a lifted tombstone, core/merge.js) says the container is there: `{}` at its path
+  const state = new LazyWatch(rebuild(initial, saved ? saved.rows.map(([key, row]) => [key, row.deleted ? null : row.made ? {} : row.value]) : [], regs));
+  const clocks = new ClockMap(saved ? saved.rows.map(([key, row]) => [key, clockEntry(row)]) : []);
   const replicas = loadReplicas(saved);
   let version = saved ? saved.version : 0;
   // Versions count from 0 for the life of a store's storage. The epoch,
@@ -643,6 +648,11 @@ export function createStore({
     if (!Number.isInteger(op.seq) || op.seq < 1) throw new TypeError('op.seq must be a positive integer');
     if (!isTimestamp(op.ts)) throw new TypeError('op.ts must be a timestamp [ms, count, replicaId]');
     if (!Utils.isPlainObject(op.diff)) throw new TypeError('op.diff must be a plain object');
+    if (op.made !== undefined && !(Array.isArray(op.made) && op.made.every(isMadePath))) {
+      throw new TypeError('op.made must be an array of paths (arrays of keys)');
+    }
+    if (op.v !== undefined && !(Number.isInteger(op.v) && op.v >= 0)) throw new TypeError('op.v must be a store version');
+    if (op.epoch !== undefined && op.epoch !== null && typeof op.epoch !== 'string') throw new TypeError('op.epoch must be an epoch (a string) or null');
   }
 
   /** True when some read-only pattern matches the path or one of its ancestors; always, for a store locked whole */
@@ -733,7 +743,10 @@ export function createStore({
     replicas.set(op.replicaId, owner === undefined ? { seq: op.seq, seen } : { seq: op.seq, seen, owner });
     clock.receive(op.ts);
 
-    const { accepted, rejected, won, dropped } = mergeOp(clocks, op.ts, diff, regs, { authority });
+    // `seen`: what the op was made in sight of, when its version counts in this storage life (one from another epoch, or a
+    // relay's own counting, says nothing of what was seen here); `v`: what its patch becomes, for the barriers it leaves (core/merge.js)
+    const inSight = op.epoch === epoch && Number.isInteger(op.v) ? op.v : 0;
+    const { accepted, rejected, won, dropped, barriers } = mergeOp(clocks, op.ts, diff, regs, { authority, made: op.made, seen: inSight, v: version + 1 });
     // A register the op writes becomes its new value whole: what the value had and the
     // new one lacks goes, here and, through the patch sent on, in every client
     const applied = accepted ? replacingRegisters(accepted, regs, state) : null;
@@ -746,8 +759,11 @@ export function createStore({
         if (log.length > deltaLog) log.splice(0, log.length - deltaLog);
       }
     }
+    // The row at a barrier is the barrier's, whatever the op won there (an ensure)
+    const rows = new Map(won.map(([path, value]) => [pathKey(path), value === null ? { ts: op.ts, deleted: true } : { value, ts: op.ts }]));
+    for (const key of barriers) rows.set(key, barrierRow(clocks.get(key)));
     commit({
-      upserts: won.map(([path, value]) => [pathKey(path), value === null ? { ts: op.ts, deleted: true } : { value, ts: op.ts }]),
+      upserts: [...rows],
       deletes: dropped,
       replica: replicas.get(op.replicaId) && { id: op.replicaId, ...replicas.get(op.replicaId) },
       // The log entry this op made, and the oldest version the store still
@@ -768,15 +784,18 @@ export function createStore({
 
   /**
    * Forget tombstones older than the retention window and replicas not
-   * heard from within it. Safe because an op older than the window is
-   * refused, so nothing can arrive that the forgotten entries would have
-   * had to judge. Returns how many of each were removed.
+   * heard from within it, and settle barriers that old into containers
+   * written empty. Safe because an op older than the window is refused,
+   * so nothing can arrive that the forgotten entries would have had to
+   * judge. Returns { tombstones, barriers, replicas }: how many of each
    */
   function compact() {
     lastCompaction = time();
-    if (!Number.isFinite(retention)) return { tombstones: 0, replicas: 0 };
+    if (!Number.isFinite(retention)) return { tombstones: 0, barriers: 0, replicas: 0 };
     const horizon = lastCompaction - retention;
     const removed = compactTombstones(clocks, [horizon, 0, '']);
+    // A barrier settled is the container written empty: its row from now on
+    const settled = settleBarriers(clocks, [horizon, 0, '']);
     const forgotten = [];
     for (const [id, r] of replicas) {
       if (id !== 'server' && r.seen < horizon) {
@@ -784,8 +803,8 @@ export function createStore({
         forgotten.push(id);
       }
     }
-    if (removed.length || forgotten.length) commit({ upserts: [], deletes: removed, forgetReplicas: forgotten });
-    return { tombstones: removed.length, replicas: forgotten.length };
+    if (removed.length || settled.length || forgotten.length) commit({ upserts: settled.map(key => [key, { value: {}, ts: clocks.get(key).ts }]), deletes: removed, forgetReplicas: forgotten });
+    return { tombstones: removed.length, barriers: settled.length, replicas: forgotten.length };
   }
 
   function maybeCompact() {
@@ -1000,6 +1019,8 @@ export function createStore({
         if (!Utils.isPlainObject(msg)) return send({ t: 'error', message: 'Expected a message object' });
         switch (msg.t) {
           case 'hello': {
+            // A client of another protocol version has its edits judged by rules it does not know: final, so the app reloads
+            if (msg.proto !== PROTOCOL) return closeWith({ t: 'closed', code: 'outdated', message: `This server speaks protocol ${PROTOCOL}; the client speaks ${msg.proto ?? 'an older one'}` });
             if (typeof msg.replicaId !== 'string' || !msg.replicaId) return send({ t: 'error', message: 'hello requires a replicaId' });
             // A relay's own session speaks for no replica: it writes nothing
             const claim = s.relay ? null : claimReplica(s, msg.replicaId);
@@ -1288,6 +1309,10 @@ export function createStore({
         rows.push([key, { ts: entry.ts, deleted: true }]);
         continue;
       }
+      if (entry.made) {
+        rows.push([key, barrierRow(entry)]);
+        continue;
+      }
       const path = parsePathKey(key);
       const value = valueAt(raw, path);
       // A container written as a leaf (an empty object) keeps its fields as
@@ -1393,10 +1418,14 @@ export function createStore({
     /** A few numbers about the store's size and activity */
     stats() {
       let tombstones = 0;
-      for (const entry of clocks.values()) if (entry.deleted) tombstones++;
+      let barriers = 0;
+      for (const entry of clocks.values()) {
+        if (entry.deleted) tombstones++;
+        else if (entry.made) barriers++;
+      }
       const out = {};
       for (const [type, entry] of Object.entries(sent)) out[type] = { ...entry };
-      return { version, epoch, schema, sessions: sessions.size, replicas: replicas.size, rows: clocks.size, tombstones, log: log.length, sent: out };
+      return { version, epoch, schema, sessions: sessions.size, replicas: replicas.size, rows: clocks.size, tombstones, barriers, log: log.length, sent: out };
     },
     /** Forget what the retention window no longer needs; returns { tombstones, replicas } removed */
     compact,

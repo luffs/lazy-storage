@@ -6,7 +6,10 @@ server itself owns; and running lazy-storage inside a server of your own.
 ## Persistence
 
 A store persists as **rows, one per leaf path**: a live row holds the
-value and the timestamp that won it, a tombstone holds the timestamp only.
+value and the timestamp that won it, a tombstone the timestamp only, and
+a barrier (a lifted tombstone, see [How conflicts are decided](model.md#how-conflicts-are-decided))
+two timestamps, the deletion's and the re-add's, and the store version
+the re-add became, standing for `{}` at its path.
 Every accepted op writes exactly the rows it won and the entries it
 dropped, so the write cost of an edit is a few rows rather than the
 state, and what one turn of the event loop accepted is committed in one
@@ -125,9 +128,10 @@ registry loads the store afresh from what is on disk. The SQLite
 adapters wait up to five seconds for another connection's lock before a
 commit fails.
 
-Two things would otherwise grow without bound: tombstones, and the
-progress kept per replica (every browser tab that ever connected). A store
-keeps both for its **retention window** (`retention`, default 30 days) and
+Two things would otherwise grow without bound: tombstones, with the
+barriers that lifted ones leave (a barrier that old settles into the row
+of a container written empty), and the progress kept per replica (every
+browser tab that ever connected). A store keeps both for its **retention window** (`retention`, default 30 days) and
 forgets what is older, on load and then once an hour as ops arrive
 (`store.compact()` does it on demand and reports what it removed). To make
 that safe, an op stamped before the window is refused with code `expired`:
@@ -257,9 +261,10 @@ and on the client `mirror: true` turns off what a follower never uses:
 the undo manager, the state cache, presence.
 
 **The server's patch is the authority.** `store.patch` lifts any tombstone
-on its way, so a record the server recreates under a key it had deleted
-(a process that came back, a container after a redeploy) lands, `id` or
-not; a replica's op is still judged by the rules under [How conflicts
+on its way (into a barrier, as a replica's re-add does) and is held back
+by no barrier, so a record the server recreates under a key it had
+deleted (a process that came back, a container after a redeploy) lands,
+`id` or not; a replica's op is still judged by the rules under [How conflicts
 resolve](model.md#how-conflicts-resolve). Retention, rate limits and the outbox
 are idle machinery here: harmless, and the defaults are fine.
 

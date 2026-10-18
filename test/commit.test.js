@@ -1,4 +1,5 @@
 // commit.test.js - Group commit: what one turn merged is stored in one go, and nobody hears of it before
+import { PROTOCOL } from '../src/core/index.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createStore, createHub, memoryStorage } from '../src/server/index.js';
@@ -37,8 +38,8 @@ test('a turn\'s changes are stored in one commit, and the acks and patches wait 
   const sent = [];
   const watcher = [];
   const s = store.session({ send: m => sent.push(m) });
-  store.session({ send: m => watcher.push(m) }).receive({ t: 'hello', replicaId: 'w', ops: [] });
-  s.receive({ t: 'hello', replicaId: 'r', ops: [] });
+  store.session({ send: m => watcher.push(m) }).receive({ t: 'hello', proto: PROTOCOL, replicaId: 'w', ops: [] });
+  s.receive({ t: 'hello', proto: PROTOCOL, replicaId: 'r', ops: [] });
   const before = batches.length;
   sent.length = 0;
   watcher.length = 0;
@@ -70,7 +71,7 @@ test('a commit that fails unloads the store, and what it would have told is neve
   const store = createStore({ initial: INITIAL, storage, onError: err => errors.push(err.message) });
   const sent = [];
   const s = store.session({ send: m => sent.push(m) });
-  s.receive({ t: 'hello', replicaId: 'r', ops: [] });
+  s.receive({ t: 'hello', proto: PROTOCOL, replicaId: 'r', ops: [] });
   sent.length = 0;
   fail();
   s.receive(op(1, 'a'));
@@ -85,7 +86,7 @@ test('flush() stores and sends at once, and throws a commit that failed; groupCo
   const grouped = recording();
   const store = createStore({ initial: INITIAL, storage: grouped.storage, onError: () => {} });
   const sent = [];
-  store.session({ send: m => sent.push(m) }).receive({ t: 'hello', replicaId: 'r', ops: [] });
+  store.session({ send: m => sent.push(m) }).receive({ t: 'hello', proto: PROTOCOL, replicaId: 'r', ops: [] });
   const before = grouped.batches.length;
   store.patch({ tasks: { a: { id: 'a' } } });
   store.patch({ tasks: { b: { id: 'b' } } });
@@ -100,7 +101,7 @@ test('flush() stores and sends at once, and throws a commit that failed; groupCo
   const each = recording();
   const direct = createStore({ initial: INITIAL, storage: each.storage, groupCommit: false, onError: () => {} });
   const heard = [];
-  direct.session({ send: m => heard.push(m) }).receive({ t: 'hello', replicaId: 'r', ops: [] });
+  direct.session({ send: m => heard.push(m) }).receive({ t: 'hello', proto: PROTOCOL, replicaId: 'r', ops: [] });
   direct.patch({ tasks: { a: { id: 'a' } } });
   direct.patch({ tasks: { b: { id: 'b' } } });
   assert.deepEqual(each.batches.slice(-2), [[1], [2]], 'one commit a change, at once');
@@ -120,10 +121,10 @@ test('a socket that opens a store mid-turn hears no patch from before its hello:
   });
   const early = [];
   const late = [];
-  createHub(() => store, { send: m => early.push(m), channel: channelFor(early) }).receive({ t: 'hello', store: 'main', replicaId: 'e', ops: [] });
+  createHub(() => store, { send: m => early.push(m), channel: channelFor(early) }).receive({ t: 'hello', proto: PROTOCOL, store: 'main', replicaId: 'e', ops: [] });
 
   store.patch({ tasks: { a: { id: 'a' } } });   // held until the turn ends
-  createHub(() => store, { send: m => late.push(m), channel: channelFor(late) }).receive({ t: 'hello', store: 'main', replicaId: 'l', ops: [] });
+  createHub(() => store, { send: m => late.push(m), channel: channelFor(late) }).receive({ t: 'hello', proto: PROTOCOL, store: 'main', replicaId: 'l', ops: [] });
   await turn();
   assert.deepEqual(early.map(m => `${m.t} ${m.v}`), ['snapshot 0', 'patch 1']);
   // A socket subscribed before its session was made would hear the held patch ahead of its snapshot

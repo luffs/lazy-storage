@@ -4,6 +4,7 @@
 // runtime's own WebSocket hides.
 import net from 'node:net';
 import { randomBytes } from 'node:crypto';
+import { PROTOCOL } from '../src/core/index.js';
 
 const OPCODES = { 1: 'text', 2: 'binary', 8: 'close', 9: 'ping', 10: 'pong' };
 
@@ -106,7 +107,7 @@ export async function stalledSocket(port, { path = '/ws', store = 'main', replic
   socket.write(`GET ${path} HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n`);
   await new Promise(resolve => socket.once('data', resolve));   // the 101
   socket.pause();
-  const payload = Buffer.from(JSON.stringify({ t: 'hello', store, replicaId, ops: [] }));
+  const payload = Buffer.from(JSON.stringify({ t: 'hello', proto: PROTOCOL, store, replicaId, ops: [] }));
   const mask = Buffer.from([1, 2, 3, 4]);
   const header = payload.length < 126
     ? Buffer.from([0x81, 0x80 | payload.length])

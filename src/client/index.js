@@ -38,7 +38,8 @@
 // either way.
 import { LazyWatch } from 'lazy-watch';
 import { createClock, compareTs } from '../core/hlc.js';
-import { registerSet, valueAt } from '../core/paths.js';
+import { PROTOCOL } from '../core/protocol.js';
+import { registerSet, valueAt, pathKey } from '../core/paths.js';
 import { leaves, expandRegisters, rebuild } from '../core/model.js';
 import { randomId } from '../core/ids.js';
 import { memoryOutbox } from './storage.js';
@@ -404,6 +405,17 @@ function build({
       let touched = false;
       for (const path of paths) if (prune(older.diff, path)) touched = true;
       if (!touched) return true;
+      // A container it made but no longer writes passes to this op, when this one writes something
+      // there: the re-add goes with whatever op carries the writes, or a container made and then
+      // filled in while both waited would be refused as a stale edit of what was deleted
+      if (older.made) {
+        const kept = [];
+        for (const path of older.made) {
+          if (writesUnder(older.diff, path)) kept.push(path);
+          else if (writesUnder(op.diff, path) && !(op.made ?? []).some(mine => pathKey(mine) === pathKey(path))) (op.made ??= []).push(path);
+        }
+        if (kept.length) older.made = kept; else delete older.made;
+      }
       if (Object.keys(older.diff).length > 0) {
         changed.push(older);
         return true;
@@ -413,6 +425,37 @@ function build({
       return false;
     });
     return { changed, removed };
+  }
+
+  /** Whether a diff writes a value (not a deletion alone) at or under `path`, through an object there */
+  function writesUnder(diff, path) {
+    const node = valueAt(diff, path);
+    const writes = value => (value === null ? false : LazyWatch.Utils.isPlainObject(value) ? Object.values(value).some(writes) : true);
+    return LazyWatch.Utils.isPlainObject(node) && writes(node);
+  }
+
+  /**
+   * The containers this batch made: those the diff writes as objects (a
+   * register and an array are leaves) where the inverse holds `null`, the
+   * key having been absent before the batch. Under one, everything was
+   * absent too, so only the topmost is named. The server lifts a tombstone
+   * at a made container: what was there was deleted and is re-added, not
+   * edited from a stale copy (core/merge.js)
+   */
+  function madeContainers(expanded, inverse) {
+    const made = [];
+    const walk = (node, was, path) => {
+      for (const key of Object.keys(node)) {
+        const value = node[key];
+        const p = [...path, key];
+        if (!LazyWatch.Utils.isPlainObject(value) || regs.matches(p)) continue;
+        const before = was[key];
+        if (before === null) made.push(p);
+        else if (LazyWatch.Utils.isPlainObject(before)) walk(value, before, p);
+      }
+    };
+    if (LazyWatch.Utils.isPlainObject(inverse)) walk(expanded, inverse, []);
+    return made;
   }
 
   // Every local batch becomes an op. A batch that breaks the model is
@@ -435,7 +478,10 @@ function build({
       emit('rejected', { seq: null, code: err.code ?? 'invalid', message: err.message, diff: LazyWatch.Utils.deepClone(diff) });
       return;
     }
-    const op = { replicaId, seq: ++seq, ts: clock.now(), diff: expanded };
+    const made = madeContainers(expanded, inverse);
+    // `v` and `epoch`: the store version this replica had applied, and the storage life it counts in (null: a relay's
+    // own counting), so the server knows what the batch was made in sight of (core/merge.js)
+    const op = { replicaId, seq: ++seq, ts: clock.now(), v: known.v, epoch: known.epoch, diff: expanded, ...(made.length ? { made } : {}) };
     const superseded = supersede(op, paths);
     outbox.push(op);
     persistence.op(op, superseded);
@@ -462,7 +508,7 @@ function build({
    * unless a full snapshot is wanted, where our knowledge of the store ends
    */
   function hello({ full = false } = {}) {
-    const message = { t: 'hello', replicaId, ops: outbox.slice(0, HELLO_LIMIT) };
+    const message = { t: 'hello', proto: PROTOCOL, replicaId, ops: outbox.slice(0, HELLO_LIMIT) };
     const at = performance.now();
     for (const op of message.ops) sentAt.set(op.seq, at);
     helloCut = outbox.length > HELLO_LIMIT;
@@ -710,8 +756,9 @@ function build({
           }
           return;
         }
-        // Final for this store: evicted, forbidden, or unknown. Detach and
-        // stay offline until connect() is called again
+        // Final for this store: evicted, forbidden, unknown, or this client
+        // outdated (the server speaks another protocol: the app reloads the
+        // page). Detach and stay offline until connect() is called again
         ended = { code: msg.code, message: msg.message };
         if (link) {
           link.detach();

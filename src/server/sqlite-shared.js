@@ -2,7 +2,7 @@
 //
 // One database file holds any number of stores. Every leaf path is a row
 // in `leaves`, keyed by (store, path): live rows carry the JSON value and
-// the timestamp that won it, tombstones carry the timestamp only. A
+// the timestamp that won it, tombstones and barriers the timestamp only. A
 // commit is one transaction with exactly the upserts and deletes the op
 // produced, so the write cost of an edit is a few rows, not the state.
 // The delta log lives alongside (`log`), pruned to the floor the store
@@ -112,6 +112,20 @@ function checkpointer({ file, driver, exec, onError }) {
   };
 }
 
+// What the `deleted` column says of a row: a live row (0), a tombstone (1), or a
+// barrier (2), a lifted tombstone that holds no value: the re-add's timestamp
+// and, in the `since` columns and `v`, the deletion's timestamp and the
+// re-add's version (core/merge.js)
+const TOMBSTONE = 1;
+const BARRIER = 2;
+/** A row's columns after (store, path): value, the timestamp's three parts, what the row is, and a barrier's `since` and `v` */
+const rowColumns = row => [
+  row.deleted || row.made ? null : JSON.stringify(row.value),
+  row.ts[0], row.ts[1], row.ts[2],
+  row.made ? BARRIER : row.deleted ? TOMBSTONE : 0,
+  ...(row.made ? [...row.since, row.v] : [null, null, null, null])
+];
+
 const SCHEMA = `
   CREATE TABLE IF NOT EXISTS leaves (
     store      TEXT    NOT NULL,
@@ -121,6 +135,10 @@ const SCHEMA = `
     ts_count   INTEGER NOT NULL,
     ts_replica TEXT    NOT NULL,
     deleted    INTEGER NOT NULL DEFAULT 0,
+    since_ms      INTEGER,
+    since_count   INTEGER,
+    since_replica TEXT,
+    v             INTEGER,
     PRIMARY KEY (store, path)
   ) WITHOUT ROWID;
   CREATE TABLE IF NOT EXISTS stores (
@@ -193,17 +211,22 @@ export function sqliteStorageOn({ exec, prepare, transaction, close, db, driver 
   // Files from before replicas had owners, or stores a schema, gain the column
   if (!prepare('PRAGMA table_info(replicas)').all().some(c => c.name === 'owner')) exec('ALTER TABLE replicas ADD COLUMN owner TEXT;');
   if (!prepare('PRAGMA table_info(stores)').all().some(c => c.name === 'schema')) exec('ALTER TABLE stores ADD COLUMN schema INTEGER;');
+  // Files from before barriers gain the columns a barrier row carries: the deletion's timestamp and the re-add's version
+  for (const column of ['since_ms INTEGER', 'since_count INTEGER', 'since_replica TEXT', 'v INTEGER']) {
+    if (!prepare('PRAGMA table_info(leaves)').all().some(c => c.name === column.split(' ')[0])) exec(`ALTER TABLE leaves ADD COLUMN ${column};`);
+  }
   const background = wal && file !== ':memory:' && checkpoints === 'worker' && driver ? checkpointer({ file, driver, exec, onError }) : null;
 
   const q = {
     upsert: prepare(`
-      INSERT INTO leaves (store, path, value, ts_ms, ts_count, ts_replica, deleted)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO leaves (store, path, value, ts_ms, ts_count, ts_replica, deleted, since_ms, since_count, since_replica, v)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT (store, path) DO UPDATE SET
         value = excluded.value, ts_ms = excluded.ts_ms, ts_count = excluded.ts_count,
-        ts_replica = excluded.ts_replica, deleted = excluded.deleted`),
+        ts_replica = excluded.ts_replica, deleted = excluded.deleted,
+        since_ms = excluded.since_ms, since_count = excluded.since_count, since_replica = excluded.since_replica, v = excluded.v`),
     del: prepare('DELETE FROM leaves WHERE store = ? AND path = ?'),
-    rows: prepare('SELECT path, value, ts_ms, ts_count, ts_replica, deleted FROM leaves WHERE store = ?'),
+    rows: prepare('SELECT path, value, ts_ms, ts_count, ts_replica, deleted, since_ms, since_count, since_replica, v FROM leaves WHERE store = ?'),
     version: prepare('SELECT version, epoch, schema FROM stores WHERE store = ?'),
     setVersion: prepare(`
       INSERT INTO stores (store, version, epoch, schema) VALUES (?, ?, ?, ?)
@@ -311,7 +334,7 @@ export function sqliteStorageOn({ exec, prepare, transaction, close, db, driver 
     }
     for (const [key, row] of leaves) {
       if (row === null) q.del.run(id, key);
-      else q.upsert.run(id, key, row.deleted ? null : JSON.stringify(row.value), row.ts[0], row.ts[1], row.ts[2], row.deleted ? 1 : 0);
+      else q.upsert.run(id, key, ...rowColumns(row));
     }
     for (const [replica, r] of replicas) {
       if (r === null) q.forgetReplica.run(id, replica);
@@ -325,7 +348,7 @@ export function sqliteStorageOn({ exec, prepare, transaction, close, db, driver 
     q.dropReplicas.run(id);
     q.dropLog.run(id);
     for (const [key, row] of doc.rows) {
-      q.upsert.run(id, key, row.deleted ? null : JSON.stringify(row.value), row.ts[0], row.ts[1], row.ts[2], row.deleted ? 1 : 0);
+      q.upsert.run(id, key, ...rowColumns(row));
     }
     for (const [replica, r] of Object.entries(doc.replicas ?? {})) q.setReplica.run(id, replica, r.seq, r.seen ?? null, r.owner ?? null);
     q.setVersion.run(id, doc.version, newEpoch(), Number.isInteger(doc.schema) ? doc.schema : null);
@@ -368,9 +391,11 @@ export function sqliteStorageOn({ exec, prepare, transaction, close, db, driver 
           if (!meta) return null;
           const rows = q.rows.all(id).map(r => [
             r.path,
-            r.deleted
-              ? { ts: [r.ts_ms, r.ts_count, r.ts_replica], deleted: true }
-              : { value: JSON.parse(r.value), ts: [r.ts_ms, r.ts_count, r.ts_replica] }
+            r.deleted === BARRIER
+              ? { ts: [r.ts_ms, r.ts_count, r.ts_replica], made: true, since: [r.since_ms, r.since_count, r.since_replica], v: r.v }
+              : r.deleted
+                ? { ts: [r.ts_ms, r.ts_count, r.ts_replica], deleted: true }
+                : { value: JSON.parse(r.value), ts: [r.ts_ms, r.ts_count, r.ts_replica] }
           ]);
           const replicas = Object.fromEntries(q.replicas.all(id).map(r => [r.replica, r.owner === null ? { seq: r.seq, seen: r.seen } : { seq: r.seq, seen: r.seen, owner: r.owner }]));
           const log = q.log.all(id).map(r => ({ v: r.v, diff: JSON.parse(r.diff) }));

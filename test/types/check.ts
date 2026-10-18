@@ -15,7 +15,7 @@ import {
 } from 'lazy-storage/server';
 import { createHandlers, serve } from 'lazy-storage/server/bun';
 import { sqliteStorage } from 'lazy-storage/server/sqlite';
-import { mergeOp } from 'lazy-storage/core';
+import { mergeOp, PROTOCOL } from 'lazy-storage/core';
 import { useClient as useClientVue } from 'lazy-storage/vue';
 import { useClient as useClientReact, useClientSelector, trackClient } from 'lazy-storage/react';
 import { createNetwork, fakeTime } from 'lazy-storage/testing';
@@ -242,7 +242,7 @@ const custom: ServerStorage = {
 void [jsonFileStorage('x.json', { debounce: 100 }), custom];
 
 const hub = createHub(id => stores.get(id), { send: m => toJSON(m), user: { id: 'u1' }, authorize: (user, storeId) => storeId.startsWith('team-') });
-hub.receive({ t: 'hello', store: 'team-1', replicaId: 'r', ops: [] });
+hub.receive({ t: 'hello', proto: PROTOCOL, store: 'team-1', replicaId: 'r', ops: [] });
 const judged: Promise<number> = hub.revalidate((user, storeId) => storeId !== 'team-1');
 void judged;
 const tagged = tagStore({ t: 'pong' as const }, 'team-1');

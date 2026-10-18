@@ -1,8 +1,11 @@
 // storage.js - Server persistence adapters
 //
-// A store persists as ROWS, one per leaf path: { value, ts, deleted }.
-// Live rows carry the value and the timestamp that won it; tombstones
-// carry the timestamp only. Alongside the rows: each replica's progress
+// A store persists as ROWS, one per leaf path: { value, ts } for a live
+// value, { ts, deleted: true } for a tombstone, { ts, made: true, since, v }
+// for a barrier (a tombstone lifted by a write that re-added what was
+// there, core/merge.js: `ts` and `v` the re-add's timestamp and version,
+// `since` the deletion's timestamp; no value, and `{}` at its path on
+// load). Alongside the rows: each replica's progress
 // (the last sequence number seen from it, and when, and the user it
 // belongs to), and the store's version.
 //
@@ -52,6 +55,7 @@
 import { existsSync, readFileSync, mkdirSync, writeFileSync, renameSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { randomId } from '../core/ids.js';
+import { isTimestamp } from '../core/hlc.js';
 
 /**
  * The epoch a replaced store starts. A document may be older than what
@@ -64,10 +68,15 @@ export function newEpoch() {
   return randomId();
 }
 
-/** A document replace() may take: rows, a version, and the rest optional */
+/** A document replace() may take: rows, a version, and the rest optional; every row of a kind the store knows */
 export function assertDocument(doc) {
   if (!doc || !Array.isArray(doc.rows) || !Number.isInteger(doc.version)) {
     throw new TypeError('A store document has rows and a version (see store.export())');
+  }
+  for (const entry of doc.rows) {
+    const row = Array.isArray(entry) && typeof entry[0] === 'string' ? entry[1] : null;
+    if (!row || typeof row !== 'object' || !isTimestamp(row.ts)) throw new TypeError(`A row is [path key, { ts, ... }] with a timestamp: ${JSON.stringify(entry)}`);
+    if (row.made && !(isTimestamp(row.since) && Number.isInteger(row.v))) throw new TypeError(`A barrier row carries the deletion's timestamp (since) and the re-add's version (v): ${JSON.stringify(entry)}`);
   }
 }
 

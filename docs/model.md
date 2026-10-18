@@ -204,7 +204,29 @@ timestamp of the last accepted write per leaf path and decides per leaf:
   tombstone, so an older edit that arrives later cannot resurrect a
   partial record. A newer edit of a single field of a deleted record is
   also refused (a deleted record does not come back as one field); a
-  newer *record* write, an object with an `id`, re-adds it. The server's
+  newer *record* write, an object with an `id`, re-adds it, and so does a
+  container its writer **made**: a client whose state had nothing at the
+  path, having seen the deletion or never had the container, names the
+  path in its op (`made`), since what it writes there is new, not a stale
+  edit of what was deleted. A client that still holds the old container
+  (offline when it was deleted) is not making it, and its edits stay
+  refused. Either way the lifted tombstone becomes a **barrier** that
+  remembers the deletion, the write that re-added the container, and the
+  store version that write became. Whether an edit beneath it is stale is
+  not a matter of time but of what its writer had seen: every op carries
+  the store version its replica had applied when the batch was made
+  (`v`), and a plain write or deletion under a barrier lands only from a
+  replica that had applied the re-add. So an edit of the deleted
+  container is refused however late it was made (a clock that runs ahead
+  cannot smuggle one in), what was re-added holds only what was written in
+  sight of it, and an edit made in sight of it is judged by timestamp as
+  anywhere. Another replica re-adding the same container after the
+  deletion lands too, whichever arrives first. A barrier says the
+  container is there: an empty object written at its path leaves it
+  standing, and on load it is `{}` at that path. A deletion refused under
+  a barrier of something no longer there is moot: refused by nothing,
+  reported to no one. Nothing is lifted beneath a tombstone that stays.
+  The server's
   own `store.patch` is never held back this way: it is the authority, not
   a replica that may be stale, and whatever it writes at a deleted path
   re-adds it, `id` or not, so a record the server recreates under a key it

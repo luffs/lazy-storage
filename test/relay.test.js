@@ -1,4 +1,5 @@
 // relay.test.js - A relay on the LAN: clients' sockets passed through to the server, and answered from a copy while it is away
+import { PROTOCOL } from '../src/core/index.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, readdirSync, writeFileSync } from 'node:fs';
@@ -318,6 +319,24 @@ test('local: answers carry seq 0 and never acknowledge; the first edit makes eve
   assert.equal(copy.local, 2);
   assert.equal(copy.state.tasks.x.title, 'offline, from a');
   assert.equal(store.snapshot().tasks.x.title, 'before', 'the server has none of it yet');
+
+  // A container deleted and made again while the relay answers alone: the op says it was made, and the copy re-adds it
+  a.state.tasks.x.meta = { note: 'first' };
+  await env.until(() => b.state.tasks.x.meta?.note === 'first', 'b has the container');
+  delete a.state.tasks.x.meta;
+  await env.until(() => b.state.tasks.x.meta === undefined, 'b saw it go');
+  a.state.tasks.x.meta = { note: 'again' };
+  await env.until(() => b.state.tasks.x.meta?.note === 'again', 'b has it again');
+  assert.equal(env.relay.copy('main').state.tasks.x.meta.note, 'again');
+  // b edits beneath it in sight of the relay's re-add: it lands here, in the relay's own counting
+  b.state.tasks.x.meta.color = 'red';
+  await env.until(() => a.state.tasks.x.meta?.color === 'red', "a has b's edit");
+  // The server back, each outbox reaches it on its own: the re-add lands, and b's edit beneath is refused, since
+  // the server cannot tell an edit made in sight of the relay's re-add from one of the deleted container
+  env.central.goUp();
+  await env.until(() => !a.relayed && !b.relayed && a.pending === 0 && b.pending === 0, 'through again, everything landed or refused');
+  assert.deepEqual(env.central.store().snapshot().tasks.x.meta, { note: 'again' });
+  await env.until(() => b.state.tasks.x.meta?.color === undefined && a.state.tasks.x.meta?.color === undefined, 'the edit reverted everywhere');
 });
 
 test('local: last writer wins by stamp, whichever edit arrives first', async t => {
@@ -704,11 +723,11 @@ test('a hostile display cannot change the copy offline, forge a replica, or touc
   const own = (key, value, base = {}) => Object.defineProperty(base, key, { value, enumerable: true, writable: true, configurable: true });
   const s = env.relay.accept({ send: msg => heard.push(msg), close() {}, key: 'key-mallory', upstream: () => { throw new Error('never dialled'); } });
   const ts = [1_000_100, 0, 'r-mallory'];
-  s.receive({ t: 'hello', store: 'main', replicaId: 'r-mallory', ops: [], since: 0, epoch: null });
+  s.receive({ t: 'hello', proto: PROTOCOL, store: 'main', replicaId: 'r-mallory', ops: [], since: 0, epoch: null });
   const garbage = [
-    null, 'text', 42, [], { t: 'hello' }, { t: 'op', store: 'main' }, { t: 'op', store: 'main', op: 'x' },
-    { t: 'hello', store: '../etc', replicaId: 'r-mallory', ops: [] },
-    { t: 'hello', store: 'main', replicaId: 'r-a', ops: [] },
+    null, 'text', 42, [], { t: 'hello', proto: PROTOCOL }, { t: 'op', store: 'main' }, { t: 'op', store: 'main', op: 'x' },
+    { t: 'hello', proto: PROTOCOL, store: '../etc', replicaId: 'r-mallory', ops: [] },
+    { t: 'hello', proto: PROTOCOL, store: 'main', replicaId: 'r-a', ops: [] },
     { t: 'op', store: 'main', op: { replicaId: 'r-a', seq: 99, ts: [1_000_100, 0, 'r-a'], diff: { tasks: { x: { title: 'forged' } } } } },
     { t: 'op', store: 'main', op: { replicaId: 'r-mallory', seq: 1, ts: [1_000_100, 0, 'r-a'], diff: { tasks: { x: { title: 'stolen stamp' } } } } },
     { t: 'op', store: 'main', op: { replicaId: 'r-mallory', seq: 2, ts, diff: own('__proto__', { polluted: 'yes' }) } },
@@ -722,7 +741,7 @@ test('a hostile display cannot change the copy offline, forge a replica, or touc
     { t: 'op', store: 'main', op: { replicaId: 'r-mallory', seq: 1.5, ts, diff: { tasks: { x: { title: 'half' } } } } },
     { t: 'op', store: 'main', op: { replicaId: 'r-mallory', seq: 10, ts, diff: { tasks: Object.fromEntries(Array.from({ length: 10_001 }, (_, i) => [`k${i}`, i])) } } },
     { t: 'share', store: 'main', data: 'x'.repeat(10_000) },
-    own('__proto__', { t: 'hello' }, { store: 'main' })
+    own('__proto__', { t: 'hello', proto: PROTOCOL }, { store: 'main' })
   ];
   for (const message of garbage) s.receive(message);
   s.receive(own('__proto__', { polluted: 'yes' }, { t: 'op', store: 'main', op: { replicaId: 'r-mallory', seq: 11, ts, diff: { tasks: { z: 1 } } } }));
@@ -887,8 +906,8 @@ test('a patch counts only on a socket whose session is under the copy\'s epoch, 
   const sy = relay.accept({ send() {}, close() {}, key: 'ky', upstream: y });
   x.opened[0].onopen();
   y.opened[0].onopen();
-  sx.receive({ t: 'hello', store: 'main', replicaId: 'rx', ops: [] });
-  sy.receive({ t: 'hello', store: 'main', replicaId: 'ry', ops: [] });
+  sx.receive({ t: 'hello', proto: PROTOCOL, store: 'main', replicaId: 'rx', ops: [] });
+  sy.receive({ t: 'hello', proto: PROTOCOL, store: 'main', replicaId: 'ry', ops: [] });
   const answer = (t, epoch, v, state) => t.onmessage({ t: 'snapshot', store: 'main', state, ts: [1, 0, 'server'], seq: 0, registers: [], v, epoch });
   answer(x.opened[0], 'E1', 2, { tasks: {} });
   answer(y.opened[0], 'E1', 2, { tasks: {} });
@@ -1172,8 +1191,8 @@ test('a socket whose hellos on a store named two replicas has neither recorded: 
   const first = env.net.link({ user: { id: 'mallory', key: 'key-mallory' } }).factory();
   first.onmessage = m => heard.push(m);
   first.onopen = () => {
-    first.send({ t: 'hello', store: 'main', replicaId: 'r-mallory', ops: [] });
-    first.send({ t: 'hello', store: 'main', replicaId: 'r-b', ops: [] });
+    first.send({ t: 'hello', proto: PROTOCOL, store: 'main', replicaId: 'r-mallory', ops: [] });
+    first.send({ t: 'hello', proto: PROTOCOL, store: 'main', replicaId: 'r-b', ops: [] });
   };
   await env.until(() => heard.some(m => m.t === 'snapshot') && heard.some(m => m.t === 'error' && m.code === 'forbidden'), 'answered, and refused');
   first.close();
@@ -1183,7 +1202,7 @@ test('a socket whose hellos on a store named two replicas has neither recorded: 
   const later = [];
   const second = env.net.link({ user: { id: 'mallory', key: 'key-mallory' } }).factory();
   second.onmessage = m => later.push(m);
-  second.onopen = () => second.send({ t: 'hello', store: 'main', replicaId: 'r-b', ops: [
+  second.onopen = () => second.send({ t: 'hello', proto: PROTOCOL, store: 'main', replicaId: 'r-b', ops: [
     { replicaId: 'r-b', seq: 1_000_000, ts: [env.time(), 0, 'r-b'], diff: { tasks: { forged: { id: 'forged', title: 'as b' } } } }
   ] });
   await run(env, 30);
@@ -1217,7 +1236,7 @@ test('a credential keeps the 32 replicas on a store answered last', () => {
     const up = manual();
     const s = relay.accept({ send() {}, close() {}, key: 'k', upstream: up });
     up.opened[0].onopen();
-    s.receive({ t: 'hello', store: 'main', replicaId, ops: [] });
+    s.receive({ t: 'hello', proto: PROTOCOL, store: 'main', replicaId, ops: [] });
     up.opened[0].onmessage({ ...snapshot });
   };
   for (let i = 0; i < 33; i++) answer(`r${i}`);
@@ -1226,7 +1245,7 @@ test('a credential keeps the 32 replicas on a store answered last', () => {
   relay.upstreamDown();
   const served = replicaId => {
     const heard = [];
-    relay.accept({ send: m => heard.push(m), close() {}, key: 'k', upstream: manual() }).receive({ t: 'hello', store: 'main', replicaId, ops: [] });
+    relay.accept({ send: m => heard.push(m), close() {}, key: 'k', upstream: manual() }).receive({ t: 'hello', proto: PROTOCOL, store: 'main', replicaId, ops: [] });
     return heard.some(m => m.t === 'snapshot');
   };
   assert.equal(served('r0'), false, 'the first was let go for the 33rd');
@@ -1359,7 +1378,7 @@ test('the known file is written for the server\'s clock once the minute is out, 
     const up = manual();
     const s = relay.accept({ send() {}, close() {}, key, upstream: up });
     up.opened[0].onopen();
-    s.receive({ t: 'hello', store: 'main', replicaId, ops: [] });
+    s.receive({ t: 'hello', proto: PROTOCOL, store: 'main', replicaId, ops: [] });
     up.opened[0].onmessage({ t: 'snapshot', store: 'main', state: relay.copy('main')?.state ?? INITIAL, ts: [T, 0, 'server'], seq: 0, registers: [], v, epoch: 'E' });
     return up.opened[0];
   };

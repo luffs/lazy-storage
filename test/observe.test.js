@@ -1,4 +1,5 @@
 // observe.test.js - Store events for logs and metrics, and stats
+import { PROTOCOL } from '../src/core/index.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createStore, createHub, snapshotResponse } from '../src/server/index.js';
@@ -60,7 +61,7 @@ test('stats counts what the store holds', async () => {
   a.collection('tasks').remove('t1');
   await net.settle();
   const { sent, ...counts } = store.stats();
-  assert.deepEqual(counts, { version: 2, epoch: store.epoch, schema: 0, sessions: 1, replicas: 1, rows: 1, tombstones: 1, log: 2 });
+  assert.deepEqual(counts, { version: 2, epoch: store.epoch, schema: 0, sessions: 1, replicas: 1, rows: 1, tombstones: 1, barriers: 0, log: 2 });
   assert.equal(sent.ack.messages, 2, 'two ops acknowledged');
 });
 
@@ -70,15 +71,15 @@ test("stats().sent counts what the store sent, by type, a broadcast once per ses
   // a's transport encodes what it sends, as the adapters do; b's hands on objects, as the in-memory network does
   const a = store.session({ send: m => { toJSON(m); heard.a.push(m); } });
   const b = store.session({ send: m => heard.b.push(m) });
-  a.receive({ t: 'hello', replicaId: 'a', ops: [] });
-  b.receive({ t: 'hello', replicaId: 'b', ops: [] });
+  a.receive({ t: 'hello', proto: PROTOCOL, replicaId: 'a', ops: [] });
+  b.receive({ t: 'hello', proto: PROTOCOL, replicaId: 'b', ops: [] });
   a.receive({ t: 'op', op: { replicaId: 'a', seq: 1, ts: [Date.now(), 0, 'a'], diff: { tasks: { t1: { id: 't1', title: 'räksmörgås 🙂' } } } } });
   store.patch({ tasks: { t2: { id: 't2', title: 'åäö' } } });
   a.receive({ t: 'nonsense' });
   // A snapshot of state with å, ä, ö and an emoji in it: its size is put
   // together from the state's, measured once, and must be exact
   const c = store.session({ send: m => heard.b.push(m) });
-  c.receive({ t: 'hello', replicaId: 'c', ops: [] });
+  c.receive({ t: 'hello', proto: PROTOCOL, replicaId: 'c', ops: [] });
 
   // Every delivery counted; bytes where a transport encoded, and where the
   // store encodes itself (a broadcast once for all sessions, a snapshot from
@@ -109,7 +110,7 @@ test('a hub hands a throwing store factory to onError instead of the console', (
   const faults = [];
   const sent = [];
   const hub = createHub(() => { throw new Error('factory boom'); }, { send: m => sent.push(m), onError: err => faults.push(err.message) });
-  hub.receive({ t: 'hello', store: 'x', replicaId: 'r', ops: [] });
+  hub.receive({ t: 'hello', proto: PROTOCOL, store: 'x', replicaId: 'r', ops: [] });
   assert.deepEqual(faults, ['factory boom']);
   assert.deepEqual(sent, [{ t: 'closed', store: 'x', code: 'unknown-store', message: 'Store "x" could not be opened: factory boom' }]);
 });

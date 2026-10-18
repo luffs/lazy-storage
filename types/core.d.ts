@@ -21,6 +21,12 @@ export interface Op {
   seq: number;
   ts: Timestamp;
   diff: Diff;
+  /** The store version the replica had applied when it made the batch: what the batch was made in sight of (see MergeOptions.seen) */
+  v?: number;
+  /** The storage life `v` counts in: the server's epoch, or null for a relay's own counting (the server then takes the batch as made in sight of nothing) */
+  epoch?: string | null;
+  /** The containers the batch made, absent in the replica's state before it: the server re-adds what was deleted there (see MergeOptions.made) */
+  made?: Path[];
 }
 
 // --- Clocks -----------------------------------------------------------------
@@ -107,7 +113,14 @@ export function isArrayish(value: unknown): boolean;
 
 export interface ClockEntry {
   ts: Timestamp;
+  /** A tombstone: the path was deleted at `ts` */
   deleted?: boolean;
+  /** A barrier: a tombstone lifted by a write that re-added the container (`ts` its timestamp); the container is there, and only a replica that had applied `v` edits beneath it */
+  made?: boolean;
+  /** A barrier's: the deletion's timestamp; a write that re-adds the container passes the barrier when newer than this */
+  since?: Timestamp;
+  /** A barrier's: the store version the re-add became */
+  v?: number;
 }
 
 export interface MergeResult {
@@ -116,8 +129,10 @@ export interface MergeResult {
   /** Paths of the losing leaves */
   rejected: Path[];
   won: Leaf[];
-  /** Clock keys removed: descendants of a winning write or deletion, lifted tombstones */
+  /** Clock keys removed: descendants of a winning write or deletion */
   dropped: string[];
+  /** Clock keys whose entry is a barrier this op set, moved or stood on: the row at each is the barrier's */
+  barriers: string[];
 }
 
 /** The clock table with a children index, so a write finds its descendants without scanning every key */
@@ -130,14 +145,28 @@ export class ClockMap extends Map<string, ClockEntry> {
 export interface MergeOptions {
   /** The op is the server's own: a newer tombstone at any object it writes is lifted, `id` or not */
   authority?: boolean;
+  /** Containers the op's replica made (had nothing at before the batch): a newer tombstone at one, or at a container the op writes under one, is lifted */
+  made?: Path[];
+  /** The store version the op's replica had applied when it made the op (0: none); a plain write under a barrier lands only from a replica that had applied the barrier's `v` */
+  seen?: number;
+  /** The version the op's patch becomes, stamped on the barriers it leaves */
+  v?: number;
 }
 
 /** With a ClockMap descendants come from its index; with a plain Map every key is scanned */
 export function mergeOp(clocks: Map<string, ClockEntry>, ts: Timestamp, diff: Diff, registers: RegisterSet, options?: MergeOptions): MergeResult;
 /** Forget tombstones older than a timestamp; returns the removed keys */
 export function compactTombstones(clocks: Map<string, ClockEntry>, olderThan: Timestamp): string[];
+/** Turn barriers older than a timestamp into the live entries of containers written empty; returns their keys */
+export function settleBarriers(clocks: Map<string, ClockEntry>, olderThan: Timestamp): string[];
+/** Whether something names a path a replica made: a non-empty array of keys */
+export function isMadePath(path: unknown): path is Path;
+/** The clock entry a persisted row stands for */
+export function clockEntry(row: { ts: Timestamp; deleted?: boolean; made?: boolean; since?: Timestamp; v?: number }): ClockEntry;
 
 export function randomId(): string;
+/** The wire protocol's version, said in every hello; a server that speaks another closes the store with code 'outdated' */
+export const PROTOCOL: number;
 
 // --- The wire protocol --------------------------------------------------------------
 
@@ -146,7 +175,7 @@ export type ErrorCode = 'invalid' | 'forbidden' | 'expired' | 'too-large' | 'rat
 
 /** Why the server ended a store for a client */
 /** `unauthorized` ends the socket itself (the request did not authenticate); the others end one store on it */
-export type ClosedCode = 'evicted' | 'forbidden' | 'unknown-store' | 'invalid-store' | 'unauthorized' | 'unavailable' | 'replica-taken';
+export type ClosedCode = 'evicted' | 'forbidden' | 'unknown-store' | 'invalid-store' | 'unauthorized' | 'unavailable' | 'replica-taken' | 'outdated';
 
 /** A live session on a store, as presence lists them; `key` is what presence groups users by (absent for an anonymous session), `data` what that client shares */
 export interface Peer {
@@ -163,7 +192,7 @@ export interface PeerShare {
 }
 
 export type ClientMessage =
-  | { t: 'hello'; replicaId: string; ops: Op[]; since?: number; epoch?: string | null; share?: unknown; presence?: false; fetch?: true; follow?: false }
+  | { t: 'hello'; proto: number; replicaId: string; ops: Op[]; since?: number; epoch?: string | null; share?: unknown; presence?: false; fetch?: true; follow?: false }
   | { t: 'op'; op: Op }
   | { t: 'share'; data: unknown }
   | { t: 'ping' }

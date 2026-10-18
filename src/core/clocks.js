@@ -9,6 +9,17 @@
 // they are. Everything else about it is a Map.
 import { pathKey, parsePathKey } from './paths.js';
 
+/**
+ * The clock entry a persisted row stands for (server/storage.js): a
+ * tombstone's, a barrier's (the re-add's timestamp, the deletion's as
+ * `since`, and the re-add's version `v`; see merge.js), or a live value's
+ */
+export function clockEntry(row) {
+  if (row.deleted) return { ts: row.ts, deleted: true };
+  if (row.made) return { ts: row.ts, made: true, since: row.since, v: row.v };
+  return { ts: row.ts };
+}
+
 export class ClockMap extends Map {
   #children = new Map(); // parent key -> Set of child keys (entries and intermediate paths)
 

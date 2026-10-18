@@ -79,6 +79,18 @@ test('edits to different fields stay separate ops with their own stamps, so a re
   assert.equal(c.state.tasks.x.title, 'theirs', 'and the client was corrected');
 });
 
+test('a container made and then emptied while both ops wait passes its re-add to no one: a deletion writes nothing there', async () => {
+  const store = createStore({ initial: INITIAL, registers: REGISTERS });
+  const net = createNetwork(store);
+  const c = offlineClient(net, { replicaId: 'c' });
+  c.state.tasks.x = { meta: { note: 'n' } };            // no id: made is what re-adds it
+  await tick();
+  assert.deepEqual(c.outbox().map(op => op.made), [[['tasks', 'x']]]);
+  delete c.state.tasks.x.meta.note;                      // takes over the first op's only leaf: that op goes, and its `made` with it
+  await tick();
+  assert.deepEqual(c.outbox().map(op => [op.diff, op.made]), [[{ tasks: { x: { meta: { note: null } } } }, undefined]], 'nothing to re-add');
+});
+
 test('deleting a record drops its pending edits; re-adding it keeps the deletion ahead of the new record', async () => {
   const store = createStore({ initial: INITIAL, registers: REGISTERS });
   const net = createNetwork(store);
