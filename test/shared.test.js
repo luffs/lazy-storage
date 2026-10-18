@@ -899,7 +899,12 @@ test('a tab that signs in after the socket was turned away brings the browser ba
   assert.equal(store.sessions, 1, 'one socket');
 });
 
-test('a follower\'s op from before the replica\'s reset is taken as made in sight of nothing, and one from the reset on as made in sight of the new epoch', async t => {
+/**
+ * A leader tab with a follower speaking the protocol by hand over a port, so its ops can say what they like, and
+ * a barrier in the store: another replica deleted x's meta and made it again. `before` is the last version the
+ * follower heard, `copy` the store exported with the barrier in it
+ */
+async function followerAtBarrier(t) {
   const storages = new Map();   // one per store id, so the store put back from the copy is served from it
   const stores = createStores(id => createStore({ initial: INITIAL, storage: storages.get(id) ?? storages.set(id, memoryStorage()).get(id) }));
   const net = createNetwork({ session: ({ send, user }) => createHub(id => stores.get(id), { send, user }) });
@@ -907,7 +912,6 @@ test('a follower\'s op from before the replica\'s reset is taken as made in sigh
   t.after(() => { b.close(); stores.dispose(); });
   const a = b.tab('a');
   await b.until(() => a.db.status === 'online', 'online');
-  // A follower speaking the protocol by hand over a port, so its ops can say what they like
   const { port1, port2 } = new MessageChannel();
   const stop = a.connection.follow(port1, [{ store: 'main', initial: INITIAL }]);
   const heard = [];
@@ -928,6 +932,11 @@ test('a follower\'s op from before the replica\'s reset is taken as made in sigh
   assert.equal(stores.get('main').stats().barriers, 1);
   const before = label();
   const copy = stores.get('main').export();
+  return { stores, net, b, a, o, heard, label, before, copy, port1, port2, stop };
+}
+
+test('a follower\'s op from before the replica\'s reset is taken as made in sight of nothing, and one from the reset on as made in sight of the new epoch', async t => {
+  const { stores, net, b, a, o, heard, label, before, copy, port1, port2, stop } = await followerAtBarrier(t);
 
   // The store is put back from the copy, which equals the state: the replica resets with no change to forward,
   // and the follower hears of it, with a fresh number
@@ -954,34 +963,7 @@ test('a follower\'s op from before the replica\'s reset is taken as made in sigh
 });
 
 test('a reset that changes the state numbers the snapshot it forwards anew: a follower that heard only that is in sight of the new epoch', async t => {
-  const storages = new Map();   // one per store id, so the store put back from the copy is served from it
-  const stores = createStores(id => createStore({ initial: INITIAL, storage: storages.get(id) ?? storages.set(id, memoryStorage()).get(id) }));
-  const net = createNetwork({ session: ({ send, user }) => createHub(id => stores.get(id), { send, user }) });
-  const b = browser(net);
-  t.after(() => { b.close(); stores.dispose(); });
-  const a = b.tab('a');
-  await b.until(() => a.db.status === 'online', 'online');
-  // A follower speaking the protocol by hand over a port, so its ops can say what they like
-  const { port1, port2 } = new MessageChannel();
-  const stop = a.connection.follow(port1, [{ store: 'main', initial: INITIAL }]);
-  const heard = [];
-  port2.onmessage = e => heard.push(e.data);
-  const label = () => heard.filter(m => Number.isInteger(m.v)).at(-1).v;
-  port2.postMessage({ t: 'hello', proto: PROTOCOL, store: 'main', replicaId: 'raw', ops: [] });
-  await b.until(() => heard.some(m => m.t === 'snapshot'), 'the follower is answered');
-  a.db.state.tasks.x = { id: 'x', meta: { note: 'first' } };
-  await b.until(() => stores.get('main').snapshot().tasks.x?.meta?.note === 'first', 'x on the server');
-  // Another replica deletes x's meta and makes it again: a barrier, in the copy taken next
-  const o = net.client({ replicaId: 'o', initial: INITIAL });
-  await b.until(() => o.status === 'online', 'o online');
-  delete o.state.tasks.x.meta;
-  await net.settle();
-  o.state.tasks.x.meta = { note: 'again' };
-  await net.settle();
-  await b.until(() => a.db.state.tasks.x?.meta?.note === 'again', 'the leader has the re-add');
-  assert.equal(stores.get('main').stats().barriers, 1);
-  const before = label();
-  const copy = stores.get('main').export();
+  const { stores, net, b, a, o, heard, label, before, copy, port1, port2, stop } = await followerAtBarrier(t);
 
   // The store is put back from the copy, which the state has moved past: the replica resets, and the snapshot that
   // brought the copy is forwarded to the follower, numbered past everything sent before
