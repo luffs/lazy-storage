@@ -33,6 +33,15 @@ const { Utils } = LazyWatch;
  *   it needs only the user and the id
  * @param {(user: any, storeId: string, store: Object) => boolean|Promise<boolean>} [options.authorize]
  *   runs once the store is resolved, for a check that needs the store
+ * @param {(credential: Object, storeId: string) => any|Promise<any>} [options.vouch]
+ *   on a follower's socket: a client's credential judged as its own socket
+ *   would be; its user, or null to refuse it as unauthorized
+ * @param {{ burst: number, perSecond: number }|false} [options.vouchRate]
+ *   the vouches turned away as unauthorized this socket may ask for before
+ *   every vouch is refused for a while ('rate-limited', with retryAfter):
+ *   each costs the server an `authenticate`, and a follower that floods it
+ *   with made-up credentials is held back without holding back one whose
+ *   clients sign in. Default { burst: 100, perSecond: 10 }
  * @param {{ subscribe(id: string): void, unsubscribe(id: string): void, publish(id: string, message: Object): void }} [options.channel]
  *   a transport that can fan a message out to every socket on a store at
  *   once (Bun's topic publish). Given one, a store's patch goes out as a
@@ -45,8 +54,11 @@ const { Utils } = LazyWatch;
  * @param {(error: any) => void} [options.onError] - server faults (a store
  *   factory that threw); default console
  */
-export function createHub(resolveStore, { send, user, authorizeId, authorize, vouch, channel, httpSnapshots, onError = err => console.error('lazy-storage:', err) } = {}) {
+export function createHub(resolveStore, { send, user, authorizeId, authorize, vouch, vouchRate = { burst: 100, perSecond: 10 }, channel, httpSnapshots, onError = err => console.error('lazy-storage:', err), now = Date.now } = {}) {
   if (typeof send !== 'function') throw new TypeError('A hub needs a send function');
+  if (vouchRate && !(vouchRate.burst > 0 && vouchRate.perSecond > 0)) throw new TypeError('vouchRate needs positive burst and perSecond, or false');
+  // The vouches turned away: a token is held while a vouch is judged, kept when it is refused as unauthorized
+  const bucket = vouchRate ? { tokens: vouchRate.burst, at: now() } : null;
   const sessions = new Map();
   const storeOf = new Map(); // store id -> the store its session is on, judged again by revalidate
   const pending = new Map(); // store id -> messages queued while authorization is in flight
@@ -88,13 +100,33 @@ export function createHub(resolveStore, { send, user, authorizeId, authorize, vo
    */
   function vouchFor(id, session, { as, credential, replica }) {
     if (typeof as !== 'string' || !as) return;
-    const refused = (code, message) => send({ t: 'refused', store: id, as, code, message });
+    const refused = (code, message, extra) => send({ t: 'refused', store: id, as, code, message, ...extra });
     if (typeof vouch !== 'function') return refused('forbidden', 'This server takes no clients vouched for by a follower');
+    if (bucket) {
+      const wall = now();
+      bucket.tokens = Math.min(vouchRate.burst, bucket.tokens + ((wall - bucket.at) / 1000) * vouchRate.perSecond);
+      bucket.at = wall;
+      if (bucket.tokens < 1) {
+        const retryAfter = Math.ceil(((1 - bucket.tokens) / vouchRate.perSecond) * 1000);
+        return refused('rate-limited', `Too many vouches turned away; try again in ${retryAfter} ms`, { retryAfter });
+      }
+      bucket.tokens -= 1;
+    }
+    // The token comes back unless the credential is turned away
+    let held = Boolean(bucket);
+    const giveBack = () => {
+      if (held) bucket.tokens = Math.min(vouchRate.burst, bucket.tokens + 1);
+      held = false;
+    };
     const store = storeOf.get(id);
     Promise.resolve()
       .then(() => vouch(credential, id))
       .then(async client => {
-        if (client === null || client === undefined) return refused('unauthorized', "The client's credential was not accepted");
+        if (client === null || client === undefined) {
+          held = false;
+          return refused('unauthorized', "The client's credential was not accepted");
+        }
+        giveBack();
         if (authorizeId && !(await authorizeId(client, id))) return refused('forbidden', `Not allowed to access store "${id}"`);
         if (authorize && !(await authorize(client, id, store))) return refused('forbidden', `Not allowed to access store "${id}"`);
         if (closed || sessions.get(id) !== session) return;
@@ -102,7 +134,10 @@ export function createHub(resolveStore, { send, user, authorizeId, authorize, vo
         if (refusal) return refused(refusal.code, refusal.message);
         send({ t: 'admitted', store: id, as });
       })
-      .catch(err => refused('forbidden', err?.message || 'Not allowed'));
+      .catch(err => {
+        giveBack();
+        refused('forbidden', err?.message || 'Not allowed');
+      });
   }
 
   function deliver(id, msg) {

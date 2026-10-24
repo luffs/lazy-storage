@@ -115,6 +115,8 @@ export interface SharedConnectionOptions {
   replicaId?: string;
   /** How often (ms) the leader looks for tabs that closed without a word, by the lock each tab holds; default 10 000 */
   sweepEvery?: number;
+  /** How long (ms) the browser keeps following a store no tab has open (default 5000); false keeps every store */
+  linger?: number | false;
 }
 
 /**

@@ -81,8 +81,10 @@ from what it has, and the tab says `offline`.
 When the leader tab closes, the next tab acquires the lock, loads the
 replica's copies and outbox from `storage`, reconnects, and the other
 tabs say hello to it again, with whatever the old leader had not
-acknowledged. The leader keeps following a store once a tab has opened
-it, until it hands over. A tab that closes without a word is found by the
+acknowledged. A store no tab has open any more is let go of after
+`linger` (default five seconds, so a reload comes back to it): the
+browser's session on it ends, and its copy and outbox stay in `storage`
+for the next tab to open it. A tab that closes without a word is found by the
 lock it held, which the leader checks every `sweepEvery` (default ten
 seconds). Leave the clients' own `storage` at its default: the replica is
 what persists. A leader that has to open a store no tab has declared yet

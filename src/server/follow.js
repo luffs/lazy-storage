@@ -53,13 +53,15 @@ export function credentialRequest(credential, path, allowed = []) {
  * @param {(relay: any, storeId: string) => boolean|Promise<boolean>} [options.authorizeRelay]
  * @param {Function} [options.authorizeId]
  * @param {Function} [options.authorize]
+ * @param {{ burst: number, perSecond: number }|false} [options.rate] - the vouches turned away as unauthorized it may ask for before every vouch waits (hub.js, vouchRate)
  * @param {Object} [options.channel]
  * @param {(error: any) => void} [options.onError]
  */
-export function followerHub(resolveStore, { send, relay, admit, authorizeRelay, authorizeId, authorize, channel, onError }) {
+export function followerHub(resolveStore, { send, relay, admit, authorizeRelay, authorizeId, authorize, rate, channel, onError }) {
   const hub = createHub(resolveStore, {
     send,
     user: relay,
+    ...(rate === undefined ? {} : { vouchRate: rate }),
     channel,
     onError,
     authorizeId: (user, id) => (user === relay

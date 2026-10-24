@@ -50,6 +50,8 @@ export interface RelayOptions {
   grace?: number;
   /** Whether to answer a client the server let in before, while it is away (default: yes) */
   authorizeOffline?(key: string, storeId: string): boolean;
+  /** How long (ms) a store is kept after its last client left, then let go of (default 30 000); false keeps every store */
+  linger?: number | false;
   reconnect?: { min: number; max: number } | false;
   keepalive?: number | false;
   /** The relay's own replica (default: the one storage keeps, else new) */

@@ -35,6 +35,12 @@
 // The relay's own answers count in its own versions and epoch, and say
 // `relay: true`, so a client that later talks to the server directly asks
 // it for a snapshot and hears no reset.
+//
+// A store no client has open any more is let go of `linger` later (unless
+// one comes back meanwhile): its copy saved, its session at the server
+// left, so the server may unload it, and the relay holds nothing of it but
+// what storage keeps. One with ops of the relay's own the server has not
+// acknowledged waits for them first.
 import { LazyWatch } from 'lazy-watch';
 import { createClock, clamp, isTimestamp } from '../core/clock.js';
 import { PROTOCOL } from '../core/protocol.js';
@@ -60,6 +66,7 @@ const clone = value => (value === null || value === undefined || typeof value !=
  * @param {'upstream'|'local'} [options.acknowledge='upstream']
  * @param {number} [options.grace=10000] - how long the server may be away before the relay says it answers alone
  * @param {(key: string, storeId: string) => boolean} [options.authorizeOffline] - whether to answer a client the server let in before, while it is away
+ * @param {number|false} [options.linger=30000] - how long (ms) a store is kept after its last client left; false keeps every store
  * @param {{min: number, max: number}|false} [options.reconnect]
  * @param {number|false} [options.keepalive]
  * @param {(error: any) => void} [options.onError]
@@ -74,6 +81,7 @@ export function createRelay({
   acknowledge = 'upstream',
   grace = 10_000,
   authorizeOffline = () => true,
+  linger = 30_000,
   reconnect = { min: 500, max: 10_000 },
   keepalive = 30_000,
   onError = err => console.error('lazy-storage relay:', err),
@@ -83,6 +91,7 @@ export function createRelay({
   if (typeof shapeOf !== 'function') throw new TypeError('createRelay needs shapeOf(storeId)');
   if (typeof link !== 'function') throw new TypeError('createRelay needs a link: a transport factory to the server');
   if (acknowledge !== 'upstream' && acknowledge !== 'local') throw new TypeError("acknowledge is 'upstream' or 'local'");
+  if (linger !== false && !(Number.isFinite(linger) && linger >= 0)) throw new TypeError('linger is a number of ms, or false');
   const local = acknowledge === 'local';
   const meta = storage.loadMeta?.() ?? null;
   const replicaId = givenReplica ?? meta?.replicaId ?? randomId();
@@ -179,6 +188,7 @@ export function createRelay({
           edge.sessions.add(ss);
         }
         for (const run of waiting.waiting) run();
+        idle(edge);
       });
       return waiting;
     }
@@ -190,7 +200,8 @@ export function createRelay({
       id: storeId,
       shape,
       judge: createRules(shape, declared.rules ?? {}, declared.readOnly === true),
-      base: saved ? docFromRecords(shape, saved.records ?? []) : createDoc(shape),
+      // Records of their own: what storage handed over is not written in place
+      base: saved ? docFromRecords(shape, structuredClone(saved.records ?? [])) : createDoc(shape),
       view: null,
       have: Boolean(saved?.records),
       v: saved?.v ?? 0,
@@ -208,15 +219,42 @@ export function createRelay({
       peers: new Map(),
       link: null,
       synced: false,
-      retry: null
+      retry: null,
+      lingering: null
     };
     for (const op of saved?.own?.ops ?? []) edge.queue.push({ own: true, replica: replicaId, op, sent: false });
-    edge.view = docFromRecords(shape, [...edge.base.records()]);
+    // The view's records are copies: a change from the server applied to the base must show as a change of the view
+    edge.view = docFromRecords(shape, structuredClone([...edge.base.records()]));
     for (const entry of edge.queue) for (const change of entry.op.changes) safeApply(edge.view, change, entry.op.ts);
     edges.set(storeId, edge);
     edge.link = connection.attach(storeId, upstreamHandler(edge));
     connection.connect();
     return edge;
+  }
+
+  /** A store with no client: let go of `linger` from now, unless one comes (`inUse`) */
+  function idle(edge) {
+    if (linger === false || edge.loading || edge.sessions.size || edge.lingering || closed) return;
+    edge.lingering = setTimeout(() => {
+      edge.lingering = null;
+      release(edge);
+    }, linger);
+    if (typeof edge.lingering?.unref === 'function') edge.lingering.unref();
+  }
+  function inUse(edge) {
+    clearTimeout(edge.lingering);
+    edge.lingering = null;
+  }
+
+  /** Let go of a store: its copy saved, its session at the server left; one with ops still waiting for the server waits too */
+  function release(edge) {
+    if (edges.get(edge.id) !== edge || edge.sessions.size || closed) return;
+    // Still waiting for the server, or still answering with the server's word (closedWith): kept a while longer
+    if (edge.queue.length || (edge.closedWith && now() < edge.closedWith.until)) return idle(edge);
+    clearTimeout(edge.retry);
+    persist(edge);
+    edges.delete(edge.id);
+    edge.link?.detach();
   }
 
 
@@ -515,6 +553,13 @@ export function createRelay({
       case 'revoked': {
         const grant = edge.grants.get(msg.as);
         if (!grant) return;
+        if (msg.t === 'refused' && msg.code === 'rate-limited') {
+          // Not a verdict: asked again once the server says it may be, the client waiting meanwhile
+          grant.state = 'pending';
+          const timer = setTimeout(() => { if (edge.grants.get(msg.as) === grant && grant.state === 'pending') vouch(edge, grant); }, Number.isInteger(msg.retryAfter) ? msg.retryAfter : 1000);
+          if (typeof timer?.unref === 'function') timer.unref();
+          return;
+        }
         grant.state = 'refused';
         edge.admitted.get(grant.key)?.delete(grant.replica);
         edge.queue = edge.queue.filter(e => e.as !== msg.as);
@@ -695,6 +740,7 @@ export function createRelay({
           recompute(ss.edge, mine.flatMap(e => e.op.changes.map(ch => [ch.c, ch.id])), clock.highest);
         }
       }
+      idle(ss.edge);
     }
 
     const socket = {
@@ -711,6 +757,7 @@ export function createRelay({
           ss = storeSession(id, edge);
           stores.set(id, ss);
           edge.sessions.add(ss);
+          if (!edge.loading) inUse(edge);
         }
         const edge = ss.edge;
         // Its copy is still being read from storage: this waits for it, in order
@@ -779,6 +826,7 @@ export function createRelay({
     emitPatch(edge, applied, ts);
     persist(edge);
     sendUp(edge, entry);
+    idle(edge);
     return applied;
   }
 
@@ -837,6 +885,7 @@ export function createRelay({
       for (const edge of edges.values()) {
         if (edge.loading) continue;
         clearTimeout(edge.retry);
+        clearTimeout(edge.lingering);
         persist(edge);
       }
       storage.flush?.();

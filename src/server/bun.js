@@ -88,10 +88,13 @@ import { snapshotOptions, snapshotId, serveSnapshot } from './snapshot.js';
  *   a client), `expiresAt(relay, req)` when that runs out (as `expiresAt`),
  *   `authorize(relay, storeId)` whether it may carry a store at all
  *   (default: any its clients may read; judged again by `revalidate`),
- *   `path` (default `<path>/relay`), `headers` (more
- *   names of a client's headers its credential may carry, besides
- *   authorization, cookie and user-agent). A client a relay vouches for is judged by `authenticate`
- *   and `expiresAt` given `{ relay }` as their last argument.
+ *   `path` (default `<path>/relay`), `headers` (more names of a client's
+ *   headers its credential may carry, besides authorization, cookie and
+ *   user-agent), `rate` (the vouches turned away as unauthorized a relay's
+ *   socket may ask for before every vouch waits: { burst, perSecond },
+ *   default 100 and 10; false for none). A client a relay vouches for is
+ *   judged by `authenticate` and `expiresAt` given `{ relay }` as their last
+ *   argument.
  *   `disconnect(filter)` cuts off a relay the filter picks (it is handed the
  *   relay as the user) with its clients
  * @param {number|false} [options.maxBuffered=16777216] - close a socket
@@ -289,7 +292,7 @@ export function createHandlers({
         }
       };
       if (ws.data.relay !== undefined) {
-        links.set(ws, followerHub(resolveStore, { send: message => send(ws, message), relay: ws.data.relay, admit, authorizeRelay: relays.authorize, authorizeId, authorize, channel, onError }));
+        links.set(ws, followerHub(resolveStore, { send: message => send(ws, message), relay: ws.data.relay, admit, authorizeRelay: relays.authorize, authorizeId, authorize, rate: relays.rate, channel, onError }));
         const relayTimes = { opened: Date.now(), heard: Date.now(), expires: ws.data.expires ?? null, cancel: null };
         seen.set(ws, relayTimes);
         // A relay's own session runs out as a client's does: closed, and it comes back judged afresh

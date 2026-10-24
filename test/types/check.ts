@@ -92,7 +92,7 @@ owned.disconnect();
 const rows: RowStorage = indexedDBStorage('app:team-1');
 void openClient<State>({ connection, store: 'team-1', ...SHAPE, storage: rows });
 const bunRows: RowStorage = sqliteClientStorage('mirror.sqlite');
-const shared = sharedConnection({ name: 'app', transport: webSocketTransport('ws://x'), storage: store => indexedDBStorage(`app:${store}`), shapeOf: () => SHAPE });
+const shared = sharedConnection({ name: 'app', transport: webSocketTransport('ws://x'), storage: store => indexedDBStorage(`app:${store}`), shapeOf: () => SHAPE, linger: 5000 });
 const leads: boolean = shared.leader;
 void [bunRows, leads];
 
@@ -155,10 +155,10 @@ const commits: StorageCommit[] = [];
 const mine: ServerStorage = { load: () => null, commit: change => { commits.push(change); }, flush: () => {} };
 createStore({ storage: mine });
 const registry = createStores(storeId => (isStoreId(storeId) ? createStore({ storage: jsonFileStorage(`${storeId}.json`) }) : null), { idle: 60_000 });
-const hub = createHub(storeId => registry.get(storeId), { send: m => void toJSON(m), vouch: credential => credential });
+const hub = createHub(storeId => registry.get(storeId), { send: m => void toJSON(m), vouch: credential => credential, vouchRate: { burst: 20, perSecond: 2 } });
 void tagStore({ t: 'pong' }, 'x');
 hub.revoke(() => true);
-const handlers = createHandlers({ stores: registry, relays: { authenticate: () => ({ id: 'relay' }) } });
+const handlers = createHandlers({ stores: registry, relays: { authenticate: () => ({ id: 'relay' }), rate: false } });
 void [handlers, serve, sqliteStorage('app.sqlite').fromLeaves];
 
 // --- Testing -------------------------------------------------------------------------

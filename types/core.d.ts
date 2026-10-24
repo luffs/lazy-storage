@@ -156,7 +156,7 @@ export type ServerMessage =
   | { t: 'relay'; store?: string; status: 'local' | 'through' }
   | { t: 'closed'; store?: string; code: string; message: string }
   | { t: 'admitted'; store?: string; as: string }
-  | { t: 'refused' | 'revoked'; store?: string; as: string; code: string; message?: string }
+  | { t: 'refused' | 'revoked'; store?: string; as: string; code: string; message?: string; retryAfter?: number }
   | { t: 'reset'; store?: string; previous: { epoch: string | null } }
   | { t: 'pong' };
 

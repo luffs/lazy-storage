@@ -312,3 +312,144 @@ test('in local mode a tab shares as the browser, and the server lists one peer f
   assert.deepEqual(browser.data, { editing: 'k' });
   assert.equal(other.peers.length, 2);
 });
+
+const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+test('a store no client has open is let go of after linger: its session at the server left, and opened again from the copy', async () => {
+  const { store, relay, settle, display } = setup({ relayOptions: { linger: 20 } });
+  const a = display('a');
+  await settle();
+  a.state.tasks.k = { title: 'kept' };
+  await settle();
+  assert.equal(store.stats().sessions, 1, 'the relay\'s session on the store');
+  a.disconnect();
+  await settle();
+  assert.ok(relay.stats().stores.main, 'kept while it lingers');
+  await wait(40);
+  await settle();
+  assert.equal(relay.stats().stores.main, undefined, 'let go of');
+  assert.equal(store.stats().sessions, 0, 'and the server holds no session for it');
+  const b = display('b');
+  await settle();
+  assert.equal(b.status, 'online');
+  assert.equal(b.state.tasks.k.title, 'kept');
+  assert.equal(store.stats().sessions, 1);
+});
+
+test('a client that comes back while the store lingers keeps it, and the relay\'s own unacknowledged ops hold it', async () => {
+  const { store, relay, settle, display, uplink } = setup({ relayOptions: { linger: 20 } });
+  const a = display('a');
+  await settle();
+  a.disconnect();
+  await settle();
+  const b = display('b');
+  await settle();
+  await wait(40);
+  await settle();
+  assert.ok(relay.stats().stores.main, 'a client is on it again');
+  b.disconnect();
+  uplink.goOffline();
+  await settle();
+  relay.patch('main', { tasks: { r: { by: 'the relay' } } });
+  await wait(40);
+  await settle();
+  assert.ok(relay.stats().stores.main, 'its own op waits for the server, and the store with it');
+  uplink.goOnline();
+  relay.upstreamUp();
+  await settle();
+  assert.equal(store.state.tasks.r.by, 'the relay');
+  await wait(60);
+  await settle();
+  assert.equal(relay.stats().stores.main, undefined, 'let go of once the server has it');
+});
+
+test('linger false keeps every store the relay has opened', async () => {
+  const { relay, settle, display } = setup({ relayOptions: { linger: false } });
+  const a = display('a');
+  await settle();
+  a.disconnect();
+  await settle();
+  await wait(30);
+  assert.ok(relay.stats().stores.main);
+  assert.throws(() => createRelay({ shapeOf: () => SHAPE, link: () => ({}), linger: -1 }), /linger/);
+});
+
+test('the server holds back a relay that sends credentials it turns away, and lets those it accepts through', async () => {
+  let now = 1_000_000;
+  const store = createStore(SHAPE);
+  const sent = [];
+  const hub = createHub(() => store, {
+    send: m => sent.push(m),
+    user: { id: 'relay' },
+    vouch: credential => (credential.ok ? { id: credential.id } : null),
+    vouchRate: { burst: 2, perSecond: 1 },
+    now: () => now
+  });
+  hub.receive({ t: 'hello', store: 'main', proto: PROTOCOL, replica: 'relay', ops: [], follower: true });
+  const ask = (as, credential) => hub.receive({ t: 'vouch', store: 'main', as, credential, replica: `r-${as}` });
+  const answer = async as => {
+    for (let i = 0; i < 20 && !sent.some(m => m.as === as && (m.t === 'admitted' || m.t === 'refused')); i++) await new Promise(resolve => setImmediate(resolve));
+    store.flush();
+    return sent.find(m => m.as === as && (m.t === 'admitted' || m.t === 'refused'));
+  };
+  ask('good1', { ok: true, id: 'ann' });
+  assert.equal((await answer('good1')).t, 'admitted');
+  ask('bad1', {});
+  ask('bad2', {});
+  assert.equal((await answer('bad1')).code, 'unauthorized');
+  assert.equal((await answer('bad2')).code, 'unauthorized');
+  ask('good2', { ok: true, id: 'bo' });
+  const limited = await answer('good2');
+  assert.equal(limited.code, 'rate-limited', 'two turned away spend the bucket: every vouch waits');
+  assert.equal(limited.retryAfter, 1000);
+  now += 1000;
+  ask('good3', { ok: true, id: 'bo' });
+  assert.equal((await answer('good3')).t, 'admitted', 'a token back, and one let in keeps it');
+  ask('good4', { ok: true, id: 'cy' });
+  assert.equal((await answer('good4')).t, 'admitted');
+  assert.throws(() => createHub(() => store, { send() {}, vouchRate: { burst: 0, perSecond: 1 } }), /vouchRate/);
+  hub.close();
+});
+
+test('a relay told to wait asks again, and its client is let in then', async () => {
+  const { settle, display } = setup({ hubOptions: { vouch: credential => (credential.bad ? null : credential), vouchRate: { burst: 1, perSecond: 50 } } });
+  const closed = [];
+  const bad = display('bad', { id: 'bad', bad: true });
+  bad.on('closed', info => closed.push(info.code));
+  await settle();
+  assert.deepEqual(closed, ['unauthorized']);
+  const good = display('good');
+  await settle();
+  for (let i = 0; i < 20 && good.status !== 'online'; i++) {
+    await new Promise(resolve => setTimeout(resolve, 10));
+    await settle();
+  }
+  assert.equal(good.status, 'online', 'admitted once the bucket had a token again');
+  assert.deepEqual(closed, ['unauthorized']);
+});
+
+test('a copy opened again from storage passes on what the server changed meanwhile to a display it answered while away', async () => {
+  // Found by the relay fuzzer with linger 0: a copy made from storage shared its records with its view, so a
+  // change from the server landed in both at once, and the relay saw nothing to send its displays
+  const { store, relay, settle, display, uplink } = setup({ relayOptions: { linger: 0 } });
+  const a = display('a', { id: 'a' });
+  a.state.tasks.k = { title: 'x' };
+  await settle();
+  a.disconnect();
+  await settle();
+  await wait(10);
+  await settle();
+  assert.equal(relay.stats().stores.main, undefined, 'let go of');
+  uplink.goOffline();
+  await settle();
+  store.patch({ tasks: { k: { done: true } } });
+  const again = display('a', { id: 'a' });
+  await settle();
+  assert.equal(again.status, 'online', 'answered from the copy, the server away');
+  assert.equal(again.state.tasks.k.done, undefined);
+  uplink.goOnline();
+  relay.upstreamUp();
+  await settle();
+  assert.equal(again.state.tasks.k.done, true, 'the server\'s change reaches the display');
+  assert.deepEqual(LazyWatch.snapshot(again.state), store.snapshot());
+});

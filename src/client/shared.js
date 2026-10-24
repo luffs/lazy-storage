@@ -69,6 +69,8 @@ function copiesIn(adapterOf, { delay = 200, onError }) {
     loadMeta: () => (replicaId ? { replicaId } : null),
     saveMeta: meta => { replicaId = meta.replicaId; },
     load(id) {
+      // A store let go of and opened again at once: what waited to be written goes first
+      if (timers.has(id)) writeBase(id);
       const adapter = adapterFor(id);
       const toCopy = saved => {
         if (!Utils.isPlainObject(saved)) return null;
@@ -145,6 +147,7 @@ function replicaOf(name) {
  * @param {string} [options.tabId]
  * @param {string} [options.replicaId] - the browser's replica (default: kept in localStorage)
  * @param {number} [options.sweepEvery=10000] - how often the leader looks for tabs that closed without a word
+ * @param {number|false} [options.linger=5000] - how long (ms) the browser keeps following a store no tab has open (a reload comes back to it)
  * @param {(error: any) => void} [options.onError]
  */
 export function sharedConnection({
@@ -159,6 +162,7 @@ export function sharedConnection({
   tabId = randomId(),
   replicaId,
   sweepEvery = 10_000,
+  linger = 5_000,
   onError = err => console.error('lazy-storage:', err)
 } = {}) {
   if (typeof name !== 'string' || !name) throw new TypeError('sharedConnection requires a name');
@@ -247,6 +251,7 @@ export function sharedConnection({
       storage: copiesIn(storage, { onError }),
       replicaId: replicaId ?? replicaOf(name),
       grace: 0,
+      linger,
       reconnect,
       keepalive,
       onError

@@ -153,7 +153,7 @@ export function createHandlers({
   function open(ws, user, expires, relay) {
     // A broadcast is encoded once for every socket it reaches (see wire.js)
     const hub = relay !== undefined
-      ? followerHub(resolveStore, { send: message => send(ws, message), relay, admit, authorizeRelay: relays.authorize, authorizeId, authorize, onError })
+      ? followerHub(resolveStore, { send: message => send(ws, message), relay, admit, authorizeRelay: relays.authorize, authorizeId, authorize, rate: relays.rate, onError })
       : createHub(resolveStore, {
         send: message => send(ws, message),
         user,

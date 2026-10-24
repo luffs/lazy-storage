@@ -129,10 +129,10 @@ name the relay gives it on the store, `as`:
 |---|---|---|---|
 | `vouch` | relay → server | `as`, `credential`, `replica` | May this client open the store? `credential` is `{ headers?, query? }`, what its own socket would have carried |
 | `admitted` | server → relay | `as` | Yes: the session holds a grant for the client, and lists it in presence |
-| `refused` | server → relay | `as`, `code`, `message` | No: the code its own socket would have heard (`unauthorized`, `forbidden`, `replica-taken`) |
+| `refused` | server → relay | `as`, `code`, `message`, `retryAfter?` | No: the code its own socket would have heard (`unauthorized`, `forbidden`, `replica-taken`); or `rate-limited`, not a verdict: the relay has had too many credentials turned away, and asks again after `retryAfter` ms |
 | `revoked` | server → relay | `as`, `code`, `message` | Access taken away (`evicted`, `forbidden`, a disconnect) |
 | `op`, `share`, `leave` | relay → server | `as` | As the client's own, judged as its user's |
 | `ack`, `error` | server → relay | `as`, `replica` | For the client's op, routed back to it by `as`, or by `replica` once it has gone |
 
-What a follower's own session is sent besides is the store's patches and
+A `leave` without `as` ends the relay's own session on the store, its grants with it: what a relay sends when it lets go of a store no client has open. What a follower's own session is sent besides is the store's patches and
 presence, as any session is, and the records' clocks with every snapshot.

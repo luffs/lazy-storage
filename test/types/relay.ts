@@ -16,6 +16,7 @@ const relay: Relay = createRelay({
   storage: fileCopies('./copies', { onError: err => void err }),
   acknowledge: 'upstream',
   grace: 10_000,
+  linger: 30_000,
   authorizeOffline: (key, storeId) => key.length > 0 && storeId !== 'secret',
   keepalive: false,
   onError: err => void err

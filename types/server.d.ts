@@ -300,6 +300,9 @@ export interface HubOptions {
   authorize?: Authorize;
   /** A follower's client: its credential judged as its own socket would be; the user, or null to refuse */
   vouch?(credential: unknown, storeId: string): unknown | Promise<unknown>;
+  /** The vouches turned away as unauthorized this socket may ask for before every vouch is refused as rate-limited (default { burst: 100, perSecond: 10 }); false for none */
+  vouchRate?: { burst: number; perSecond: number } | false;
+  now?: () => number;
   channel?: HubChannel;
   httpSnapshots?: { url(storeId: string): string; threshold: number };
   onError?(error: unknown): void;

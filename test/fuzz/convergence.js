@@ -2,12 +2,14 @@
 //
 // Every run builds a store, clients connected to it directly and, with
 // `relay`, clients behind a relay whose link to the store drops and comes
-// back, all on one fake clock. Each step picks an action: an edit of a
-// record (made, written deep, written whole, a field deleted, the record
-// deleted), a child made under a parent that may not be there, a singleton
-// or a register written, an undo, a server's own patch, a client or the
-// relay's link going away or coming back, time moving on (or not, for
-// ties). At the end everything comes back online and settles, and:
+// back, all on one fake clock; in half the runs the relay lets go of the
+// store whenever its clients have all gone, and opens it again from its
+// copy. Each step picks an action: an edit of a record (made, written deep,
+// written whole, a field deleted, the record deleted), a child made under
+// a parent that may not be there, a singleton or a register written, an
+// undo, a server's own patch, a client or the relay's link going away or
+// coming back, time moving on (or not, for ties). At the end everything
+// comes back online and settles, and:
 //
 // - every client, and the relay's copy, holds the store's state
 // - no child names a parent that is not there
@@ -62,7 +64,8 @@ async function oneRun(rng, { steps, clients: count, relay: withRelay, trace }, t
       });
       return t;
     };
-    relay = createRelay({ shapeOf: () => SHAPE, link: traced, grace: 0, reconnect: false, keepalive: false, now, onError });
+    // Half the runs let go of a store the moment its last client leaves, and open it again from the copy
+    relay = createRelay({ shapeOf: () => SHAPE, link: traced, grace: 0, linger: rng.chance(0.5) ? 0 : false, reconnect: false, keepalive: false, now, onError });
     site = createNetwork(relay);
   }
   const settle = async () => {

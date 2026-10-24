@@ -64,6 +64,20 @@ the server knows).
 - **A store the relay may not carry** is answered with the server's word,
   a `closed` with the server's code, for ten minutes, and asked about again
   when a client next opens it after that.
+- **A store no client has open is let go of.** After `linger` (default
+  30 s) without a client, the relay saves its copy, leaves its session at
+  the server, and holds nothing of the store but what storage keeps, so
+  the server may unload it. A client that opens it again is answered from
+  that copy and the server's delta. A store with ops of the relay's own the
+  server has not acknowledged waits for them; `linger: false` keeps every
+  store.
+- **Credentials turned away are counted.** Every vouch costs the server an
+  `authenticate`, so a relay's socket may have only so many turned away as
+  unauthorized (`relays.rate`, default a burst of 100, then 10 a second)
+  before every vouch it sends waits: the server answers `rate-limited` with
+  `retryAfter`, and the relay asks again then, its client waiting
+  meanwhile. Vouches the server accepts cost nothing, so a relay whose
+  clients sign in is never held back.
 
 ## Working while the server is away
 
