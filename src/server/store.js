@@ -625,7 +625,10 @@ export function createStore({
 
   function refusal(op, err, user, as) {
     const message = { t: 'error', seq: Utils.isPlainObject(op) ? op.seq : undefined, code: err.code ?? 'invalid', message: err.message };
-    if (as !== undefined) message.as = as;
+    if (as !== undefined) {
+      message.as = as;
+      if (Utils.isPlainObject(op) && typeof op.replica === 'string') message.replica = op.replica;
+    }
     if (err.code === 'rate-limited') message.retryAfter = err.retryAfter;
     if (!(err instanceof RefusedError)) onError(err);
     if (observers.refused.size) notify('refused', { replicaId: Utils.isPlainObject(op) ? op.replica : undefined, seq: message.seq, user, code: message.code, message: err.message });
@@ -681,7 +684,8 @@ export function createStore({
           throw new RefusedError('rate-limited', `Too many ops; try again in ${wait} ms`, { retryAfter: wait });
         }
         const { lost } = apply(op, speaker);
-        const ack = { t: 'ack', ...tag, seq: op.seq, v: version, now: time() };
+        // For a follower's client, which replica it was: the follower routes the ack by it
+        const ack = { t: 'ack', ...tag, ...(as === undefined ? {} : { replica: op.replica }), seq: op.seq, v: version, now: time() };
         if (lost.length) ack.lost = lost;
         return send(ack);
       } catch (err) {

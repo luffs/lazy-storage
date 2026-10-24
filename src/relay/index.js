@@ -229,12 +229,22 @@ export function createRelay({
    */
   function recompute(edge, records, ts) {
     const touched = new Map();
+    const reset = new Map();
     const add = (c, id) => touched.set(edge.shape.recordKey(c, id), [c, id]);
-    for (const [c, id] of records) add(c, id);
+    // A record put back from the base takes its children with it: a queued
+    // deletion of the parent took them out of the view, and may have lost
+    const putBack = (c, id) => {
+      const key = edge.shape.recordKey(c, id);
+      if (reset.has(key)) return;
+      reset.set(key, [c, id]);
+      add(c, id);
+      for (const [cc, cid] of edge.base.childrenOf(c, id)) putBack(cc, cid);
+    };
+    for (const [c, id] of records) putBack(c, id);
     for (const entry of edge.queue) for (const change of entry.op.changes) add(change.c, change.id);
     const before = new Map();
     for (const [key, [c, id]] of touched) before.set(key, JSON.stringify(edge.view.get(c, id)));
-    for (const [c, id] of records) {
+    for (const [c, id] of reset.values()) {
       const data = edge.base.get(c, id);
       edge.view.setRecord(c, id, clone(data), data === undefined ? null : edge.base.clock(c, id));
     }
@@ -388,14 +398,22 @@ export function createRelay({
       case 'ack': {
         clock.adopt(msg.now);
         if (Number.isInteger(msg.v) && msg.v > edge.v) edge.v = msg.v;
-        const entry = takeEntry(edge, msg.as, msg.seq);
-        if (!entry) return;
-        if (!entry.own) {
-          edge.acked.set(entry.replica, Math.max(edge.acked.get(entry.replica) ?? 0, msg.seq));
+        if (msg.as !== undefined) {
+          // A client's op: acknowledged to every session of its replica, a reconnected one included
+          const replica = msg.replica ?? edge.grants.get(msg.as)?.replica;
+          if (typeof replica !== 'string') return;
+          edge.acked.set(replica, Math.max(edge.acked.get(replica) ?? 0, msg.seq));
           const ack = { t: 'ack', seq: msg.seq, v: edge.fv, now: clock.time };
           if (Array.isArray(msg.lost) && msg.lost.length) ack.lost = msg.lost;
-          for (const ss of sessionsOf(edge, msg.as)) ss.send(ack);
-        } else if (local && entry.from) {
+          for (const ss of edge.sessions) if (ss.replica === replica) ss.send(ack);
+          const taken = takeClientEntry(edge, replica, msg.seq);
+          if (taken) recompute(edge, taken.op.changes.map(ch => [ch.c, ch.id]), taken.op.ts);
+          persist(edge);
+          return;
+        }
+        const entry = takeEntry(edge, undefined, msg.seq);
+        if (!entry) return;
+        if (local && entry.from) {
           // The browser's replica: what lost is told to every tab
           if (Array.isArray(msg.lost) && msg.lost.length) for (const ss of edge.sessions) if (ss.synced) ss.send({ t: 'lost', seq: entry.from.seq, lost: msg.lost });
         }
@@ -405,7 +423,7 @@ export function createRelay({
       }
       case 'error': {
         if (!Number.isInteger(msg.seq)) {
-          if (msg.as === undefined) fault(new Error(`The server: ${msg.message}`));
+          fault(new Error(`The server${msg.as === undefined ? '' : ` (about ${msg.as})`}: ${msg.message}`));
           return;
         }
         if (msg.code === 'rate-limited') {
@@ -415,12 +433,19 @@ export function createRelay({
           if (typeof edge.retry?.unref === 'function') edge.retry.unref();
           return;
         }
-        const entry = takeEntry(edge, msg.as, msg.seq);
+        if (msg.as !== undefined) {
+          const replica = msg.replica ?? edge.grants.get(msg.as)?.replica;
+          if (typeof replica !== 'string') return;
+          const taken = takeClientEntry(edge, replica, msg.seq);
+          if (taken) recompute(edge, taken.op.changes.map(ch => [ch.c, ch.id]), taken.op.ts);
+          for (const ss of edge.sessions) if (ss.replica === replica) ss.send({ t: 'error', seq: msg.seq, code: msg.code, message: msg.message });
+          persist(edge);
+          return;
+        }
+        const entry = takeEntry(edge, undefined, msg.seq);
         if (!entry) return;
         recompute(edge, entry.op.changes.map(ch => [ch.c, ch.id]), entry.op.ts);
-        if (!entry.own) {
-          for (const ss of sessionsOf(edge, msg.as)) ss.send({ t: 'error', seq: msg.seq, code: msg.code, message: msg.message });
-        } else if (local) {
+        if (local) {
           for (const ss of edge.sessions) if (ss.synced) ss.send({ t: 'rejected', seq: entry.from?.seq ?? null, code: msg.code, message: msg.message, changes: entry.op.changes });
         } else {
           fault(new Error(`The server refused the relay's own op: ${msg.message}`));
@@ -473,6 +498,12 @@ export function createRelay({
     const i = edge.queue.findIndex(e => (as === undefined ? e.own : e.as === as) && e.op.seq === seq);
     if (i < 0) return null;
     return edge.queue.splice(i, 1)[0];
+  }
+
+  /** A client's op in the queue, by its replica and seq, taken out */
+  function takeClientEntry(edge, replica, seq) {
+    const i = edge.queue.findIndex(e => !e.own && e.replica === replica && e.op.seq === seq);
+    return i < 0 ? null : edge.queue.splice(i, 1)[0];
   }
 
   const sessionsOf = (edge, as) => [...edge.sessions].filter(ss => ss.as === as);
@@ -537,7 +568,8 @@ export function createRelay({
     const refuse = (code, message) => ss.send({ t: 'error', seq: isObj(op) ? op.seq : undefined, code, message });
     if (!isObj(op) || typeof op.replica !== 'string' || !Number.isInteger(op.seq) || op.seq < 1 || !isTimestamp(op.ts) || !Array.isArray(op.changes)) return refuse('invalid', 'A malformed op');
     if (op.replica !== ss.replica) return refuse('forbidden', `This session speaks for replica "${ss.replica}"`);
-    if ((edge.seen.get(op.replica) ?? 0) >= op.seq) {
+    if (local ? (edge.seen.get(op.replica) ?? 0) >= op.seq
+      : (edge.acked.get(op.replica) ?? 0) >= op.seq || edge.queue.some(e => !e.own && e.replica === op.replica && e.op.seq === op.seq)) {
       if (local && answer) ss.send({ t: 'ack', seq: op.seq, v: edge.fv, now: clock.time });
       return;
     }
@@ -605,6 +637,12 @@ export function createRelay({
       if (!local && ss.edge.grants.has(ss.as)) {
         ss.edge.grants.delete(ss.as);
         if (ss.edge.synced && linkUp()) ss.edge.link.send({ t: 'leave', as: ss.as });
+        // What it had queued and the server has not taken: the client keeps it in its outbox and sends it again
+        const mine = ss.edge.queue.filter(e => e.as === ss.as && !e.sent);
+        if (mine.length) {
+          ss.edge.queue = ss.edge.queue.filter(e => !mine.includes(e));
+          recompute(ss.edge, mine.flatMap(e => e.op.changes.map(ch => [ch.c, ch.id])), clock.highest);
+        }
       }
     }
 
@@ -712,7 +750,16 @@ export function createRelay({
     },
     stats() {
       const stores = {};
-      for (const [id, edge] of edges) stores[id] = { sessions: edge.sessions.size, queue: edge.queue.length, v: edge.v, synced: edge.synced };
+      for (const [id, edge] of edges) {
+        stores[id] = {
+          sessions: edge.sessions.size,
+          queue: edge.queue.length,
+          v: edge.v,
+          synced: edge.synced,
+          // What waits to go up, and why: its replica and seq, whether it went, and how its client stands with the server
+          waiting: edge.queue.map(e => ({ replica: e.replica, seq: e.op.seq, sent: e.sent, ...(e.own ? { own: true } : { grant: edge.grants.get(e.as)?.state ?? 'gone' }) }))
+        };
+      }
       return { mode, link: connection.status, stores };
     },
     close() {

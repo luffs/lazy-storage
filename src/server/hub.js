@@ -215,7 +215,8 @@ export function createHub(resolveStore, { send, user, authorizeId, authorize, vo
       if (!isStoreId(id)) {
         return refuse(typeof id === 'string' ? id : undefined, 'invalid-store', 'A message on a multiplexed connection needs a valid store id');
       }
-      if (msg.t === 'leave') {
+      // A follower's client leaving (`as`) is the store session's to hear; a plain leave closes it
+      if (msg.t === 'leave' && msg.as === undefined) {
         sessions.get(id)?.close();
         drop(id);
         pending.delete(id);
