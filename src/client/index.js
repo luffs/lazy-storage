@@ -29,7 +29,7 @@ import { LazyWatch } from 'lazy-watch';
 import { createClock } from '../core/clock.js';
 import { PROTOCOL } from '../core/protocol.js';
 import { createShape } from '../core/shape.js';
-import { createDoc } from '../core/doc.js';
+import { docFromRecords } from '../core/doc.js';
 import { compile, within } from '../core/compile.js';
 import { registerKey } from '../core/paths.js';
 import { randomId } from '../core/ids.js';
@@ -124,28 +124,26 @@ function build({
   let outbox = continuing && Array.isArray(saved.ops) ? saved.ops.filter(op => isObj(op) && Array.isArray(op.changes)) : [];
   const restored = cache && continuing && (rows ? Array.isArray(saved.records) : isObj(saved.state));
 
-  // The base: the server's state as last told
-  function baseFrom(stateOrRecords, fromRows) {
-    const state = structuredClone(initial);
-    for (const c of shape.collections) if (!isObj(state[c])) state[c] = {};
-    if (fromRows) {
-      for (const [c, id, data] of stateOrRecords) {
-        if (shape.isCollection(c) && typeof id === 'string') state[c][id] = data;
-        else if (shape.isSingleton(c)) state[c] = data;
-      }
-    } else if (isObj(stateOrRecords)) {
-      for (const c of Object.keys(stateOrRecords)) if (shape.has(c)) state[c] = structuredClone(stateOrRecords[c]);
-      for (const c of shape.collections) if (!isObj(state[c])) state[c] = {};
+  // The base: the server's state as last told, with each record's clock, so
+  // pending changes are judged over it as the server will judge them
+  function baseFromState(snapshotState, clocks) {
+    const byKey = new Map((Array.isArray(clocks) ? clocks : []).map(([c, id, clockJSON]) => [shape.recordKey(c, id ?? undefined), clockJSON]));
+    const records = [];
+    if (isObj(snapshotState)) {
+      for (const c of shape.collections) for (const id of Object.keys(isObj(snapshotState[c]) ? snapshotState[c] : {})) records.push([c, id, snapshotState[c][id], byKey.get(shape.recordKey(c, id))]);
+      for (const c of shape.singletons) if (Object.hasOwn(snapshotState, c)) records.push([c, null, snapshotState[c], byKey.get(shape.recordKey(c))]);
     }
-    return createDoc(shape, { state, track: false });
+    return docFromRecords(shape, structuredClone(records));
   }
-  let base = restored ? baseFrom(rows ? saved.records : saved.state, rows) : baseFrom(null);
+  let base = !restored ? baseFromState(null)
+    : rows ? docFromRecords(shape, saved.records.map(([c, id, data, clockJSON]) => [c, id, data, clockJSON]))
+      : baseFromState(saved.state, saved.clocks);
   let known = { epoch: restored && typeof saved.epoch === 'string' ? saved.epoch : null, v: restored && Number.isInteger(saved.version) ? saved.version : 0 };
 
   /** The base with every pending change replayed: what `state` shows */
   function replayedAll() {
-    const scratch = createDoc(shape, { state: structuredClone(base.state), track: false });
-    for (const op of outbox) for (const change of op.changes) scratch.apply(change, 0, 'optimistic');
+    const scratch = docFromRecords(shape, structuredClone([...base.records()]));
+    for (const op of outbox) for (const change of op.changes) scratch.apply(change, op.ts, 'replay');
     return scratch.state;
   }
 
@@ -164,6 +162,7 @@ function build({
   let retryTimer = null;
   let throttled = false;
   let relayed = false;
+  let answeredByRelay = false;
   let fetching = 0;
   let held = null;
   let fetchFailed = false;
@@ -184,7 +183,7 @@ function build({
     storage,
     cache,
     shape,
-    base: () => base.state,
+    base: () => base,
     ops: () => outbox,
     meta: () => ({ replicaId, seq, version: known.v, epoch: known.epoch }),
     onError: err => emit('error', err),
@@ -204,16 +203,11 @@ function build({
   function replayed(c, id) {
     const key = shape.recordKey(c, id);
     const list = [];
-    for (const op of outbox) for (const change of op.changes) if (keyOf(change) === key) list.push(change);
+    for (const op of outbox) for (const change of op.changes) if (keyOf(change) === key) list.push([change, op.ts]);
     const record = base.get(c, id);
     if (!list.length) return clone(record);
-    const scratchState = {};
-    for (const cc of shape.collections) scratchState[cc] = {};
-    for (const s of shape.singletons) scratchState[s] = null;
-    if (shape.isSingleton(c)) scratchState[c] = clone(record);
-    else if (record !== undefined) scratchState[c][id] = clone(record);
-    const scratch = createDoc(shape, { state: scratchState, track: false });
-    for (const change of list) scratch.apply(change, 0, 'optimistic');
+    const scratch = docFromRecords(shape, record === undefined ? [] : [[c, id ?? null, clone(record), base.clock(c, id)]]);
+    for (const [change, ts] of list) scratch.apply(change, ts, 'replay');
     return scratch.get(c, id);
   }
 
@@ -375,7 +369,7 @@ function build({
 
   function hello() {
     const ops = outbox.slice(0, HELLO_LIMIT);
-    const message = { t: 'hello', proto: PROTOCOL, replica: replicaId, ops };
+    const message = { t: 'hello', proto: PROTOCOL, replica: replicaId, ops, clocks: true };
     const at = performance.now();
     for (const op of ops) sentAt.set(op.seq, at);
     answered = ops.length ? ops[ops.length - 1].seq : 0;
@@ -428,7 +422,10 @@ function build({
       persistence.base(changedRecords.map(ch => [ch.c, ch.id]));
       if (!changedRecords.length) persistence.version();
     }
-    if (previousEpoch !== null && known.epoch !== null && previousEpoch !== known.epoch) emit('reset', { previous: { epoch: previousEpoch } });
+    // A relay counts in versions of its own: moving between it and the server is not the server starting over
+    const viaRelay = msg.relay === true;
+    if (!viaRelay && !answeredByRelay && previousEpoch !== null && known.epoch !== null && previousEpoch !== known.epoch) emit('reset', { previous: { epoch: previousEpoch } });
+    answeredByRelay = viaRelay;
     synced = true;
     refreshStatus();
     reportLost(Array.isArray(msg.lost) ? msg.lost : []);
@@ -436,8 +433,8 @@ function build({
     emit('sync');
   }
 
-  function snapshotInto(snapshotState) {
-    base = baseFrom(snapshotState);
+  function snapshotInto(snapshotState, clocks) {
+    base = baseFromState(snapshotState, clocks);
     return 'all';
   }
 
@@ -457,7 +454,7 @@ function build({
         body => {
           if (!current()) return;
           held = null;
-          caughtUp({ ...msg, v: body.v, epoch: typeof body.epoch === 'string' ? body.epoch : msg.epoch }, () => snapshotInto(body.state));
+          caughtUp({ ...msg, v: body.v, epoch: typeof body.epoch === 'string' ? body.epoch : msg.epoch }, () => snapshotInto(body.state, body.clocks));
           for (const m of queue) if (m.t !== 'patch' || !(Number.isInteger(m.v) && m.v <= body.v)) handle(m);
         },
         err => {
@@ -502,7 +499,7 @@ function build({
     switch (msg.t) {
       case 'snapshot':
         if (typeof msg.fetch === 'string' && msg.state === undefined) return fetchSnapshot(msg);
-        return caughtUp(msg, () => snapshotInto(msg.state));
+        return caughtUp(msg, () => snapshotInto(msg.state, msg.clocks));
       case 'delta':
         return caughtUp(msg, () => {
           const all = [];
@@ -723,6 +720,8 @@ function build({
     state,
     /** The server's state as this client last heard it (plain; read only) */
     get base() { return base.state; },
+    /** A record's clock in the base: { live, gone }, the times by path the server decides by */
+    clockOf: (c, id) => base.clock(c, id),
     replicaId,
     store: storeId,
     connection,

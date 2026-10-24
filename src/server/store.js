@@ -42,6 +42,7 @@ import { createClock, isTimestamp, clamp } from '../core/clock.js';
 import { PROTOCOL } from '../core/protocol.js';
 import { createShape, assertChange, ModelError } from '../core/shape.js';
 import { createDoc, docFromRecords, changeFor } from '../core/doc.js';
+import { createRules, RuleError } from '../core/rules.js';
 import { memoryStorage, assertDocument } from './storage.js';
 import { toJSON, presetJSON, encodedBytes, utf8Bytes, SNAPSHOT_THRESHOLD, TALLY, LAZY } from './wire.js';
 import { randomId } from '../core/ids.js';
@@ -82,16 +83,6 @@ function presenceOptions(presence) {
   if (!(every >= 0)) throw new TypeError('presence.every must be a number of milliseconds');
   if (!(maxShare > 0)) throw new TypeError('presence.maxShare must be a positive number of bytes');
   return { key, user, validate, every, maxShare };
-}
-
-/** A rule as the store uses it: false (refuse), null (allow), or a function of (user, before, after, context) */
-function ruleOf(rule) {
-  if (rule === false) return false;
-  if (rule === true || rule === undefined || rule === null) return null;
-  if (typeof rule === 'function') return rule;
-  if (Utils.isPlainObject(rule) && typeof rule.write === 'function') return rule.write;
-  if (Utils.isPlainObject(rule) && rule.write === false) return false;
-  throw new TypeError('A rule is true, false, a function, or { write }');
 }
 
 /**
@@ -137,13 +128,7 @@ export function createStore({
   const shape = createShape({ initial, singletons, registers, parents });
   const pres = presenceOptions(presenceOption);
   if (rateLimit && !(rateLimit.burst > 0 && rateLimit.perSecond > 0)) throw new TypeError('rateLimit needs positive burst and perSecond');
-  if (!Utils.isPlainObject(rules)) throw new TypeError('rules must be an object of rules by collection');
-  const ruleFor = new Map();
-  for (const [key, rule] of Object.entries(rules)) {
-    if (key !== '*' && !shape.has(key)) throw new TypeError(`rules: "${key}" is not a collection or singleton`);
-    ruleFor.set(key, ruleOf(rule));
-  }
-  const ruleOn = c => (readOnly === true ? false : ruleFor.has(c) ? ruleFor.get(c) : ruleFor.has('*') ? ruleFor.get('*') : null);
+  const judgeRules = createRules(shape, rules, readOnly);
   if (!Array.isArray(migrations) || migrations.some(m => typeof m !== 'function')) throw new TypeError('migrations must be an array of functions');
   const time = now ?? Date.now;
   const saved = storage.load();
@@ -463,46 +448,6 @@ export function createStore({
     return { upserts, deletes };
   }
 
-  /** What the op's changes would make of each record they touch, for the rules: as if every one landed */
-  function attempted(list) {
-    const state = {};
-    for (const c of shape.collections) state[c] = {};
-    for (const c of shape.singletons) state[c] = undefined;
-    for (const change of list) {
-      const record = doc.get(change.c, change.id);
-      if (shape.isSingleton(change.c)) state[change.c] = structuredClone(record);
-      else if (record !== undefined) state[change.c][change.id] = structuredClone(record);
-    }
-    const scratch = createDoc(shape, { state, track: false });
-    for (const change of list) scratch.apply(change, 0, 'trust');
-    return scratch;
-  }
-
-  function judgeRules(list, user, replica) {
-    const byRecord = new Map();
-    for (const change of list) {
-      const key = shape.recordKey(change.c, change.id);
-      if (!byRecord.has(key)) byRecord.set(key, { c: change.c, id: change.id, changes: [] });
-      byRecord.get(key).changes.push(change);
-    }
-    let scratch = null;
-    for (const { c, id, changes: recordChanges } of byRecord.values()) {
-      const rule = ruleOn(c);
-      if (rule === null) continue;
-      if (rule === false) throw new RefusedError('forbidden', `${c} is the server's to write`);
-      scratch ??= attempted(list);
-      const before = doc.get(c, id);
-      const after = scratch.get(c, id);
-      let verdict;
-      try {
-        verdict = rule(user, before === undefined ? null : before, after === undefined ? null : after, { c, id, state: doc.state, replica, changes: recordChanges, store: self });
-      } catch (err) {
-        throw new RefusedError('forbidden', err?.message || `Not allowed to write ${c}`);
-      }
-      if (verdict === false) throw new RefusedError('forbidden', `Not allowed to write ${c}${id === undefined ? '' : `/${id}`}`);
-    }
-  }
-
   function assertOp(op) {
     if (!Utils.isPlainObject(op)) throw new RefusedError('invalid', 'An op must be an object');
     if (typeof op.replica !== 'string' || !op.replica) throw new RefusedError('invalid', 'op.replica must be a string');
@@ -554,7 +499,12 @@ export function createStore({
         throw err;
       }
     }
-    judgeRules(op.changes, speaker.user, op.replica);
+    try {
+      judgeRules(doc, op.changes, speaker.user, op.replica, { store: self });
+    } catch (err) {
+      if (err instanceof RuleError) throw new RefusedError('forbidden', err.message);
+      throw err;
+    }
     const wall = time();
     if (Number.isFinite(retention) && op.ts < wall - retention) throw new RefusedError('expired', 'The op is older than the store keeps track of; resync and make it again');
     const ts = clamp(op.ts, wall);

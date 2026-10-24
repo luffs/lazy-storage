@@ -35,9 +35,10 @@
 // Modes: 'judge' (a replica's op: every rule), 'authority' (the server's own
 // write: no checks, missing containers and records made, children deleted
 // with their parent), 'trust' (a patch from upstream, already decided:
-// applied as it is, with its time) and 'optimistic' (a client's pending ops
-// over its base: what has no record or parent is skipped, and nothing else
-// is checked; no clocks).
+// applied as it is, with its time), 'replay' (a client's pending ops over
+// its base: judged as the server would, but for a child's parent record,
+// which the server checks) and 'optimistic' (what has no record or parent
+// is skipped, and nothing else is checked; no clocks).
 import { LazyWatch } from 'lazy-watch';
 import { pathKey, valueAt } from './paths.js';
 import { ModelError } from './shape.js';
@@ -179,8 +180,9 @@ export function createDoc(shape, { state, clocks, track = true } = {}) {
     const register = shape.isRegister(c, id, path);
     if (kind === 'set' && isObj(value) && !register) kind = 'put';
     if (kind === 'put' && (register || !isObj(value))) kind = 'set';
-    const judging = mode === 'judge';
-    const checks = judging;
+    // 'replay' judges as 'judge' does, but a client replaying its own ops sees no records beyond the one at hand
+    const judging = mode === 'judge' || mode === 'replay';
+    const checks = mode === 'judge';
     const makes = mode === 'authority' || mode === 'trust';
     const lose = why => { out.lost.push(entry(c, id, path, why)); };
     const key = shape.recordKey(c, id);
@@ -316,6 +318,18 @@ export function createDoc(shape, { state, clocks, track = true } = {}) {
       run(change, ts, mode, out);
       out.applied = out.applied.map(tidy);
       return out;
+    },
+    /** Put a record back as given, its data and clock (undefined data: no record), deciding nothing */
+    setRecord(c, id, data, clockJSON) {
+      const key = shape.recordKey(c, id);
+      if (shape.isSingleton(c)) state[c] = data === undefined ? clone(shape.initial[c]) : data;
+      else if (data === undefined) delete state[c][id];
+      else state[c][id] = data;
+      if (clocks) {
+        if (data === undefined || !clockJSON) clocks.delete(key);
+        else clocks.set(key, clockFromJSON(clockJSON));
+      }
+      relink(c, id);
     },
     /** A record's clock, as stored */
     clock(c, id) {

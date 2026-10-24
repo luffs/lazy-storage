@@ -11,7 +11,7 @@
 // A DOCUMENT adapter ({ load, save, saveState }) keeps the outbox as one
 // document, written whenever it changes (op by op when it has saveOp,
 // removeOp and dropOps, as localStorageOutbox does), and the base as
-// another, `saveState({ state, version, epoch })`. The base costs a
+// another, `saveState({ state, clocks, version, epoch })`. The base costs a
 // serialization of everything, so it is written once changes have settled
 // for `cacheDelay` (at least every ten of those under traffic that never
 // settles), when the page is hidden, and on dispose. It may lag: it is
@@ -20,8 +20,8 @@
 //
 // A ROW adapter ({ load, commit, replace, saveOp, removeOp, dropOps }) keeps
 // one row per record of the base and one per pending op, so a patch costs
-// the records it touched: `commit({ puts: [[c, id, data]], deletes: [[c,
-// id]], meta })`, and `replace({ records, meta })` when a snapshot lands.
+// the records it touched: `commit({ puts: [[c, id, data, clock]], deletes:
+// [[c, id]], meta })`, and `replace({ records, meta })` when a snapshot lands.
 // Every write carries the client's meta ({ replicaId, seq, version, epoch })
 // so the adapter stores it in the same transaction. Its load() may return a
 // promise (IndexedDB does), which is what openClient() is for.
@@ -33,7 +33,7 @@ export const isRowAdapter = storage => typeof storage?.commit === 'function';
  * @param {Object} deps.storage - the adapter
  * @param {boolean} deps.cache - whether the base is persisted at all
  * @param {Object} deps.shape
- * @param {() => Object} deps.base - the base state (plain)
+ * @param {() => Object} deps.base - the base (a doc: state and clocks)
  * @param {() => {replicaId: string, seq: number, version: number, epoch: string|null}} deps.meta
  * @param {() => Object[]} deps.ops - the outbox
  * @param {(error: any) => void} deps.onError
@@ -47,13 +47,7 @@ export function createPersistence({ storage, cache, shape, base, meta, ops, onEr
       onError(err);
     }
   };
-  const recordOf = (c, id) => (shape.isSingleton(c) ? base()[c] : base()[c]?.[id]);
-  const allRecords = () => {
-    const out = [];
-    for (const c of shape.collections) for (const id of Object.keys(base()[c] ?? {})) out.push([c, id, structuredClone(base()[c][id])]);
-    for (const c of shape.singletons) out.push([c, null, structuredClone(base()[c])]);
-    return out;
-  };
+  const allRecords = () => [...base().records()].map(([c, id, data, clock]) => [c, id ?? null, structuredClone(data), clock]);
 
   if (isRowAdapter(storage)) {
     const rewrite = () => {
@@ -78,9 +72,9 @@ export function createPersistence({ storage, cache, shape, base, meta, ops, onEr
         const puts = [];
         const deletes = [];
         for (const [c, id] of touched) {
-          const record = recordOf(c, id);
+          const record = base().get(c, id);
           if (record === undefined) deletes.push([c, id ?? null]);
-          else puts.push([c, id ?? null, structuredClone(record)]);
+          else puts.push([c, id ?? null, structuredClone(record), base().clock(c, id)]);
         }
         storage.commit({ puts, deletes, meta: meta() });
       }),
@@ -107,7 +101,8 @@ export function createPersistence({ storage, cache, shape, base, meta, ops, onEr
     dirtySince = null;
     if (!cache) return;
     const { version, epoch } = meta();
-    storage.saveState({ state: structuredClone(base()), version, epoch });
+    const doc = base();
+    storage.saveState({ state: structuredClone(doc.state), clocks: [...doc.records()].map(([c, id, , clock]) => [c, id ?? null, clock]), version, epoch });
   });
   function soon() {
     if (!cache) return;

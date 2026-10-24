@@ -45,7 +45,7 @@ const { Utils } = LazyWatch;
  * @param {(error: any) => void} [options.onError] - server faults (a store
  *   factory that threw); default console
  */
-export function createHub(resolveStore, { send, user, authorizeId, authorize, channel, httpSnapshots, onError = err => console.error('lazy-storage:', err) } = {}) {
+export function createHub(resolveStore, { send, user, authorizeId, authorize, vouch, channel, httpSnapshots, onError = err => console.error('lazy-storage:', err) } = {}) {
   if (typeof send !== 'function') throw new TypeError('A hub needs a send function');
   const sessions = new Map();
   const storeOf = new Map(); // store id -> the store its session is on, judged again by revalidate
@@ -80,10 +80,36 @@ export function createHub(resolveStore, { send, user, authorizeId, authorize, ch
     return session;
   }
 
+  /**
+   * A follower asks whether one of its clients may open the store: the
+   * client's credential judged by `vouch` as its own socket would be, then
+   * `authorizeId` and `authorize` as that client's. A yes is a grant on the
+   * follower's session; the answer goes back as `admitted` or `refused`
+   */
+  function vouchFor(id, session, { as, credential, replica }) {
+    if (typeof as !== 'string' || !as) return;
+    const refused = (code, message) => send({ t: 'refused', store: id, as, code, message });
+    if (typeof vouch !== 'function') return refused('forbidden', 'This server takes no clients vouched for by a follower');
+    const store = storeOf.get(id);
+    Promise.resolve()
+      .then(() => vouch(credential, id))
+      .then(async client => {
+        if (client === null || client === undefined) return refused('unauthorized', "The client's credential was not accepted");
+        if (authorizeId && !(await authorizeId(client, id))) return refused('forbidden', `Not allowed to access store "${id}"`);
+        if (authorize && !(await authorize(client, id, store))) return refused('forbidden', `Not allowed to access store "${id}"`);
+        if (closed || sessions.get(id) !== session) return;
+        const refusal = session.grant(as, client, replica);
+        if (refusal) return refused(refusal.code, refusal.message);
+        send({ t: 'admitted', store: id, as });
+      })
+      .catch(err => refused('forbidden', err?.message || 'Not allowed'));
+  }
+
   function deliver(id, msg) {
     const { store: _store, ...inner } = msg;
     const session = sessions.get(id);
     if (!session) return;
+    if (inner.t === 'vouch') return vouchFor(id, session, inner);
     session.receive(inner);
     // A write-only session (a hello with `follow: false`, see store.js) hears none of the store's broadcasts: the socket leaves its topic
     if (inner.t === 'hello' && session.follows === false) channel?.unsubscribe(id);

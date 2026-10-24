@@ -33,11 +33,13 @@ const tick = () => new Promise(resolve => setImmediate(resolve));
 
 /**
  * @param {Object} target - a store (served through a hub that maps every
- *   id to it) or an endpoint `{ session({ send, user }) }` such as a hub factory
+ *   id to it) or an endpoint `{ session({ send, user }) }` such as a relay
+ * @param {Object} [hubOptions] - for a store, what its hub is made with:
+ *   `authorizeId`, `authorize`, and `vouch` for the clients of a relay
  */
-export function createNetwork(target) {
+export function createNetwork(target, hubOptions = {}) {
   const store = target.state !== undefined
-    ? { session: ({ send, user }) => createHub(() => target, { send, user }) }
+    ? { session: ({ send, user }) => createHub(() => target, { send, user, ...hubOptions }) }
     : target;
   const queue = [];
 
