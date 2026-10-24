@@ -29,7 +29,7 @@ import { LazyWatch } from 'lazy-watch';
 import { createClock } from '../core/clock.js';
 import { PROTOCOL } from '../core/protocol.js';
 import { createShape } from '../core/shape.js';
-import { docFromRecords } from '../core/doc.js';
+import { createDoc, docFromRecords } from '../core/doc.js';
 import { compile, within } from '../core/compile.js';
 import { registerKey } from '../core/paths.js';
 import { randomId } from '../core/ids.js';
@@ -135,7 +135,8 @@ function build({
     }
     return docFromRecords(shape, structuredClone(records));
   }
-  let base = !restored ? baseFromState(null)
+  // Before the server has said anything, its seeds: what a store starts from
+  let base = !restored ? createDoc(shape)
     : rows ? docFromRecords(shape, saved.records.map(([c, id, data, clockJSON]) => [c, id, data, clockJSON]))
       : baseFromState(saved.state, saved.clocks);
   let known = { epoch: restored && typeof saved.epoch === 'string' ? saved.epoch : null, v: restored && Number.isInteger(saved.version) ? saved.version : 0 };
@@ -509,7 +510,8 @@ function build({
   /** Changes from the server, decided already: onto the base. Returns them */
   function intoBase(changes, ts) {
     clock.observe(ts);
-    const list = Array.isArray(changes) ? changes : [];
+    // A collection or singleton this client's shape does not have (a server deployed ahead of it, which 'shape-mismatch' told) is passed over
+    const list = (Array.isArray(changes) ? changes : []).filter(change => isObj(change) && shape.has(change.c));
     for (const change of list) {
       try {
         base.apply(change, ts, 'trust');

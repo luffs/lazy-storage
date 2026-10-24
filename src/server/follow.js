@@ -3,10 +3,17 @@
 // A follower (a relay, see src/relay) dials the server at its own route,
 // authenticated as itself, and opens each store on one session of its own
 // (`follower: true` in its hello). That socket is an ordinary hub whose
-// user is the relay, with two differences:
+// user is the relay, with these differences:
 //
 // - Whether the relay may carry a store at all is `authorizeRelay(relay,
-//   storeId)` (anything, without one), not the clients' hooks.
+//   storeId)`, not the clients' hooks. Without one it may open any, but
+//   reads nothing of a store until a client of it is let in there (the
+//   store holds a follower's answer until its first grant), and writes
+//   nothing as itself: `relay.patch` needs an `authorizeRelay` to say
+//   which stores the relay may carry, and so write.
+// - The relay and its clients are told apart by how the hooks are asked
+//   (the hub hands `{ vouched: true }` for a client), never by comparing
+//   users, which may be equal strings.
 // - For each client behind it, the relay asks `vouch` with the client's
 //   credential: the request the client's own socket would have made
 //   (`credentialRequest`), judged by the adapter's `authenticate`, then
@@ -62,12 +69,13 @@ export function followerHub(resolveStore, { send, relay, admit, authorizeRelay, 
     send,
     user: relay,
     ...(rate === undefined ? {} : { vouchRate: rate }),
+    followerWrites: typeof authorizeRelay === 'function',
     channel,
     onError,
-    authorizeId: (user, id) => (user === relay
-      ? (authorizeRelay ? authorizeRelay(relay, id) : true)
-      : (authorizeId ? authorizeId(user, id, { relay }) : true)),
-    authorize: authorize ? (user, id, store) => (user === relay ? true : authorize(user, id, store, { relay })) : undefined,
+    authorizeId: (user, id, context) => (context?.vouched
+      ? (authorizeId ? authorizeId(user, id, { relay }) : true)
+      : (authorizeRelay ? authorizeRelay(relay, id) : true)),
+    authorize: authorize ? (user, id, store, context) => (context?.vouched ? authorize(user, id, store, { relay }) : true) : undefined,
     vouch: async credential => {
       const admitted = await admit(credential, relay);
       if (!admitted) return null;

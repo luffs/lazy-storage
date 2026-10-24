@@ -10,15 +10,19 @@
 //   flush()                                  write out what is buffered
 //
 // where copy = { records: [[c, id, data, clock]], v, epoch, own: { seq,
-// ops }, admitted: { key: [replica, ...] }, fepoch, fv }.
+// ops }, admitted: { key: [replica, ...] }, fepoch, fv }. A key is a
+// fingerprint of a client's credential (fingerprint.js), never the
+// credential.
 import { existsSync, readFileSync, mkdirSync, writeFileSync, renameSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
 export { memoryCopies } from './copies.js';
 
+const META = '_relay.json';
+
 /**
- * One JSON file per store under `dir`, and `relay.json` for the relay's
- * own id; each written whole through a rename, at most every `saveDelay`
+ * One JSON file per store under `dir`, and `_relay.json` for the relay's
+ * own id (a name no store id has: one starts with a letter or digit); each written whole through a rename, at most every `saveDelay`
  * @param {string} dir
  * @param {{ saveDelay?: number, onError?: (error: any) => void }} [options]
  */
@@ -54,8 +58,8 @@ export function fileCopies(dir, { saveDelay = 1000, onError = err => console.err
     }
   }
   return {
-    loadMeta: () => read(join(root, 'relay.json')),
-    saveMeta: meta => write(join(root, 'relay.json'), meta),
+    loadMeta: () => read(join(root, META)),
+    saveMeta: meta => write(join(root, META), meta),
     load: id => (pending.has(id) ? structuredClone(pending.get(id)) : read(fileOf(id))),
     // Kept as given until it is written: a relay's copy builds its records when they are read, here once a write
     save(id, copy) {

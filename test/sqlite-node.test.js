@@ -143,3 +143,23 @@ test('fromLeaves reads singletons from a whole shape, a key whose initial value 
   other.dispose();
   sqlite.close();
 }));
+
+test('fromLeaves keeps a seed record before 1.0 kept: untouched, edited over its seed, or deleted', () => withFile(file => {
+  const db = new DatabaseSync(file);
+  db.exec(`CREATE TABLE leaves (store TEXT NOT NULL, path TEXT NOT NULL, value TEXT, ts_ms INTEGER NOT NULL, ts_count INTEGER NOT NULL, ts_replica TEXT NOT NULL, deleted INTEGER NOT NULL DEFAULT 0, since_ms INTEGER, since_count INTEGER, since_replica TEXT, v INTEGER, made_by TEXT, PRIMARY KEY (store, path)) WITHOUT ROWID;
+    CREATE TABLE stores (store TEXT PRIMARY KEY, version INTEGER NOT NULL DEFAULT 0, epoch TEXT, schema INTEGER, horizon INTEGER) WITHOUT ROWID;
+    INSERT INTO stores VALUES ('main', 2, 'old', NULL, 0);`);
+  const leaf = db.prepare('INSERT INTO leaves (store, path, value, ts_ms, ts_count, ts_replica, deleted) VALUES (?, ?, ?, ?, 0, ?, ?)');
+  leaf.run('main', JSON.stringify(['tasks', 'edited', 'done']), JSON.stringify(true), 100, 'a', 0);
+  leaf.run('main', JSON.stringify(['tasks', 'deleted']), null, 110, 'a', 1);
+  db.close();
+  const shape = { initial: { tasks: { untouched: { title: 'Hi' }, edited: { title: 'Do' }, deleted: { title: 'Bye' } } } };
+  let sqlite = sqliteStorage(file, { checkpoints: 'inline' });
+  sqlite.fromLeaves(() => shape);
+  sqlite.close();
+  sqlite = sqliteStorage(file, { checkpoints: 'inline' });
+  const store = createStore({ ...shape, storage: sqlite.store('main') });
+  assert.deepEqual(store.snapshot(), { tasks: { untouched: { title: 'Hi' }, edited: { title: 'Do', done: true } } });
+  store.dispose();
+  sqlite.close();
+}));

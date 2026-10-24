@@ -4,12 +4,16 @@
 // rest: true (anyone), false (nobody but the server), or a function
 // `(user, before, after, { c, id, state, replica, changes, store })` that
 // returns false or throws (its message is the refusal's) to refuse.
-// `before` is the record as it is, `after` as the op's changes would leave
-// it if every one landed, null where there is none. The server and a
-// follower judge with the same rules, so a site that shares them refuses
-// offline what the server would.
+// `before` is the record as it is, `after` as the op leaves it, null where
+// there is none. `after` is what the merge makes of the op, not what the
+// op asked for: each change is decided on its own by the op's time, so a
+// writer could otherwise pick a time at which one change of a pair lands
+// and the other loses, and leave a record no rule allowed. So the op is
+// applied first, as a trial, the rules judge what it made, and a refusal
+// puts back every record it touched; `state` is the store as the op leaves
+// it. The server and a follower judge with the same rules, so a site that
+// shares them refuses offline what the server would.
 import { LazyWatch } from 'lazy-watch';
-import { createDoc } from './doc.js';
 
 const { Utils } = LazyWatch;
 
@@ -36,7 +40,7 @@ export class RuleError extends Error {
  * @param {Object} shape - from createShape
  * @param {Object} [rules]
  * @param {boolean} [readOnly] - refuse everything
- * @returns {(doc: Object, changes: Object[], user: any, replica: string, extra?: Object) => void} throws a RuleError
+ * @returns {(doc: Object, changes: Object[], user: any, replica: string, extra: Object, apply: () => any) => any} throws a RuleError, having undone `apply`
  */
 export function createRules(shape, rules = {}, readOnly = false) {
   if (!Utils.isPlainObject(rules)) throw new TypeError('rules must be an object of rules by collection');
@@ -47,44 +51,43 @@ export function createRules(shape, rules = {}, readOnly = false) {
   }
   const ruleOn = c => (readOnly === true ? false : byKey.has(c) ? byKey.get(c) : byKey.has('*') ? byKey.get('*') : null);
 
-  /** What the changes would make of each record they touch: as if every one landed */
-  function attempted(doc, list) {
-    const state = {};
-    for (const c of shape.collections) state[c] = {};
-    for (const c of shape.singletons) state[c] = undefined;
-    for (const change of list) {
-      const record = doc.get(change.c, change.id);
-      if (shape.isSingleton(change.c)) state[change.c] = structuredClone(record);
-      else if (record !== undefined) state[change.c][change.id] = structuredClone(record);
-    }
-    const scratch = createDoc(shape, { state, track: false });
-    for (const change of list) scratch.apply(change, 0, 'trust');
-    return scratch;
-  }
-
-  return function judge(doc, list, user, replica, extra = {}) {
-    if (readOnly !== true && byKey.size === 0) return;
+  /**
+   * Judge an op and apply it: `apply()` applies its changes to `doc` and
+   * returns what it reports, which `judge` returns. What a `false` rule
+   * refuses is refused before anything is applied; a rule function judges
+   * the records as `apply` left them, and a refusal undoes it
+   */
+  return function judge(doc, list, user, replica, extra, apply) {
+    if (readOnly !== true && byKey.size === 0) return apply();
     const byRecord = new Map();
     for (const change of list) {
       const key = shape.recordKey(change.c, change.id);
-      if (!byRecord.has(key)) byRecord.set(key, { c: change.c, id: change.id, changes: [] });
+      if (!byRecord.has(key)) byRecord.set(key, { key, c: change.c, id: change.id, changes: [], rule: ruleOn(change.c) });
       byRecord.get(key).changes.push(change);
     }
-    let scratch = null;
-    for (const { c, id, changes } of byRecord.values()) {
-      const rule = ruleOn(c);
-      if (rule === null) continue;
-      if (rule === false) throw new RuleError(`${c} is the server's to write`);
-      scratch ??= attempted(doc, list);
-      const before = doc.get(c, id);
-      const after = scratch.get(c, id);
-      let verdict;
-      try {
-        verdict = rule(user, before === undefined ? null : before, after === undefined ? null : after, { c, id, state: doc.state, replica, changes, ...extra });
-      } catch (err) {
-        throw new RuleError(err?.message || `Not allowed to write ${c}`);
-      }
-      if (verdict === false) throw new RuleError(`Not allowed to write ${c}${id === undefined ? '' : `/${id}`}`);
+    const judged = [];
+    for (const record of byRecord.values()) {
+      if (record.rule === false) throw new RuleError(`${record.c} is the server's to write`);
+      if (record.rule !== null) judged.push(record);
     }
+    if (!judged.length) return apply();
+    const { result, before } = doc.trial(apply);
+    try {
+      for (const { key, c, id, changes, rule } of judged) {
+        const was = before.has(key) ? before.get(key)[2] : doc.get(c, id);
+        const now = doc.get(c, id);
+        let verdict;
+        try {
+          verdict = rule(user, was === undefined ? null : was, now === undefined ? null : now, { c, id, state: doc.state, replica, changes, ...extra });
+        } catch (err) {
+          throw new RuleError(err?.message || `Not allowed to write ${c}`);
+        }
+        if (verdict === false) throw new RuleError(`Not allowed to write ${c}${id === undefined ? '' : `/${id}`}`);
+      }
+    } catch (err) {
+      doc.undo(before);
+      throw err;
+    }
+    return result;
   };
 }

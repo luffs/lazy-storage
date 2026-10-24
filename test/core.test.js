@@ -78,10 +78,14 @@ test('a rule that throws refuses with its message, and one that says false with 
     tasks: (user, before, after) => { if (after?.title === 'secret') throw new Error('no secrets'); return user === 'ann'; },
     settings: { write: false }
   });
-  assert.throws(() => judge(doc, [{ c: 'tasks', id: 'a', path: ['title'], set: 'secret' }], 'ann', 'r'), err => err instanceof RuleError && err.message === 'no secrets');
-  assert.throws(() => judge(doc, [{ c: 'tasks', id: 'a', path: ['title'], set: 'y' }], 'bob', 'r'), /Not allowed to write tasks\/a/);
-  assert.throws(() => judge(doc, [{ c: 'settings', path: ['x'], set: 1 }], 'ann', 'r'), /settings/);
-  assert.doesNotThrow(() => judge(doc, [{ c: 'tasks', id: 'a', path: ['title'], set: 'y' }], 'ann', 'r'));
+  const run = (list, user, ts = 5) => judge(doc, list, user, 'r', {}, () => list.map(ch => doc.apply(ch, ts, 'judge')));
+  assert.throws(() => run([{ c: 'tasks', id: 'a', path: ['title'], set: 'secret' }], 'ann'), err => err instanceof RuleError && err.message === 'no secrets');
+  assert.deepEqual(doc.get('tasks', 'a'), { title: 'x' }, 'a refusal puts back what the trial wrote');
+  assert.equal(doc.clock('tasks', 'a').live['["title"]'], 1, 'and its clock');
+  assert.throws(() => run([{ c: 'tasks', id: 'a', path: ['title'], set: 'y' }], 'bob'), /Not allowed to write tasks\/a/);
+  assert.throws(() => run([{ c: 'settings', path: ['x'], set: 1 }], 'ann'), /settings/);
+  assert.doesNotThrow(() => run([{ c: 'tasks', id: 'a', path: ['title'], set: 'y' }], 'ann'));
+  assert.equal(doc.get('tasks', 'a').title, 'y');
   assert.throws(() => createRules(shape, { tasks: 'yes' }), TypeError);
   assert.throws(() => createRules(shape, { nope: true }), TypeError);
 });
@@ -128,4 +132,29 @@ test('an object written on a singleton that holds a plain value replaces it, as 
   const older = doc.apply({ c: 'build', put: { id: 'late' } }, 35, 'judge');
   assert.equal(older.lost[0].why, 'stale', 'an older one loses: the object was made after it');
   assert.deepEqual(doc.get('build'), { id: 'b-4' });
+});
+
+test('a rule judges what the merge makes of an op, not what it asked for', () => {
+  // Done only by the assignee: an op whose time lets the status land and the assignee lose would leave a task no rule allowed
+  const doc = createDoc(shape);
+  doc.apply({ c: 'tasks', id: 't', put: { status: 'open' } }, 1000, 'authority');
+  doc.apply({ c: 'tasks', id: 't', path: ['assignee'], set: 'bob' }, 2000, 'authority');
+  const judge = createRules(shape, { tasks: (user, before, after) => after?.status !== 'done' || after.assignee === user });
+  const list = [{ c: 'tasks', id: 't', path: ['assignee'], set: 'mallory' }, { c: 'tasks', id: 't', path: ['status'], set: 'done' }];
+  assert.throws(() => judge(doc, list, 'mallory', 'm', {}, () => list.map(ch => doc.apply(ch, 1500, 'judge'))), /Not allowed to write tasks\/t/);
+  assert.deepEqual(doc.get('tasks', 't'), { status: 'open', assignee: 'bob' }, 'nothing of it stays');
+  assert.equal(doc.clock('tasks', 't').live['["status"]'], 1000);
+});
+
+test('a trial that throws puts back what it did, a deleted record and its children included', () => {
+  const doc = createDoc(shape);
+  doc.apply({ c: 'tasks', id: 'p', put: { title: 'x' } }, 1, 'authority');
+  doc.apply({ c: 'subtasks', id: 's', put: { taskId: 'p' } }, 1, 'authority');
+  assert.throws(() => doc.trial(() => {
+    doc.apply({ c: 'tasks', id: 'p', del: true }, 5, 'judge');
+    throw new Error('boom');
+  }), /boom/);
+  assert.deepEqual(doc.get('tasks', 'p'), { title: 'x' });
+  assert.deepEqual(doc.get('subtasks', 's'), { taskId: 'p' });
+  assert.deepEqual(doc.childrenOf('tasks', 'p'), [['subtasks', 's']], 'and the index of children');
 });

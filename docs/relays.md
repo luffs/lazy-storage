@@ -63,7 +63,10 @@ the server knows).
   picks (`disconnect` is handed the relay as the user) is cut off with its
   clients, `relays.expiresAt` ends its link as `expiresAt` does a socket,
   and `relays.authorize(relay, storeId)` says which stores it may carry
-  at all.
+  at all. Without it, a relay may open any store its clients are let into
+  and writes nothing as itself; with it, it may write as itself
+  (`relay.patch`) to the stores it lets the relay carry, judged by the
+  rules with the relay as the user.
 - **A store the relay may not carry** is answered with the server's word,
   a `closed` with the server's code, for ten minutes, and asked about again
   when a client next opens it after that.
@@ -142,7 +145,9 @@ which the server takes only `authorization`, `cookie` and `user-agent`
 (and `relays.headers`), never what a proxy or a browser vouches for (an
 origin, a forwarded address), which a relay could make up. `key(req)` is a
 fingerprint of it, by which the relay knows the client while the server
-is away (the relay never reads credentials; they stay in your closure).
+is away (the relay never reads credentials; they stay in your closure);
+without one the relay takes the credential's SHA-256, so what it keeps on
+disk and shows in `sockets()` is never the credential itself.
 `upstreamSocket(url, { headers })` dials the server's relay route under
 the relay's own credential:
 
@@ -197,7 +202,9 @@ socket, which is also how `createNetwork` runs one in a test (see
 holds of a store, `relay.stats()` how it is doing (per store: its
 sessions, its queue and what waits in it, whether it is synced), and
 `relay.patch(storeId, diff)` writes as the relay itself, stamped with the
-server's time and sent up as the relay's own op.
+server's time and sent up as the relay's own op, which the server takes
+only where its `relays.authorize` lets the relay carry the store (it is
+refused with `forbidden` on a server without one).
 
 A browser's tabs use the same follower in the other mode,
 `acknowledge: 'local'`: the tabs are one replica, the relay's, and a tab's

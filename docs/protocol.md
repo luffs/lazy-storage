@@ -92,7 +92,7 @@ without help from the app: it drops the op, takes its edit back from
 | `invalid` | The op breaks the shape: a collection or singleton the store does not have, a change that is not one of put, set or del, a record of the wrong kind, a forbidden key |
 | `forbidden` | A rule, `readOnly` or `validate` refused it |
 | `expired` | Stamped before the retention window (see [Persistence](server.md#persistence)) |
-| `too-large` | More changes than `maxChanges` |
+| `too-large` | More changes than `maxChanges`, each field a put writes counted |
 | `rate-limited` | Beyond the user's token bucket, or after such a refusal and before the next hello; `retryAfter` says how long in ms. The client keeps the op, sends nothing more live, and resends its outbox in a hello after `retryAfter`; no `rejected` |
 
 ## Closed codes

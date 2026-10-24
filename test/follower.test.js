@@ -3,11 +3,11 @@
 // and evictions passed on, and what it refuses on its own
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, readdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { LazyWatch } from 'lazy-watch';
-import { createStore, createHub } from '../src/server/index.js';
+import { createStore, createHub, memoryStorage } from '../src/server/index.js';
 import { createRelay, fileCopies, memoryCopies } from '../src/relay/index.js';
 import { PROTOCOL } from '../src/core/index.js';
 import { memoryOutbox } from '../src/client/storage.js';
@@ -141,12 +141,12 @@ test('a relay restarted from its files during an outage answers the displays the
     const replicaId = first.replicaId;
     first.close();                                  // flushes what waited for saveDelay
     assert.ok(existsSync(join(dir, 'main.json')));
-    assert.ok(existsSync(join(dir, 'relay.json')));
+    assert.ok(existsSync(join(dir, '_relay.json')));
     a.dispose();
 
     uplink.goOffline();                              // the server is away when the relay comes back
     const second = createRelay({ ...options, storage: fileCopies(dir, { saveDelay: 0 }) });
-    assert.equal(second.replicaId, replicaId, 'the same replica, from relay.json');
+    assert.equal(second.replicaId, replicaId, 'the same replica, from _relay.json');
     site = createNetwork(second);
     const again = site.client({ replicaId: 'a', ...SHAPE, now, storage: outbox }, { user: { id: 'a' } });
     const stranger = site.client({ replicaId: 's', ...SHAPE, now }, { user: { id: 's' } });
@@ -519,4 +519,180 @@ test('the relay hands storage its copy without building its records, which are b
   assert.equal(last.records, records, 'built once');
   assert.equal(records.filter(([c]) => c === 'tasks').length, 20);
   assert.deepEqual(Object.fromEntries(records.filter(([c]) => c === 'tasks').map(([, id, data]) => [id, data])), store.snapshot().tasks);
+});
+
+test('on the adapters\' relay route the relay writes as itself only where relays.authorize lets it carry the store', async () => {
+  const { followerHub } = await import('../src/server/follow.js');
+  for (const authorizeRelay of [undefined, () => true]) {
+    const now = fakeTime(1_000_000);
+    const store = createStore({ ...SHAPE, now });
+    const central = createNetwork({
+      session: ({ send, user }) => followerHub(() => store, { send, relay: user, admit: async credential => ({ user: credential }), authorizeRelay })
+    });
+    const relay = createRelay({ shapeOf: () => SHAPE, link: central.link({ user: 'relay' }).factory, grace: 0, reconnect: false, keepalive: false, now, onError: () => {} });
+    const site = createNetwork(relay);
+    const settle = async () => { for (let i = 0; i < 20; i++) { await central.settle(); await site.settle(); } };
+    site.client({ replicaId: 'a', ...SHAPE, now }, { user: 'a' });
+    await settle();
+    relay.patch('main', { tasks: { k: { by: 'the relay' } } });
+    await settle();
+    if (authorizeRelay) assert.equal(store.state.tasks.k?.by, 'the relay', 'let carry it, it writes');
+    else assert.equal(store.state.tasks.k, undefined, 'without authorize it writes nothing as itself');
+  }
+});
+
+test('the relay route tells the relay from its clients by how it asks, not by an equal user', async () => {
+  // Users that are plain strings: a client whose id is the relay's must still face the app's authorize
+  const { followerHub } = await import('../src/server/follow.js');
+  const now = fakeTime(1_000_000);
+  const store = createStore({ ...SHAPE, now });
+  const asked = [];
+  const central = createNetwork({
+    session: ({ send, user }) => followerHub(() => store, {
+      send, relay: user, admit: async credential => ({ user: credential.id }),
+      authorize: (user, id, s, context) => { asked.push([user, context?.relay]); return false; }
+    })
+  });
+  const relay = createRelay({ shapeOf: () => SHAPE, link: central.link({ user: 'same' }).factory, grace: 0, reconnect: false, keepalive: false, now, onError: () => {} });
+  const site = createNetwork(relay);
+  const db = site.client({ replicaId: 'a', ...SHAPE, now }, { user: { id: 'same' } });
+  for (let i = 0; i < 20; i++) { await central.settle(); await site.settle(); }
+  assert.deepEqual(asked, [['same', 'same']], 'the client is judged by authorize, the relay is not');
+  assert.notEqual(db.status, 'online');
+});
+
+test('a relay\'s files keep a fingerprint of a credential, never the credential, and a store named relay is a store like any', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'lazy-relay-files-'));
+  try {
+    const now = fakeTime(1_000_000);
+    const store = createStore({ ...SHAPE, now });
+    const central = createNetwork({ session: ({ send, user }) => createHub(() => store, { send, user, vouch: credential => ({ id: credential.token.slice(0, 1) }) }) });
+    const options = { shapeOf: () => SHAPE, link: central.link({ user: { id: 'relay' } }).factory, grace: 0, reconnect: false, keepalive: false, now };
+    const relay = createRelay({ ...options, storage: fileCopies(dir, { saveDelay: 0 }) });
+    const site = createNetwork(relay);
+    const db = site.client({ replicaId: 'a', ...SHAPE, now, store: 'relay' }, { user: { token: 'a-secret-bearer-token' } });
+    for (let i = 0; i < 20; i++) { await central.settle(); await site.settle(); }
+    db.state.tasks.k = { title: 'x' };
+    for (let i = 0; i < 20; i++) { await central.settle(); await site.settle(); }
+    relay.flush?.();
+    const files = readdirSync(dir).sort();
+    assert.deepEqual(files, ['_relay.json', 'relay.json']);
+    for (const file of files) assert.ok(!readFileSync(join(dir, file), 'utf8').includes('a-secret-bearer-token'), `${file} holds no credential`);
+    const copy = JSON.parse(readFileSync(join(dir, 'relay.json'), 'utf8'));
+    assert.match(Object.keys(copy.admitted)[0], /^sha256:[0-9a-f]{64}$/);
+    assert.equal(JSON.parse(readFileSync(join(dir, '_relay.json'), 'utf8')).replicaId, relay.replicaId);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a store the server could not open at first is opened again with every client vouched for afresh', async () => {
+  // A deploy's overlap: the store is locked elsewhere, so the hello is answered unavailable and the vouch sent after it is dropped
+  const now = fakeTime(1_000_000);
+  const store = createStore({ ...SHAPE, now });
+  let locked = true;
+  const resolve = () => {
+    if (!locked) return store;
+    locked = false;
+    throw Object.assign(new Error('Store "main" is held by another process'), { code: 'store-locked' });
+  };
+  const central = createNetwork({ session: ({ send, user }) => createHub(resolve, { send, user, vouch: credential => credential, authorizeId: async () => true, onError: () => {} }) });
+  const relay = createRelay({ shapeOf: () => SHAPE, link: central.link({ user: { id: 'relay' } }).factory, grace: 60_000, reconnect: false, keepalive: false, now, onError: () => {} });
+  const site = createNetwork(relay);
+  const settle = async () => { for (let i = 0; i < 20; i++) { await central.settle(); await site.settle(); } };
+  const a = site.client({ replicaId: 'a', ...SHAPE, now }, { user: { id: 'a' } });
+  await settle();
+  await new Promise(done => setTimeout(done, 1100));
+  await settle();
+  assert.equal(a.status, 'online', 'answered once the store opens');
+  a.state.tasks.k = { title: 'after' };
+  await settle();
+  assert.equal(store.state.tasks.k?.title, 'after');
+});
+
+test('a vouch the server dropped with its session is asked again on the next', async () => {
+  // The server's session closed unavailable, taking the vouch in flight: the grant is not left waiting for an answer that never comes
+  const now = fakeTime(1_000_000);
+  const store = createStore({ ...SHAPE, now });
+  let swallowed = false;
+  const central = createNetwork({
+    session: ({ send, user }) => {
+      const hub = createHub(() => store, { send, user, vouch: credential => credential });
+      return {
+        receive(msg) {
+          if (msg.t === 'vouch' && !swallowed) {
+            swallowed = true;
+            return send({ t: 'closed', store: msg.store, code: 'unavailable', message: 'The store was unloaded; say hello again' });
+          }
+          hub.receive(msg);
+        },
+        close: () => hub.close()
+      };
+    }
+  });
+  const relay = createRelay({ shapeOf: () => SHAPE, link: central.link({ user: { id: 'relay' } }).factory, grace: 60_000, reconnect: false, keepalive: false, now, onError: () => {} });
+  const site = createNetwork(relay);
+  const settle = async () => { for (let i = 0; i < 20; i++) { await central.settle(); await site.settle(); } };
+  const a = site.client({ replicaId: 'a', ...SHAPE, now }, { user: { id: 'a' } });
+  await settle();
+  await new Promise(done => setTimeout(done, 1100));
+  await settle();
+  assert.ok(swallowed);
+  assert.equal(a.status, 'online');
+});
+
+test('a copy whose ops are of another shape (a browser\'s storage from before 1.0) is let go of, and the store is served', async () => {
+  const now = fakeTime(1_000_000);
+  const store = createStore({ ...SHAPE, now });
+  const central = createNetwork({ session: ({ send, user }) => createHub(() => store, { send, user, vouch: credential => credential }) });
+  const old = { v: 3, epoch: 'old', own: { seq: 1, ops: [{ replicaId: 'x', seq: 1, ts: 5, diff: { tasks: { k: { title: 'old' } } } }] }, admitted: {} };
+  const faults = [];
+  const storage = { loadMeta: () => null, saveMeta: () => {}, load: () => Promise.resolve(old), save: () => {}, flush: () => {} };
+  const relay = createRelay({ shapeOf: () => SHAPE, link: central.link({ user: { id: 'relay' } }).factory, storage, grace: 60_000, reconnect: false, keepalive: false, now, onError: err => faults.push(err) });
+  const site = createNetwork(relay);
+  const a = site.client({ replicaId: 'a', ...SHAPE, now }, { user: { id: 'a' } });
+  for (let i = 0; i < 20; i++) { await central.settle(); await site.settle(); }
+  assert.equal(a.status, 'online');
+  a.state.tasks.n = { title: 'new' };
+  for (let i = 0; i < 20; i++) { await central.settle(); await site.settle(); }
+  assert.equal(store.state.tasks.n?.title, 'new');
+  assert.equal(store.state.tasks.k, undefined);
+  assert.deepEqual(faults, []);
+});
+
+test('an op a client sent up before it left goes up again when it comes back, though the link dropped meanwhile', async () => {
+  // The server took the op but said nothing; the client left; the link dropped. Nothing must hold on to the op under the old session
+  const now = fakeTime(1_000_000);
+  const store = createStore({ ...SHAPE, now });
+  let hold = true;
+  const central = createNetwork({
+    session: ({ send, user }) => {
+      const hub = createHub(() => store, { send, user, vouch: credential => credential });
+      return { receive: msg => (hold && msg.t === 'op' ? undefined : hub.receive(msg)), close: () => hub.close() };
+    }
+  });
+  const uplink = central.link({ user: { id: 'relay' } });
+  const relay = createRelay({ shapeOf: () => SHAPE, link: uplink.factory, grace: 60_000, keepalive: false, now, onError: () => {} });
+  const site = createNetwork(relay);
+  const settle = async () => { for (let i = 0; i < 20; i++) { await central.settle(); await site.settle(); } };
+  const outbox = memoryOutbox();
+  const a = site.client({ replicaId: 'a', ...SHAPE, now, storage: outbox }, { user: { id: 'a' } });
+  await settle();
+  a.state.tasks.k = { title: 'kept' };
+  await settle();
+  assert.equal(relay.stats().stores.main.waiting.length, 1, 'sent up, not acknowledged');
+  a.dispose();
+  await settle();
+  uplink.goOffline();
+  await settle();
+  hold = false;
+  uplink.goOnline();
+  const b = site.client({ replicaId: 'a', ...SHAPE, now, storage: outbox }, { user: { id: 'a' } });
+  for (let i = 0; i < 30 && store.state.tasks.k === undefined; i++) {
+    await new Promise(done => setTimeout(done, 100));
+    await settle();
+  }
+  assert.equal(store.state.tasks.k?.title, 'kept');
+  assert.equal(b.isPending(['tasks', 'k']), false);
+  relay.close();
 });

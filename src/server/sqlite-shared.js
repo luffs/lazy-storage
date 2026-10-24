@@ -463,7 +463,8 @@ export function sqliteStorageOn({ exec, prepare, transaction, close, db, driver 
       const setEpoch = prepare('UPDATE stores SET epoch = ? WHERE store = ?');
       const moveOne = transaction(id => {
         const declared = shapeOf(id);
-        const singles = new Set(declared?.initial ? createShape(declared).singletons : (declared?.singletons ?? []));
+        const full = declared?.initial ? createShape(declared) : null;
+        const singles = new Set(full ? full.singletons : (declared?.singletons ?? []));
         const records = new Map();   // [c, id] -> { rows: [[inner path, row]] }
         for (const row of rowsOf.all(id)) {
           const path = JSON.parse(row.path);
@@ -480,6 +481,8 @@ export function sqliteStorageOn({ exec, prepare, transaction, close, db, driver 
           const whole = rows.find(([inner]) => inner.length === 0);
           if (whole && whole[1].deleted === 1) continue;
           let data = {};
+          // A seed record's rows were written over its seed
+          if (full && !singles.has(c) && Object.hasOwn(full.initial[c] ?? {}, rid)) data = structuredClone(full.initial[c][rid]);
           const clock = { live: {}, gone: {} };
           for (const [inner, row] of rows) {
             const pk = JSON.stringify(inner);
@@ -509,6 +512,14 @@ export function sqliteStorageOn({ exec, prepare, transaction, close, db, driver 
             clock.live[pk] = row.ts_ms;
           }
           q.upsert.run(id, c, rid, JSON.stringify(data), JSON.stringify(clock));
+        }
+        // A seed record before 1.0 was there unless it was deleted; now it is there only as a row
+        if (full) {
+          for (const c of full.collections) {
+            for (const [rid, seed] of Object.entries(full.initial[c] ?? {})) {
+              if (!records.has(JSON.stringify([c, rid]))) q.upsert.run(id, c, rid, JSON.stringify(seed), JSON.stringify({ live: {}, gone: {} }));
+            }
+          }
         }
         dropLeaves.run(id);
         dropOldLog?.run(id);

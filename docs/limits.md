@@ -76,8 +76,11 @@ A public server needs a few ceilings, all on by default:
   `snapshotResponse(store, request)` serves the route from a server of
   your own.
 - **Op size.** `maxChanges` on the store (default 10 000) is the most
-  changes one op may carry; a larger one is refused with code
-  `too-large`, and the client drops it and takes its edit back.
+  changes one op may carry, each field a `put` writes counted as one
+  (a put is merged into a record field by field); a larger one is refused
+  with code `too-large`, and the client drops it and takes its edit back.
+  What an op costs the server grows with what it writes, not with the
+  size of the records it writes to.
 - **Op rate.** `rateLimit` on the store is a token bucket per user (by
   presence's `key`, so minting replica ids does not refill it; per
   replica for a session without a user), `{ burst: 500, perSecond: 100 }`

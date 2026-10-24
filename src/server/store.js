@@ -97,11 +97,11 @@ function presenceOptions(presence) {
  *   one of these collections or singletons
  * @param {(diff: Object, context: { user: any, replicaId: string, store: Object, changes: Object[] }) => boolean|void} [options.validate]
  *   a check of the whole op, for what spans records: its changes as one diff in the tree's shape. false,
- *   or a throw (its message the refusal's), refuses it with 'forbidden'
+ *   or a throw (its message the refusal's), refuses it with 'forbidden'; anything but true, false or nothing refuses it too (a diff to accept in its place is not taken)
  * @param {number} [options.retention=30 days]
  * @param {number} [options.compactEvery=1 hour]
  * @param {number} [options.deltaLog=1000]
- * @param {number} [options.maxChanges=10000] - changes in one op
+ * @param {number} [options.maxChanges=10000] - changes in one op, each field a put writes counted
  * @param {{burst: number, perSecond: number}|false} [options.rateLimit]
  * @param {Object} [options.storage]
  * @param {boolean} [options.groupCommit=true]
@@ -510,17 +510,41 @@ export function createStore({
   }
 
   /**
+   * How much an op writes: a change each, and each field of what a put
+   * writes, since a put is merged into a record field by field. Counted only
+   * as far as `cap`
+   */
+  function sizeOf(changes, cap) {
+    let n = changes.length;
+    const stack = [];
+    for (const change of changes) {
+      const value = Object.hasOwn(change, 'put') ? change.put : change.set;
+      if (Utils.isPlainObject(value)) stack.push(value);
+    }
+    while (stack.length && n <= cap) {
+      const value = stack.pop();
+      for (const key in value) {
+        n++;
+        if (Utils.isPlainObject(value[key])) stack.push(value[key]);
+      }
+    }
+    return n;
+  }
+
+  /**
    * Decide a replica's op. `speaker` is the session or grant it came on.
    * Returns { lost, duplicate }; throws a RefusedError for an op refused whole
    */
   function apply(op, speaker) {
     assertOp(op);
+    if (speaker.writes === false) throw new RefusedError('forbidden', 'This session writes only as the clients vouched for on it');
     const claim = claimReplica(speaker, speaker.user, op.replica);
     if (claim) throw new RefusedError(claim.code, claim.message);
     speaker.speaksFor = op.replica;
     const known = replicas.get(op.replica);
     if (known && op.seq <= known.seq) return { lost: [], duplicate: true };
-    if (op.changes.length > maxChanges) throw new RefusedError('too-large', `An op of ${op.changes.length} changes; at most ${maxChanges}`);
+    const size = sizeOf(op.changes, maxChanges);
+    if (size > maxChanges) throw new RefusedError('too-large', `An op of more than ${maxChanges} changes (each field a put writes counted)`);
     for (const change of op.changes) {
       try {
         assertChange(shape, change);
@@ -529,32 +553,39 @@ export function createStore({
         throw err;
       }
     }
-    try {
-      judgeRules(doc, op.changes, speaker.user, op.replica, { store: self });
-      if (validate) {
-        let verdict;
-        try {
-          verdict = validate(diffOf(shape, op.changes), { user: speaker.user, replicaId: op.replica, store: self, changes: op.changes });
-        } catch (err) {
-          throw new RuleError(err?.message || 'Refused');
-        }
-        if (verdict === false) throw new RuleError('Refused');
+    const wall = time();
+    if (Number.isFinite(retention) && op.ts < wall - retention) throw new RefusedError('expired', 'The op is older than the store keeps track of; resync and make it again');
+    const ts = clamp(op.ts, wall);
+    const applied = [];
+    const lost = [];
+    const validated = () => {
+      if (!validate) return;
+      let verdict;
+      try {
+        verdict = validate(diffOf(shape, op.changes), { user: speaker.user, replicaId: op.replica, store: self, changes: op.changes });
+      } catch (err) {
+        throw new RuleError(err?.message || 'Refused');
       }
+      if (verdict === false) throw new RuleError('Refused');
+      // A diff returned to accept in the op's place was taken before 1.0; letting the op through whole would quietly undo what it stripped
+      if (verdict !== true && verdict !== undefined) throw new RuleError('validate returns true, false or nothing; a diff to accept in place of the op is no longer taken');
+    };
+    // Validated before anything is applied, after what the rules refuse outright (judge, rules.js)
+    const applyAll = () => {
+      validated();
+      for (const change of op.changes) {
+        const result = doc.apply(change, ts, 'judge');
+        for (const a of result.applied) applied.push(a);
+        for (const l of result.lost) lost.push(l);
+      }
+    };
+    try {
+      judgeRules(doc, op.changes, speaker.user, op.replica, { store: self }, applyAll);
     } catch (err) {
       if (err instanceof RuleError) throw new RefusedError('forbidden', err.message);
       throw err;
     }
-    const wall = time();
-    if (Number.isFinite(retention) && op.ts < wall - retention) throw new RefusedError('expired', 'The op is older than the store keeps track of; resync and make it again');
-    const ts = clamp(op.ts, wall);
     clock.observe(ts);
-    const applied = [];
-    const lost = [];
-    for (const change of op.changes) {
-      const result = doc.apply(change, ts, 'judge');
-      applied.push(...result.applied);
-      lost.push(...result.lost);
-    }
     const entry = { seq: op.seq, seen: wall, ...(known?.owner !== undefined ? { owner: known.owner } : {}) };
     if (known?.owner === undefined && ownerKey(speaker.user) !== undefined) entry.owner = ownerKey(speaker.user);
     replicas.set(op.replica, entry);
@@ -713,9 +744,10 @@ export function createStore({
    * `httpSnapshot: { url, threshold }` points a client that can fetch at
    * the HTTP route for a large snapshot. `follower: true` lets the session
    * be a follower's (a relay's link: its hub vouches); on any other a hello
-   * that asks to be one is refused
+   * that asks to be one is refused. `writes: false` has it write nothing as
+   * itself, only as the clients vouched for on it
    */
-  function session({ send: transportSend, user, onEvict, broadcast: publish, httpSnapshot, follower: mayFollow = false } = {}) {
+  function session({ send: transportSend, user, onEvict, broadcast: publish, httpSnapshot, follower: mayFollow = false, writes = true } = {}) {
     alive('open a session on');
     if (typeof transportSend !== 'function') throw new TypeError('A session needs a send function');
     const deliver = message => {
@@ -781,6 +813,7 @@ export function createStore({
       shared: undefined,
       sharedJson: undefined,
       presence: true,
+      writes,
       follows: true,
       listed: true,
       grants: null,
@@ -827,7 +860,7 @@ export function createStore({
               // A follower: the clients it speaks for are peers, not it
               s.kind = 'follower';
               s.listed = false;
-              s.grants = new Map();
+              s.grants ??= new Map();
             }
             s.clocks = msg.clocks === true;
             const hadPresence = s.presence;
@@ -897,6 +930,8 @@ export function createStore({
        * another user's
        */
       grant(as, grantUser, replica) {
+        // A follower's vouch may come before its hello (one sent on a session the server had just closed opens the next)
+        if (!s.grants && mayFollow) s.grants = new Map();
         if (!s.grants) return { code: 'forbidden', message: 'Only a follower speaks for others' };
         if (typeof replica !== 'string' || !replica) return { code: 'invalid', message: 'A vouched client names its replica' };
         const previous = s.grants.get(as);
@@ -1118,6 +1153,12 @@ export function createStore({
     }
   };
 
+  // A new store writes its seed records at once: a record is in storage or it is not there, so one deleted later stays deleted
+  if (!saved) {
+    const seeds = [];
+    for (const c of shape.collections) for (const id of Object.keys(doc.state[c])) seeds.push([c, id, structuredClone(doc.state[c][id]), { live: {}, gone: {} }]);
+    if (seeds.length) commit({ upserts: seeds, deletes: [] });
+  }
   compact();
   migrate();
   if (!commitNow()) throw new RefusedError('unavailable', 'The store could not save the change and was unloaded');

@@ -171,3 +171,50 @@ test('a follower\'s client held back by the rate limit is let go once its time i
   assert.equal(follower.last().t, 'ack', 'its wait is over');
   assert.equal(store.state.tasks.k2.n, 2);
 });
+
+test('a validate that returns a diff to accept in the op\'s place refuses the op rather than letting it through whole', () => {
+  // Before 1.0 the diff was taken instead; letting the op through would quietly undo what a validator stripped
+  const store = createStore({ ...SHAPE, validate: diff => ({ tasks: { a: { title: diff.tasks.a.title } } }) });
+  const { op, last } = raw(store);
+  op(1, [{ c: 'tasks', id: 'a', put: { title: 'x', role: 'admin' } }]);
+  assert.equal(last().code, 'forbidden');
+  assert.match(last().message, /no longer taken/);
+  assert.equal(store.state.tasks.a, undefined);
+});
+
+test('a put counts each field it writes against maxChanges, and a wide one costs what it writes', () => {
+  const store = createStore({ ...SHAPE, maxChanges: 100 });
+  const { op, last } = raw(store);
+  const wide = n => Object.fromEntries(Array.from({ length: n }, (_, i) => [`k${i}`, i]));
+  op(1, [{ c: 'tasks', id: 'a', put: wide(150) }]);
+  assert.equal(last().code, 'too-large');
+  op(2, [{ c: 'tasks', id: 'a', put: { nested: wide(99) } }]);
+  assert.equal(last().code, 'too-large', 'nested fields count too');
+  op(3, [{ c: 'tasks', id: 'a', put: wide(90) }]);
+  assert.equal(last().t, 'ack');
+
+  // Written again over a record of many fields: each field its own key, not a scan of the record's clock
+  const big = createStore({ ...SHAPE, maxChanges: 1_000_000 });
+  const w = raw(big);
+  w.op(1, [{ c: 'tasks', id: 'a', put: wide(50_000) }]);
+  const started = performance.now();
+  w.op(2, [{ c: 'tasks', id: 'a', put: wide(50_000) }]);
+  const took = performance.now() - started;
+  assert.equal(w.last().t, 'ack');
+  assert.ok(took < 2000, `50 000 fields over 50 000 took ${Math.round(took)} ms`);
+});
+
+test('a seed record deleted stays deleted: a new store writes its seeds, and a load or a snapshot adds none', () => {
+  const storage = memoryStorage();
+  const shape = { initial: { tasks: { welcome: { title: 'Hi' }, tips: { title: 'Tip' } }, settings: {} }, singletons: ['settings'] };
+  const store = createStore({ ...shape, storage });
+  const { op, last } = raw(store);
+  op(1, [{ c: 'tasks', id: 'welcome', del: true }]);
+  assert.equal(last().t, 'ack');
+  store.dispose();
+  const again = createStore({ ...shape, storage });
+  assert.deepEqual(Object.keys(again.state.tasks), ['tips'], 'the seed left alone is kept, the deleted one is not back');
+  const { heard } = raw(again, 'r2');
+  const snapshot = heard().find(m => m.t === 'snapshot');
+  assert.deepEqual(Object.keys(snapshot.state.tasks), ['tips']);
+});

@@ -21,17 +21,22 @@ import { tagStore } from './wire.js';
 
 const { Utils } = LazyWatch;
 
+// What the hooks are handed for a client a follower vouches for
+const VOUCHED = Object.freeze({ vouched: true });
+
 /**
  * @param {(id: string) => Object|null} resolveStore - store for an id, or null
  * @param {Object} options
  * @param {(message: Object) => void} options.send
  * @param {any} [options.user] - the authenticated user, attached to every
  *   store session opened on this connection
- * @param {(user: any, storeId: string) => boolean|Promise<boolean>} [options.authorizeId]
+ * @param {(user: any, storeId: string, context?: { vouched: true }) => boolean|Promise<boolean>} [options.authorizeId]
  *   runs before the store is resolved, so a refusal loads nothing and
  *   reads the same whether the store exists or not; the check to use when
- *   it needs only the user and the id
- * @param {(user: any, storeId: string, store: Object) => boolean|Promise<boolean>} [options.authorize]
+ *   it needs only the user and the id. Asked for a client a follower
+ *   vouches for, it is handed `{ vouched: true }`, so the two are told
+ *   apart by more than the user
+ * @param {(user: any, storeId: string, store: Object, context?: { vouched: true }) => boolean|Promise<boolean>} [options.authorize]
  *   runs once the store is resolved, for a check that needs the store
  * @param {(credential: Object, storeId: string) => any|Promise<any>} [options.vouch]
  *   on a follower's socket: a client's credential judged as its own socket
@@ -43,6 +48,9 @@ const { Utils } = LazyWatch;
  *   follower that floods it with credentials or stores it may not have is
  *   held back without holding back one whose clients are let in. Default
  *   { burst: 100, perSecond: 10 }
+ * @param {boolean} [options.followerWrites=true] - on a follower's socket,
+ *   whether the follower may write as itself (`relay.patch`); false has it
+ *   write only as the clients it vouches for
  * @param {{ subscribe(id: string): void, unsubscribe(id: string): void, publish(id: string, message: Object): void }} [options.channel]
  *   a transport that can fan a message out to every socket on a store at
  *   once (Bun's topic publish). Given one, a store's patch goes out as a
@@ -55,7 +63,7 @@ const { Utils } = LazyWatch;
  * @param {(error: any) => void} [options.onError] - server faults (a store
  *   factory that threw); default console
  */
-export function createHub(resolveStore, { send, user, authorizeId, authorize, vouch, vouchRate = { burst: 100, perSecond: 10 }, channel, httpSnapshots, onError = err => console.error('lazy-storage:', err), now = Date.now } = {}) {
+export function createHub(resolveStore, { send, user, authorizeId, authorize, vouch, vouchRate = { burst: 100, perSecond: 10 }, followerWrites = true, channel, httpSnapshots, onError = err => console.error('lazy-storage:', err), now = Date.now } = {}) {
   if (typeof send !== 'function') throw new TypeError('A hub needs a send function');
   if (vouchRate && !(vouchRate.burst > 0 && vouchRate.perSecond > 0)) throw new TypeError('vouchRate needs positive burst and perSecond, or false');
   // The vouches turned away: a token is held while a vouch is judged, and kept unless the client is let in
@@ -84,7 +92,8 @@ export function createHub(resolveStore, { send, user, authorizeId, authorize, vo
       // Where a client that can fetch gets a large snapshot, when the transport serves the route
       httpSnapshot: httpSnapshots ? { url: httpSnapshots.url(id), threshold: httpSnapshots.threshold } : undefined,
       // A socket that vouches is a relay's link: its sessions may be followers', no other's
-      follower: typeof vouch === 'function'
+      follower: typeof vouch === 'function',
+      writes: typeof vouch !== 'function' || followerWrites !== false
     });
     // Subscribed once the session exists, before its first message: the
     // store sent what it held back (see groupCommit) before making it, so the
@@ -124,8 +133,8 @@ export function createHub(resolveStore, { send, user, authorizeId, authorize, vo
       .then(() => vouch(credential, id))
       .then(async client => {
         if (client === null || client === undefined) return refused('unauthorized', "The client's credential was not accepted");
-        if (authorizeId && !(await authorizeId(client, id))) return refused('forbidden', `Not allowed to access store "${id}"`);
-        if (authorize && !(await authorize(client, id, store))) return refused('forbidden', `Not allowed to access store "${id}"`);
+        if (authorizeId && !(await authorizeId(client, id, VOUCHED))) return refused('forbidden', `Not allowed to access store "${id}"`);
+        if (authorize && !(await authorize(client, id, store, VOUCHED))) return refused('forbidden', `Not allowed to access store "${id}"`);
         if (closed || sessions.get(id) !== session) return;
         const refusal = session.grant(as, client, replica);
         if (refusal) return refused(refusal.code, refusal.message);

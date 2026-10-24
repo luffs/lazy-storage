@@ -138,17 +138,25 @@ createStore({
   function `(user, before, after, { c, id, state, replica, changes, store })`
   that returns `false` or throws to refuse; a thrown message reaches the
   client. It is asked once per record an op touches, with the record
-  before the op and after it as it would be if every change landed, so
-  "only the owner may edit, and nobody may give a task away" is one line.
-  `state` is the whole store, for a rule that looks at other records (a
-  member's role); `changes` are the op's changes to this record.
+  before the op and after it, so "only the owner may edit, and nobody may
+  give a task away" is one line. `after` is what the merge made of the
+  op, not what the op asked for: each change is decided on its own by the
+  op's time, so a change can lose to a newer write while another of the
+  same op lands, and the rule judges the record as it would be left (the
+  op is applied, judged, and put back whole on a refusal). `state` is the
+  whole store as the op leaves it, for a rule that looks at other records
+  (a member's role); `changes` are the op's changes to this record.
 - **`readOnly: true`** locks the whole store: clients only read.
   **`readOnly: ['settings']`** names the collections and singletons that
   are the server's alone, the same as `false` rules for them.
 - **`validate(diff, { user, replicaId, store, changes })`** judges the
-  whole op after the rules, its changes as one diff in the tree's shape,
-  for what spans records (a limit per op, a pair of records that must
-  change together). Return `false` or throw to refuse.
+  whole op before it is applied (after what `false` rules and `readOnly`
+  refuse outright, before the rule functions), its changes as one diff in
+  the tree's shape, for what spans records (a limit per op, a pair of
+  records that must change together). Return `false` or throw to refuse,
+  `true` or nothing to let it through. Anything else refuses it too: a
+  diff returned to accept in the op's place, which 0.x took, would
+  otherwise let through whole what a validator meant to strip.
 
 A refusal refuses the op whole, with code `forbidden`: the client drops
 it, takes its edit back from `db.state`, and hears `rejected`. The

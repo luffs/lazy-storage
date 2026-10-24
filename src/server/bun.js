@@ -87,7 +87,8 @@ import { snapshotOptions, snapshotId, serveSnapshot } from './snapshot.js';
  *   `authenticate(req)` the relay a request is (null turns it away, as for
  *   a client), `expiresAt(relay, req)` when that runs out (as `expiresAt`),
  *   `authorize(relay, storeId)` whether it may carry a store at all
- *   (default: any its clients may read; judged again by `revalidate`),
+ *   (default: any its clients may read, the relay writing nothing as itself;
+ *   with it, it may write as itself where it says yes; judged again by `revalidate`),
  *   `path` (default `<path>/relay`), `headers` (more names of a client's
  *   headers its credential may carry, besides authorization, cookie and
  *   user-agent), `rate` (the vouches turned away (unauthorized or forbidden) a

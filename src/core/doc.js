@@ -51,11 +51,12 @@ const clone = value => (value === null || typeof value !== 'object' ? value : st
 /** The kind of change a value makes at a path: null deletes, an object is put, anything else set */
 export const changeFor = (base, value) => (value === null ? { ...base, del: true } : isObj(value) ? { ...base, put: value } : { ...base, set: value });
 
-/** Whether a clock key is at or beneath `path` (strictly beneath with `inclusive` false) */
-function beneath(key, path, inclusive) {
-  if (path.length === 0) return inclusive || key !== ROOT;
+/** Whether clock keys are at or beneath `path` (strictly beneath with `inclusive` false): the path's key worked out once */
+function beneath(path, inclusive) {
+  if (path.length === 0) return key => inclusive || key !== ROOT;
   const own = pathKey(path);
-  return (inclusive && key === own) || key.startsWith(own.slice(0, -1) + ',');
+  const prefix = own.slice(0, -1) + ',';
+  return key => (inclusive && key === own) || key.startsWith(prefix);
 }
 
 const maxOf = clock => {
@@ -121,6 +122,15 @@ export function createDoc(shape, { state, clocks, track = true } = {}) {
 
   const childrenOf = (c, id) => [...(children.get(shape.recordKey(c, id)) ?? [])].map(key => recordAt.get(key)).filter(Boolean);
 
+  // While a trial runs: each record as it was before the trial first touched it, by record key
+  let journal = null;
+  function note(c, id) {
+    const key = shape.recordKey(c, id);
+    if (!journal || journal.has(key)) return;
+    const clock = clockOf(key);
+    journal.set(key, [c, id, clone(get(c, id)), clock ? clockToJSON(clock) : null]);
+  }
+
   /** The newest time in a record and every record beneath it */
   function subtreeMax(c, id, seen = new Set()) {
     const key = shape.recordKey(c, id);
@@ -138,14 +148,28 @@ export function createDoc(shape, { state, clocks, track = true } = {}) {
     }
   }
 
-  function dropBeneath(clock, path, inclusive) {
+  // A clock keeps nothing beneath a path that is not a container in the
+  // state (what was beneath went when it stopped being one), so a write to a
+  // leaf, or where nothing is, costs its own key and not a scan of the
+  // record's clock: `container` says which it is
+  function dropBeneath(clock, path, inclusive, container = true) {
     if (!clock) return;
-    for (const map of [clock.live, clock.gone]) for (const key of [...map.keys()]) if (beneath(key, path, inclusive)) map.delete(key);
+    if (!container) {
+      if (inclusive) {
+        const own = pathKey(path);
+        clock.live.delete(own);
+        clock.gone.delete(own);
+      }
+      return;
+    }
+    const test = beneath(path, inclusive);
+    for (const map of [clock.live, clock.gone]) for (const key of [...map.keys()]) if (test(key)) map.delete(key);
   }
 
   function newerBeneath(clock, path, ts) {
     if (!clock) return false;
-    for (const map of [clock.live, clock.gone]) for (const [key, at] of map) if (at > ts && beneath(key, path, false)) return true;
+    const test = beneath(path, false);
+    for (const map of [clock.live, clock.gone]) for (const [key, at] of map) if (at > ts && test(key)) return true;
     return false;
   }
 
@@ -156,6 +180,7 @@ export function createDoc(shape, { state, clocks, track = true } = {}) {
     const key = shape.recordKey(c, id);
     if (seen.has(key) || get(c, id) === undefined) return;
     seen.add(key);
+    note(c, id);
     const kids = cascade ? childrenOf(c, id) : [];
     delete state[c][id];
     clocks?.delete(key);
@@ -186,6 +211,7 @@ export function createDoc(shape, { state, clocks, track = true } = {}) {
     const makes = mode === 'authority' || mode === 'trust';
     const lose = why => { out.lost.push(entry(c, id, path, why)); };
     const key = shape.recordKey(c, id);
+    note(c, id);
     let record = get(c, id);
 
     if (path.length === 0) {
@@ -245,7 +271,7 @@ export function createDoc(shape, { state, clocks, track = true } = {}) {
         const seg = parentPath[i];
         if (!isObj(node[seg])) {
           node[seg] = {};
-          dropBeneath(clock, parentPath.slice(0, i + 1), true);
+          dropBeneath(clock, parentPath.slice(0, i + 1), true, false);
           clock?.live.set(pathKey(parentPath.slice(0, i + 1)), ts);
         }
         node = node[seg];
@@ -262,7 +288,7 @@ export function createDoc(shape, { state, clocks, track = true } = {}) {
         if (judging && (clock.gone.get(own) ?? -1) > ts) return lose('newer');
         parent[last] = clone(value);
         if (clocks) {
-          dropBeneath(clock, path, true);
+          dropBeneath(clock, path, true, false);
           stamp(clock, c, id, path, value, ts);
         }
         out.applied.push({ ...entry(c, id, path), why: undefined, put: clone(value) });
@@ -280,17 +306,17 @@ export function createDoc(shape, { state, clocks, track = true } = {}) {
       }
       parent[last] = clone(value);
       if (clocks) {
-        dropBeneath(clock, path, true);
+        dropBeneath(clock, path, true, isObj(current));
         clock.live.set(own, ts);
       }
       out.applied.push({ ...entry(c, id, path), why: undefined, set: clone(value) });
     }
     if (kind === 'del') {
       if (current === undefined) return;
-      if (judging && ((clock.live.get(own) ?? -1) > ts || newerBeneath(clock, path, ts))) return lose('newer');
+      if (judging && ((clock.live.get(own) ?? -1) > ts || (isObj(current) && newerBeneath(clock, path, ts)))) return lose('newer');
       delete parent[last];
       if (clocks) {
-        dropBeneath(clock, path, true);
+        dropBeneath(clock, path, true, isObj(current));
         clock.gone.set(own, ts);
       }
       out.applied.push({ ...entry(c, id, path), why: undefined, del: true });
@@ -331,6 +357,28 @@ export function createDoc(shape, { state, clocks, track = true } = {}) {
         else clocks.set(key, clockFromJSON(clockJSON));
       }
       relink(c, id);
+    },
+    /**
+     * Run `fn` (which applies changes) and say what every record it touched
+     * was before: { result, before: Map(record key -> [c, id, data, clock]) },
+     * for `undo` to put back. If `fn` throws, what it did is put back first
+     */
+    trial(fn) {
+      if (journal) throw new Error('A trial is already running');
+      const before = journal = new Map();
+      try {
+        const result = fn();
+        journal = null;
+        return { result, before };
+      } catch (err) {
+        journal = null;
+        this.undo(before);
+        throw err;
+      }
+    },
+    /** Put back what a trial touched */
+    undo(before) {
+      for (const [c, id, data, clockJSON] of before.values()) this.setRecord(c, id, data, clockJSON);
     },
     /** A record's clock, as stored */
     clock(c, id) {
@@ -386,10 +434,18 @@ export function diffOf(shape, changes) {
   return diff;
 }
 
-/** A doc from stored records: [[c, id, data, clock], ...]; anything the shape does not know is left out */
+/**
+ * A doc from stored records: [[c, id, data, clock], ...]; anything the shape
+ * does not know is left out. The records are all there is: a collection's
+ * seed records in `initial` are not added, since a deleted record leaves no
+ * row to say it went (a store writes its seeds when it starts, and a doc
+ * that should start from them is createDoc's). A singleton with no record
+ * is its initial value
+ */
 export function docFromRecords(shape, records = []) {
-  const state = structuredClone(shape.initial);
-  for (const c of shape.collections) if (!isObj(state[c])) state[c] = {};
+  const state = {};
+  for (const c of shape.collections) state[c] = {};
+  for (const c of shape.singletons) state[c] = clone(shape.initial[c]);
   const clocks = new Map();
   for (const [c, id, data, clock] of records) {
     if (shape.isCollection(c) && typeof id === 'string') state[c][id] = data;

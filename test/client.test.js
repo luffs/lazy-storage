@@ -180,3 +180,21 @@ test('pending edits stay shown through patches, acks, superseding and a refusal,
   const { LazyWatch } = await import('lazy-watch');
   assert.deepEqual(LazyWatch.snapshot(db.state), store.snapshot());
 });
+
+test('a client behind the server\'s shape passes over what it does not declare, and keeps the rest of the patch', async () => {
+  // The server was deployed with a new collection; a client still on the old shape must not fall apart on a patch that touches it
+  const store = createStore({ initial: { ...SHAPE.initial, notes: {} }, singletons: ['settings'] });
+  const net = createNetwork(store);
+  const db = net.client({ replicaId: 'a', ...SHAPE });
+  const errors = [];
+  db.on('error', err => errors.push(err.code ?? err.message));
+  await net.settle();
+  store.patch({ notes: { n: { text: 'new' } }, tasks: { k: { title: 'kept' } } });
+  await net.settle();
+  assert.deepEqual(db.state.tasks.k, { title: 'kept' });
+  assert.equal(db.state.notes, undefined);
+  assert.deepEqual(errors, ['shape-mismatch']);
+  db.state.tasks.k.title = 'edited';
+  await net.settle();
+  assert.equal(store.state.tasks.k.title, 'edited', 'and it goes on syncing');
+});

@@ -106,7 +106,10 @@ export function memoryStorage() {
  */
 export function jsonFileStorage(file, { debounce = 200, onError = err => console.error('lazy-storage:', err) } = {}) {
   const path = resolve(file);
-  const doc = document(existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : null);
+  const saved = existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : null;
+  // A file from before 1.0 keeps rows per leaf: served as no records, its next write would erase them
+  let outdated = saved && !Array.isArray(saved.records) && Array.isArray(saved.rows);
+  const doc = document(outdated ? null : saved);
   let dirty = false;
   let timer = null;
 
@@ -134,8 +137,16 @@ export function jsonFileStorage(file, { debounce = 200, onError = err => console
   }
 
   return {
-    load: doc.load,
+    load() {
+      if (outdated) {
+        const err = new Error(`${path} was written by lazy-storage before 1.0, one row per leaf, which 1.0 cannot read: keep it, and start the store from a new file`);
+        err.code = 'storage-format';
+        throw err;
+      }
+      return doc.load();
+    },
     commit(change) {
+      if (outdated) throw new Error(`${path} was written by lazy-storage before 1.0; nothing is written over it`);
       doc.commit(change);
       dirty = true;
       later(debounce);
@@ -145,8 +156,10 @@ export function jsonFileStorage(file, { debounce = 200, onError = err => console
       timer = null;
       write();
     },
+    // Taken whole, it may go over a file from before 1.0: that is the way to move one
     replace(document) {
       doc.replace(document);
+      outdated = false;
       dirty = true;
       this.flush();
     }

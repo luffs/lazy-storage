@@ -47,6 +47,7 @@ import { PROTOCOL } from '../core/protocol.js';
 import { createShape, assertChange } from '../core/shape.js';
 import { createDoc, docFromRecords, changeFor } from '../core/doc.js';
 import { createRules, RuleError } from '../core/rules.js';
+import { fingerprintOf } from './fingerprint.js';
 import { randomId, isStoreId } from '../core/ids.js';
 import { createConnection } from '../client/connection.js';
 import { memoryCopies } from './copies.js';
@@ -182,7 +183,15 @@ export function createRelay({
       edges.set(storeId, waiting);
       saved.then(copy => copy, err => { fault(err); return null; }).then(copy => {
         if (closed) return;
-        const edge = makeEdge(storeId, declared, shape, copy);
+        // A copy that cannot be built from is reported, and the store starts from the server: its clients would wait on it for ever
+        let edge;
+        try {
+          edge = makeEdge(storeId, declared, shape, copy);
+        } catch (err) {
+          fault(err);
+          edges.delete(storeId);
+          edge = makeEdge(storeId, declared, shape, null);
+        }
         for (const ss of waiting.sessions) {
           ss.edge = edge;
           edge.sessions.add(ss);
@@ -192,7 +201,12 @@ export function createRelay({
       });
       return waiting;
     }
-    return makeEdge(storeId, declared, shape, saved);
+    try {
+      return makeEdge(storeId, declared, shape, saved);
+    } catch (err) {
+      fault(err);
+      return makeEdge(storeId, declared, shape, null);
+    }
   }
 
   function makeEdge(storeId, declared, shape, saved) {
@@ -201,7 +215,7 @@ export function createRelay({
       shape,
       judge: createRules(shape, declared.rules ?? {}, declared.readOnly === true),
       // Records of their own: what storage handed over is not written in place
-      base: saved ? docFromRecords(shape, structuredClone(saved.records ?? [])) : createDoc(shape),
+      base: Array.isArray(saved?.records) ? docFromRecords(shape, structuredClone(saved.records)) : createDoc(shape),
       view: null,
       have: Boolean(saved?.records),
       v: saved?.v ?? 0,
@@ -222,7 +236,9 @@ export function createRelay({
       retry: null,
       lingering: null
     };
-    for (const op of saved?.own?.ops ?? []) edge.queue.push({ own: true, replica: replicaId, op, sent: false });
+    // An op of another shape (a browser's storage from before 1.0, whose ops were diffs) is let go of, not left to stop the store
+    const ops = (saved?.own?.ops ?? []).filter(op => isObj(op) && Number.isInteger(op.seq) && Array.isArray(op.changes));
+    for (const op of ops) edge.queue.push({ own: true, replica: replicaId, op, sent: false });
     // The view's records are copies: a change from the server applied to the base must show as a change of the view
     edge.view = docFromRecords(shape, structuredClone([...edge.base.records()]));
     for (const entry of edge.queue) for (const change of entry.op.changes) safeApply(edge.view, change, entry.op.ts);
@@ -363,6 +379,20 @@ export function createRelay({
     }
   }
 
+  /**
+   * A client's ops sent up under a session of its that has left: once the
+   * link drops, nothing can send them again, and the client keeps them in its
+   * outbox and sends them when it is back (take hands one over to its new
+   * session meanwhile)
+   */
+  function forgetOrphans(edge) {
+    const orphans = edge.queue.filter(e => !e.own && !edge.grants.has(e.as));
+    if (!orphans.length) return;
+    edge.queue = edge.queue.filter(e => !orphans.includes(e));
+    recompute(edge, orphans.flatMap(e => e.op.changes.map(ch => [ch.c, ch.id])), clock.highest);
+    idle(edge);
+  }
+
   function sendUp(edge, entry) {
     if (!edge.synced || !linkUp() || entry.sent) return;
     if (entry.own) {
@@ -410,6 +440,7 @@ export function createRelay({
       onClose() {
         edge.synced = false;
         for (const grant of edge.grants.values()) if (grant.state !== 'refused') grant.state = 'pending';
+        forgetOrphans(edge);
         for (const entry of edge.queue) entry.sent = false;
         edge.peers = new Map();
         noteLink();
@@ -586,6 +617,11 @@ export function createRelay({
       case 'closed': {
         edge.synced = false;
         if (msg.code === 'unavailable') {
+          // The server's session is gone with every grant on it: they are asked for again on the next one, and what was sent goes again
+          for (const grant of edge.grants.values()) if (grant.state !== 'refused') grant.state = 'pending';
+          forgetOrphans(edge);
+          for (const entry of edge.queue) entry.sent = false;
+          edge.peers = new Map();
           setTimeout(() => { if (edge.link && connection.status === 'online') upstreamHandler(edge).onOpen(edge.link); }, 250 + Math.random() * 750);
           return;
         }
@@ -672,26 +708,34 @@ export function createRelay({
     const refuse = (code, message) => ss.send({ t: 'error', seq: isObj(op) ? op.seq : undefined, code, message });
     if (!isObj(op) || typeof op.replica !== 'string' || !Number.isInteger(op.seq) || op.seq < 1 || !isTimestamp(op.ts) || !Array.isArray(op.changes)) return refuse('invalid', 'A malformed op');
     if (op.replica !== ss.replica) return refuse('forbidden', `This session speaks for replica "${ss.replica}"`);
-    if (local ? (edge.seen.get(op.replica) ?? 0) >= op.seq
-      : (edge.acked.get(op.replica) ?? 0) >= op.seq || edge.queue.some(e => !e.own && e.replica === op.replica && e.op.seq === op.seq)) {
+    const queued = local ? null : edge.queue.find(e => !e.own && e.replica === op.replica && e.op.seq === op.seq);
+    if (queued && queued.as !== ss.as && !edge.grants.has(queued.as)) {
+      // Sent under a session of the client's that has left: this one takes it over, to send again if the server never had it
+      queued.as = ss.as;
+      queued.key = ss.key;
+      sendUp(edge, queued);
+      return;
+    }
+    if (local ? (edge.seen.get(op.replica) ?? 0) >= op.seq : (edge.acked.get(op.replica) ?? 0) >= op.seq || queued) {
       if (local && answer) ss.send({ t: 'ack', seq: op.seq, v: edge.fv, now: clock.time });
       return;
     }
+    const ts = clamp(op.ts, clock.time);
+    const applied = [];
     try {
       for (const change of op.changes) assertChange(edge.shape, change);
-      edge.judge(edge.view, op.changes, edge.grants.get(ss.as)?.user, op.replica, { relay: true });
+      edge.judge(edge.view, op.changes, edge.grants.get(ss.as)?.user, op.replica, { relay: true }, () => {
+        for (const change of op.changes) for (const a of safeApply(edge.view, change, ts).applied) applied.push(a);
+      });
     } catch (err) {
       return refuse(err instanceof RuleError ? 'forbidden' : 'invalid', err.message);
     }
-    const ts = clamp(op.ts, clock.time);
     clock.observe(ts);
     edge.seen.set(op.replica, op.seq);
     const entry = local
       ? { own: true, replica: replicaId, op: { replica: replicaId, seq: ++edge.ownSeq, ts, changes: op.changes }, from: { replica: op.replica, seq: op.seq }, sent: false }
       : { own: false, as: ss.as, key: ss.key, replica: op.replica, op: { ...op, ts }, sent: false };
     edge.queue.push(entry);
-    const applied = [];
-    for (const change of op.changes) applied.push(...safeApply(edge.view, change, ts).applied);
     emitPatch(edge, applied, ts);
     if (local) {
       persist(edge);
@@ -704,12 +748,13 @@ export function createRelay({
    * A client's socket. `credential` is what the server judges it by (the
    * headers and query its own socket would carry; the relay never reads
    * it), `key` a fingerprint of it, for answering it while the server is
-   * away. Returns { receive(message), close() }
+   * away (default: the credential's SHA-256, fingerprint.js). Returns { receive(message), close() }
    */
   function session({ send, credential, key, user, onEvict } = {}) {
     if (typeof send !== 'function') throw new TypeError('A relay session needs a send function');
     credential = credential ?? user;
-    key = key ?? JSON.stringify(credential ?? null);
+    // What the relay keeps on disk and shows: a fingerprint, never the credential itself
+    key = key ?? fingerprintOf(credential);
     const stores = new Map();
     let gone = false;
 

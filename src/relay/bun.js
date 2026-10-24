@@ -25,6 +25,7 @@
 //   Bun.serve({ port: 36610, fetch: async (req, server) => (await handlers.upgrade(req, server)) ?? new Response('Not found', { status: 404 }), websocket: handlers.websocket });
 import { LazyWatch } from 'lazy-watch';
 import { toJSON, deflateOptions, TOO_FAR_BEHIND } from '../server/wire.js';
+import { fingerprintOf } from './fingerprint.js';
 
 const { isPlainObject } = LazyWatch.Utils;
 const decoder = new TextDecoder();
@@ -102,7 +103,8 @@ export function createRelayHandlers({
       onError(err);
       return new Response('Something went wrong', { status: 500 });
     }
-    const data = { key: typeof fingerprint === 'string' ? fingerprint : JSON.stringify(vouchBy ?? null), credential: isPlainObject(vouchBy) ? vouchBy : {} };
+    // Without a key of the host's, the relay's own fingerprint of the credential (never the credential, which would sit on disk)
+    const data = { key: typeof fingerprint === 'string' ? fingerprint : fingerprintOf(vouchBy ?? null), credential: isPlainObject(vouchBy) ? vouchBy : {} };
     return server.upgrade(req, { data }) ? undefined : new Response('WebSocket upgrade failed', { status: 400 });
   }
 

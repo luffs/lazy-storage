@@ -91,6 +91,8 @@ export interface SessionOptions {
   httpSnapshot?: { url: string; threshold?: number };
   /** May say follower: true in its hello: a relay's link, whose clients a hub vouches for */
   follower?: boolean;
+  /** false: writes nothing as itself, only as the clients vouched for on it (default true) */
+  writes?: boolean;
 }
 
 /** What a rule is handed besides the user and the record */
@@ -286,8 +288,9 @@ export function isStoreId(id: unknown): id is string;
 // --- Hubs ------------------------------------------------------------------------
 
 export type StoreResolver = (id: string) => Store | null;
-export type Authorize = (user: unknown, storeId: string, store: Store, context?: { relay: unknown }) => boolean | Promise<boolean>;
-export type AuthorizeId = (user: unknown, storeId: string, context?: { relay: unknown }) => boolean | Promise<boolean>;
+/** `context` is `{ relay }` from an adapter for a client a relay vouches for, `{ vouched: true }` from a hub of one's own */
+export type Authorize = (user: unknown, storeId: string, store: Store, context?: { relay: unknown } | { vouched: true }) => boolean | Promise<boolean>;
+export type AuthorizeId = (user: unknown, storeId: string, context?: { relay: unknown } | { vouched: true }) => boolean | Promise<boolean>;
 
 export interface HubChannel {
   subscribe(storeId: string): void;
@@ -304,6 +307,8 @@ export interface HubOptions {
   vouch?(credential: unknown, storeId: string): unknown | Promise<unknown>;
   /** The vouches turned away (unauthorized, forbidden or refused) this socket may ask for before every vouch is refused as rate-limited (default { burst: 100, perSecond: 10 }); false for none */
   vouchRate?: { burst: number; perSecond: number } | false;
+  /** On a follower's socket, whether the follower may write as itself (default true; the adapters' relay route: only with relays.authorize) */
+  followerWrites?: boolean;
   now?: () => number;
   channel?: HubChannel;
   httpSnapshots?: { url(storeId: string): string; threshold: number };

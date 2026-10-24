@@ -18,8 +18,12 @@ const db = createClient({ ...shape, store: 'team-1', transport });   // every cl
 A key of `initial` is a collection when it is `{}` (or holds records),
 and a singleton when `singletons` names it or its value is not an
 object (`build: ''`). A client cannot delete a collection or a
-singleton, only what is in it. A client whose declaration differs from
-the server's hears an `error` with code `shape-mismatch`.
+singleton, only what is in it. Records a collection holds in `initial`
+are its seeds: a new store writes them when it starts, and from then on
+they are records like any, so one deleted stays deleted. A client whose
+declaration differs from the server's hears an `error` with code
+`shape-mismatch`, and passes over what the server sends of a collection
+or singleton it does not declare.
 
 ## Records, paths and what merges
 

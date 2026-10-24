@@ -94,10 +94,16 @@ sqlite.fromLeaves(storeId => shapes[storeId] ?? null);   // returns the ids it m
 
 Each leaf's time becomes its path's time in its record's clock, a
 deletion inside a living record a deleted path, and a record deleted
-whole is left out. The moved stores get a new epoch, so every client
+whole is left out; a seed record of the shape's `initial` that has no
+rows and was not deleted is written as it is seeded. The moved stores get a new epoch, so every client
 takes a snapshot, and their old delta log goes. It is safe to call at
 every start: a file with no leaves left is not touched. Copy the file
 first (`sqlite.backup(file)` does it) if you may want to go back.
+
+A `jsonFileStorage` file from before 1.0 (one with `rows` and no
+`records`) is refused the same way, with code `storage-format`, and
+nothing is written over it; `storage.replace(doc)` with a 1.0 document
+(a store's `export()`) is the one thing that does.
 
 One process serves a store at a time. Two processes on one SQLite file,
 a deploy whose old and new process overlap or a server started twice,

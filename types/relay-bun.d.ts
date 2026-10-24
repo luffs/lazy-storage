@@ -7,7 +7,7 @@ export interface RelayHandlerOptions {
   relay: Relay;
   /** What the server judges the client by: the headers and query its own socket would carry */
   credential?(req: Request): RelayCredential | null | Promise<RelayCredential | null>;
-  /** A fingerprint of the credential, by which the relay knows the client while the server is away */
+  /** A fingerprint of the credential, by which the relay knows the client while the server is away (default: its SHA-256) */
   key?(req: Request): string | null | Promise<string | null>;
   /** WebSocket path (default '/ws') */
   path?: string;

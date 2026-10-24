@@ -64,7 +64,7 @@ export interface RelaysOptions {
   authenticate(req: Request): unknown;
   /** When that runs out, as `expiresAt` */
   expiresAt?(relay: unknown, req: Request): number | Date | null | undefined | Promise<number | Date | null | undefined>;
-  /** Whether the relay may carry a store at all (default: any its clients may read); judged again by `revalidate` */
+  /** Whether the relay may carry a store at all, and write to it as itself (default: any its clients may read, writing nothing as itself); judged again by `revalidate` */
   authorize?(relay: unknown, storeId: string): boolean | Promise<boolean>;
   /** The relay route (default `<path>/relay`) */
   path?: string;
