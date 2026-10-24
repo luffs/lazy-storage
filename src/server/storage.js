@@ -1,132 +1,89 @@
 // storage.js - Server persistence adapters
 //
-// A store persists as ROWS, one per leaf path: { value, ts } for a live
-// value, { ts, deleted: true } for a tombstone, { ts, made: true, since,
-// v, by } for a barrier (a tombstone lifted by a write that re-added what
-// was there, core/merge.js: `ts` and `v` the re-add's timestamp and
-// version, `by` the replicas that re-added it, `since` the deletion's
-// timestamp; no value, and `{}` at its path on load). Alongside the rows:
-// each replica's progress (the last sequence number seen from it, and
-// when, and the user it belongs to), the store's version, and its horizon
-// (the version below which barriers have been settled; an op made in
-// sight of less is refused).
+// A store persists as RECORDS, one per collection record or singleton:
+// [c, id, data, clock], `id` null for a singleton, `clock` the record's
+// timestamps by path ({ live, gone }, core/doc.js). Alongside the records:
+// each replica's progress (the last sequence number seen from it, when,
+// and the user it belongs to), the store's version, its epoch, how many
+// migrations it has run, and the log of its last changes for deltas.
 //
-// An empty object is a leaf too (`assignees: {}` is one row). When such a
-// container later gains children, its `{}` row stays next to the child
-// rows on purpose: rows are applied shallow-first on load, so the empty
-// object is created and then filled, and if every child is later deleted
-// the row is what keeps the container in existence — exactly as the live
-// state has it. Dropping it would make a restart lose the empty container.
+// The interface is incremental, so a row-oriented backend (SQLite) writes
+// only the records an op touched:
 //
-// The interface is incremental so a row-oriented backend (SQLite) writes
-// only what an op touched:
+//   load()  -> null | { records: [[c, id, data, clock]], replicas: { id: { seq, seen, owner? } },
+//                       version, epoch, schema?, log?: [{ v, ts, changes }] }
+//   commit({ upserts: [[c, id, data, clock]], deletes: [[c, id]],
+//            replica?: { id, seq, seen, owner? }, forgetReplicas?: id[],
+//            version, epoch, schema, log?: { v, ts, changes }, logFloor?: number })
+//   commitMany(changes)   optional: several commits as one, all or none
+//   flush()               write out anything buffered
+//   close()               optional: the store let go of it
+//   replace(doc)          optional: take a document (store.export()) as the
+//                         whole storage, under a new epoch and no log
 //
-//   load()  -> null | { rows: Array<[pathKey, row]>, replicas: { replicaId: { seq, seen, owner? } }, version, epoch, schema?, horizon?, log? }
-//   commit({ upserts: Array<[pathKey, row]>, deletes: pathKey[],
-//            replica?: { id, seq, seen, owner? }, forgetReplicas?: replicaId[], version, epoch, schema, horizon,
-//            log?: { v, diff }, logFloor?: number })
-//   commitMany(changes) -> void   optional: several commits, in order, as
-//                          one, all or none: a turn's changes (see the
-//                          store's groupCommit). Without it the store
-//                          commits them one by one
-//   flush() -> void   (write out anything buffered; called on dispose)
-//   replace(doc) -> void   optional: take a document as load() gives it
-//                          (or store.export() makes it) as the store's
-//                          whole storage, for a restore or a move; never
-//                          under a live store. It starts a new epoch (see
-//                          newEpoch below) and no delta log
-//
-// `seen` is the store's clock (ms) when the replica's op arrived; a
-// `seen` of null means unknown (a document from before it was recorded).
-// `owner` is the key (a string) of the user who first spoke for the
-// replica, absent for a replica of sessions without a user: another user
-// may not take the replica over. An adapter that drops it loses only that.
-// `epoch` is a random id the store mints once per storage life, so a
-// client can tell whether its cached version means anything here.
-// `schema` is how many of the store's `migrations` the rows have been
-// through; an adapter that does not keep it has every migration run again
-// on each load, so it keeps it. `horizon` is kept the same way: an adapter
-// that drops it lets an op from before the settled barriers through.
-// `log` in a commit is the accepted diff this op made, at version `v`;
-// an adapter may keep these (pruning below `logFloor`) and hand them back
-// as `log: [{ v, diff }]` on load, so a restarted server still answers
-// reconnects with deltas. The memory and SQLite adapters do; the JSON
-// file adapter does not, to keep its document small.
 // `null` from load means "never seen": the store starts from `initial`.
 // Document-oriented adapters (memory, JSON file) apply commits to an
 // in-memory copy and write the whole document.
 import { existsSync, readFileSync, mkdirSync, writeFileSync, renameSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { randomId } from '../core/ids.js';
-import { isTimestamp } from '../core/hlc.js';
 
-/**
- * The epoch a replaced store starts. A document may be older than what
- * clients have seen (a backup restored after the store moved on); with the
- * epoch it was taken under, a client that was ahead would, once the store
- * passes its version again, be sent a delta from a history it never had.
- * A new epoch sends every client that was connected a snapshot instead
- */
+/** The epoch a replaced store starts: clients that were ahead of the document get a snapshot, not a delta of another history */
 export function newEpoch() {
   return randomId();
 }
 
-/** A document replace() may take: rows, a version, and the rest optional; every row of a kind the store knows */
+/** A document replace() may take: records and a version, the rest optional */
 export function assertDocument(doc) {
-  if (!doc || !Array.isArray(doc.rows) || !Number.isInteger(doc.version)) {
-    throw new TypeError('A store document has rows and a version (see store.export())');
+  if (!doc || !Array.isArray(doc.records) || !Number.isInteger(doc.version)) {
+    throw new TypeError('A store document has records and a version (see store.export())');
   }
-  for (const entry of doc.rows) {
-    const row = Array.isArray(entry) && typeof entry[0] === 'string' ? entry[1] : null;
-    if (!row || typeof row !== 'object' || !isTimestamp(row.ts)) throw new TypeError(`A row is [path key, { ts, ... }] with a timestamp: ${JSON.stringify(entry)}`);
-    if (row.made && !(isTimestamp(row.since) && Number.isInteger(row.v) && (row.by === undefined || (Array.isArray(row.by) && row.by.every(id => typeof id === 'string'))))) {
-      throw new TypeError(`A barrier row carries the deletion's timestamp (since), the re-add's version (v) and, when known, its replicas (by): ${JSON.stringify(entry)}`);
+  for (const record of doc.records) {
+    if (!Array.isArray(record) || typeof record[0] !== 'string' || !(record[1] === null || typeof record[1] === 'string') || record.length < 3) {
+      throw new TypeError(`A record is [collection, id or null, data, clock]: ${JSON.stringify(record).slice(0, 200)}`);
     }
   }
-  if (doc.horizon !== undefined && !(Number.isInteger(doc.horizon) && doc.horizon >= 0)) throw new TypeError('A store document\'s horizon is a version');
 }
+
+const recordKey = (c, id) => JSON.stringify([c, id ?? null]);
 
 /** The in-memory document shared by the memory and JSON-file adapters */
 function document(initial = null, { keepLog = false } = {}) {
-  let rows = new Map(initial ? initial.rows : []);
-  let log = keepLog && Array.isArray(initial?.log) ? initial.log.map(e => structuredClone(e)) : [];
+  let records = new Map((initial?.records ?? []).map(r => [recordKey(r[0], r[1]), r]));
+  let log = keepLog && Array.isArray(initial?.log) ? structuredClone(initial.log) : [];
   let replicas = initial ? structuredClone(initial.replicas ?? {}) : {};
   let version = initial ? initial.version : 0;
   let epoch = initial?.epoch ?? null;
   let schema = Number.isInteger(initial?.schema) ? initial.schema : undefined;
-  let horizon = Number.isInteger(initial?.horizon) ? initial.horizon : undefined;
   let seen = initial !== null;
+  const extra = () => ({ ...(schema === undefined ? {} : { schema }), ...(keepLog ? { log } : {}) });
   return {
-    load: () => (seen
-      ? { rows: [...rows].map(([k, r]) => [k, structuredClone(r)]), replicas: structuredClone(replicas), version, epoch, ...(schema === undefined ? {} : { schema }), ...(horizon === undefined ? {} : { horizon }), ...(keepLog ? { log: structuredClone(log) } : {}) }
-      : null),
+    load: () => (seen ? structuredClone({ records: [...records.values()], replicas, version, epoch, ...extra() }) : null),
     commit(change) {
       seen = true;
-      for (const key of change.deletes) rows.delete(key);
-      for (const [key, row] of change.upserts) rows.set(key, structuredClone(row));
+      for (const [c, id] of change.deletes ?? []) records.delete(recordKey(c, id));
+      for (const record of change.upserts ?? []) records.set(recordKey(record[0], record[1]), structuredClone(record));
       if (change.replica) {
-        const { seq, seen, owner } = change.replica;
-        replicas[change.replica.id] = owner === undefined ? { seq, seen } : { seq, seen, owner };
+        const { id, seq, seen: at, owner } = change.replica;
+        replicas[id] = owner === undefined ? { seq, seen: at } : { seq, seen: at, owner };
       }
       for (const id of change.forgetReplicas ?? []) delete replicas[id];
       version = change.version;
       if (change.epoch !== undefined) epoch = change.epoch;
       if (Number.isInteger(change.schema)) schema = change.schema;
-      if (Number.isInteger(change.horizon)) horizon = change.horizon;
       if (keepLog) {
         if (change.log) log.push(structuredClone(change.log));
         if (Number.isInteger(change.logFloor)) log = log.filter(e => e.v >= change.logFloor);
       }
     },
-    serialize: () => ({ rows: [...rows], replicas, version, epoch, ...(schema === undefined ? {} : { schema }), ...(horizon === undefined ? {} : { horizon }), ...(keepLog ? { log } : {}) }),
+    serialize: () => ({ records: [...records.values()], replicas, version, epoch, ...extra() }),
     replace(doc) {
       assertDocument(doc);
-      rows = new Map(doc.rows.map(([k, r]) => [k, structuredClone(r)]));
+      records = new Map(doc.records.map(r => [recordKey(r[0], r[1]), structuredClone(r)]));
       replicas = structuredClone(doc.replicas ?? {});
       version = doc.version;
       epoch = newEpoch();
       schema = Number.isInteger(doc.schema) ? doc.schema : undefined;
-      horizon = Number.isInteger(doc.horizon) ? doc.horizon : undefined;
       log = [];
       seen = true;
     }
@@ -136,22 +93,15 @@ function document(initial = null, { keepLog = false } = {}) {
 /** Keeps the document in memory only (delta log included); the store starts fresh with the process */
 export function memoryStorage() {
   const doc = document(null, { keepLog: true });
-  return {
-    load: doc.load,
-    commit: doc.commit,
-    flush: () => {},
-    replace: doc.replace
-  };
+  return { load: doc.load, commit: doc.commit, flush: () => {}, replace: doc.replace };
 }
 
 /**
  * One JSON file per store, written atomically (temp file + rename) and
  * debounced so a burst of ops costs one write. Call `flush()` before exit.
- * A debounced write that fails (a full disk, a permission) runs in a timer,
- * where a throw would take the process down: it goes to `onError`
- * instead, the changes stay pending, and the write is tried again a
- * second later. `flush()` throws to its caller
- * @param {string} file - path of the JSON file
+ * A debounced write that fails goes to `onError`, and is tried again a
+ * second later; `flush()` throws to its caller
+ * @param {string} file
  * @param {{ debounce?: number, onError?: (error: any) => void }} [options]
  */
 export function jsonFileStorage(file, { debounce = 200, onError = err => console.error('lazy-storage:', err) } = {}) {
@@ -168,7 +118,6 @@ export function jsonFileStorage(file, { debounce = 200, onError = err => console
     renameSync(tmp, path);
     dirty = false;
   };
-
   const later = ms => {
     clearTimeout(timer);
     timer = setTimeout(background, ms);

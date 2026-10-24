@@ -1,326 +1,274 @@
-import { PROTOCOL } from '../src/core/index.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { LazyWatch } from 'lazy-watch';
-import { createStore, createHub, memoryStorage } from '../src/server/index.js';
-import { memoryOutbox } from '../src/client/storage.js';
+import { createStore } from '../src/server/index.js';
 import { createNetwork, fakeTime } from './helpers.js';
 
-const INITIAL = { tasks: {}, order: [] };
-const REGISTERS = ['order'];
+const SHAPE = { initial: { tasks: {}, subtasks: {}, settings: { theme: 'light' } }, singletons: ['settings'], parents: { subtasks: { taskId: 'tasks' } } };
 const snap = client => LazyWatch.snapshot(client.state);
 
-// The server gets a fake clock too: a real one would pull every client's
-// hybrid clock up to wall time and swamp the fake advances the tests use
-// to order concurrent edits. Clients without a fake clock of their own run
-// on real time, far ahead of the store's, so the skew guard is off here
-// (clock.test.js covers it)
 function setup(options = {}) {
-  const store = createStore({ initial: INITIAL, registers: REGISTERS, now: fakeTime(1_000_000), maxSkew: Infinity, ...options });
+  const now = fakeTime(1_000_000);
+  const store = createStore({ ...SHAPE, now, ...options });
   const net = createNetwork(store);
-  return { store, net };
+  const client = (replicaId, extra = {}) => net.client({ replicaId, ...SHAPE, now, ...extra });
+  return { store, net, now, client };
 }
 
-test('a connected client receives the snapshot and live changes from another client', async () => {
-  const { store, net } = setup();
-  const a = net.client({ replicaId: 'a', initial: INITIAL, registers: REGISTERS });
-  const b = net.client({ replicaId: 'b', initial: INITIAL, registers: REGISTERS });
+test('a client gets the snapshot and another client\'s changes', async () => {
+  const { store, net, client } = setup();
+  const a = client('a');
+  const b = client('b');
   await net.settle();
   assert.equal(a.status, 'online');
-  assert.equal(b.status, 'online');
-
-  const id = a.collection('tasks').add({ title: 'Write docs', done: false });
-  a.state.order.push(id);
+  a.state.tasks.k = { title: 'Milk', meta: { color: 'red' } };
+  a.state.settings.theme = 'dark';
   await net.settle();
-
-  assert.deepEqual(b.collection('tasks').get(id), { title: 'Write docs', done: false, id });
-  assert.deepEqual(b.state.order, [id]);
+  assert.deepEqual(snap(b), { tasks: { k: { title: 'Milk', meta: { color: 'red' } } }, subtasks: {}, settings: { theme: 'dark' } });
   assert.deepEqual(store.snapshot(), snap(a));
-  assert.deepEqual(snap(b), snap(a));
   assert.equal(a.pending, 0);
-  assert.equal(b.pending, 0);
 });
 
-test('edits made offline queue in the outbox and merge on reconnect', async () => {
-  const { store, net } = setup();
-  const a = net.client({ replicaId: 'a', initial: INITIAL, registers: REGISTERS });
-  const b = net.client({ replicaId: 'b', initial: INITIAL, registers: REGISTERS });
+test('two clients changing different paths deep in one record both keep theirs', async () => {
+  const { net, now, client } = setup();
+  const a = client('a');
+  const b = client('b');
   await net.settle();
+  a.state.tasks.k = { meta: { color: 'red', size: 'M' } };
+  await net.settle();
+  a.link.goOffline();
+  b.link.goOffline();
+  await net.settle();
+  a.state.tasks.k.meta.color = 'blue';
+  await net.settle();
+  now.advance(10);
+  b.state.tasks.k.meta.size = 'L';
+  await net.settle();
+  for (const c of [a, b]) { c.link.goOnline(); c.connect(); }
+  await net.settle();
+  assert.deepEqual(snap(a).tasks.k.meta, { color: 'blue', size: 'L' });
+  assert.deepEqual(snap(b), snap(a));
+});
 
+test('on the same path the later edit wins, whoever syncs first', async () => {
+  const { net, now, client } = setup();
+  const a = client('a');
+  const b = client('b');
+  await net.settle();
+  a.state.tasks.k = { title: 'Milk' };
+  await net.settle();
+  a.link.goOffline();
+  b.link.goOffline();
+  await net.settle();
+  b.state.tasks.k.title = 'Oat milk';
+  await net.settle();
+  now.advance(100);
+  a.state.tasks.k.title = 'Skimmed';
+  await net.settle();
+  a.link.goOnline(); a.connect();
+  await net.settle();
+  b.link.goOnline(); b.connect();
+  await net.settle();
+  assert.equal(a.state.tasks.k.title, 'Skimmed');
+  assert.equal(b.state.tasks.k.title, 'Skimmed');
+});
+
+test('a client whose own edit lost shows the winner once acknowledged, and hears why', async () => {
+  const { net, now, client } = setup();
+  const a = client('a');
+  const b = client('b');
+  await net.settle();
+  a.state.tasks.k = { title: 'Milk' };
+  await net.settle();
   a.link.goOffline();
   await net.settle();
-  assert.equal(a.status, 'offline');
-  const id = a.collection('tasks').add({ title: 'Offline task' });
-  a.collection('tasks').update(id, { done: true });
+  a.state.tasks.k.title = 'Mjölk';   // 10:01
   await net.settle();
-  assert.equal(a.pending, 1, 'add and update in one tick form one batch, so one op waits');
-  assert.equal(b.collection('tasks').has(id), false);
+  now.advance(100);
+  b.state.tasks.k.title = 'Havremjölk';   // 10:02
+  await net.settle();
+  assert.equal(a.state.tasks.k.title, 'Mjölk', 'its own pending edit shows while it waits');
+  const lost = [];
+  a.on('lost', event => lost.push(event));
+  a.link.goOnline(); a.connect();
+  await net.settle();
+  assert.equal(a.state.tasks.k.title, 'Havremjölk');
+  assert.equal(lost.length, 1);
+  assert.deepEqual(lost[0].lost, [{ c: 'tasks', id: 'k', path: ['title'], why: 'newer' }]);
+});
 
-  a.link.goOnline();
-  a.connect();
+test('an edit of a record deleted meanwhile is lost; a deletion older than an edit loses', async () => {
+  const { net, now, client } = setup();
+  const a = client('a');
+  const b = client('b');
   await net.settle();
-  assert.equal(a.pending, 0);
-  assert.equal(a.status, 'online');
-  assert.deepEqual(b.collection('tasks').get(id), { title: 'Offline task', id, done: true });
-  assert.deepEqual(store.snapshot(), snap(a));
+  a.state.tasks.x = { title: 'x' };
+  a.state.tasks.y = { title: 'y' };
+  await net.settle();
+  a.link.goOffline();
+  await net.settle();
+  a.state.tasks.x.title = 'edited offline';
+  a.state.tasks.y = null;   // an old deletion
+  await net.settle();
+  now.advance(50);
+  b.state.tasks.x = null;
+  b.state.tasks.y.title = 'edited later';
+  await net.settle();
+  a.link.goOnline(); a.connect();
+  await net.settle();
+  assert.equal(a.state.tasks.x, undefined);
+  assert.equal(a.state.tasks.y.title, 'edited later');
+  assert.deepEqual(snap(a), snap(b));
+});
+
+test('a child is never left without its parent', async () => {
+  const { store, net, now, client } = setup();
+  const a = client('a');
+  const b = client('b');
+  await net.settle();
+  a.state.tasks.t = { title: 'Shop' };
+  a.state.subtasks.s1 = { taskId: 't', title: 'Milk' };
+  await net.settle();
+  b.link.goOffline();
+  await net.settle();
+  b.state.subtasks.s2 = { taskId: 't', title: 'Eggs' };
+  await net.settle();
+  now.advance(10);
+  a.state.tasks.t = null;
+  await net.settle();
+  assert.deepEqual(store.state.subtasks, {}, 'the server deletes the children with the parent');
+  b.link.goOnline(); b.connect();
+  await net.settle();
+  assert.deepEqual(store.state.subtasks, {});
+  assert.deepEqual(snap(b).subtasks, {});
+  assert.deepEqual(snap(a), snap(b));
+});
+
+test('rules judge each record before and after, and a refused op is taken back', async () => {
+  const { net, client } = setup({ rules: { settings: false, tasks: (user, before, after) => (after ?? before).owner === user?.id } });
+  const a = net.client({ replicaId: 'a', ...SHAPE }, { user: { id: 'u1' } });
+  await net.settle();
+  const rejected = [];
+  a.on('rejected', event => rejected.push(event));
+  a.state.tasks.k = { owner: 'u1', title: 'mine' };
+  await net.settle();
+  assert.equal(rejected.length, 0);
+  a.state.tasks.j = { owner: 'u2', title: 'theirs' };
+  a.state.settings.theme = 'dark';
+  await net.settle();
+  assert.equal(rejected.length, 1);
+  assert.equal(rejected[0].code, 'forbidden');
+  assert.equal(a.state.tasks.j, undefined);
+  assert.equal(a.state.settings.theme, 'light');
+  assert.equal(a.state.tasks.k.title, 'mine');
+  assert.ok(client);
+});
+
+test('a reconnect after a blip is answered with a delta', async () => {
+  const { store, net, client } = setup();
+  const a = client('a');
+  const b = client('b');
+  await net.settle();
+  a.state.tasks.k = { n: 1 };
+  await net.settle();
+  b.link.goOffline();
+  await net.settle();
+  a.state.tasks.k.n = 2;
+  a.state.tasks.j = { n: 3 };
+  await net.settle();
+  const before = store.stats().sent.snapshot?.messages ?? 0;
+  b.link.goOnline(); b.connect();
+  await net.settle();
+  assert.equal(store.stats().sent.snapshot?.messages ?? 0, before, 'no snapshot');
+  assert.equal(store.stats().sent.delta.messages, 1);
   assert.deepEqual(snap(b), snap(a));
 });
 
-test('concurrent offline edits to one field resolve by timestamp, in either reconnect order', async () => {
-  for (const firstBack of ['a', 'b']) {
-    const { store, net } = setup();
-    const timeA = fakeTime(1_000_000);
-    const timeB = fakeTime(1_000_000);
-    const a = net.client({ replicaId: 'a', initial: INITIAL, registers: REGISTERS, now: timeA });
-    const b = net.client({ replicaId: 'b', initial: INITIAL, registers: REGISTERS, now: timeB });
+test('typing into one field keeps one op pending', async () => {
+  const { net, client } = setup();
+  const a = client('a');
+  await net.settle();
+  a.state.tasks.k = { title: '' };
+  await net.settle();
+  a.link.goOffline();
+  await net.settle();
+  for (const text of ['M', 'Mi', 'Mil', 'Milk']) {
+    a.state.tasks.k.title = text;
     await net.settle();
-    const id = a.collection('tasks').add({ title: 'Draft' });
-    await net.settle();
-
-    a.link.goOffline();
-    b.link.goOffline();
-    await net.settle();
-    timeA.advance(10);
-    a.collection('tasks').update(id, { title: 'From A (earlier)' });
-    timeB.advance(20);
-    b.collection('tasks').update(id, { title: 'From B (later)' });
-    await net.settle();
-
-    const [first, second] = firstBack === 'a' ? [a, b] : [b, a];
-    first.link.goOnline(); first.connect();
-    await net.settle();
-    second.link.goOnline(); second.connect();
-    await net.settle();
-
-    assert.equal(store.state.tasks[id].title, 'From B (later)', `reconnect order ${firstBack} first`);
-    assert.equal(a.collection('tasks').get(id).title, 'From B (later)', 'the loser was corrected');
-    assert.equal(b.collection('tasks').get(id).title, 'From B (later)');
-    assert.deepEqual(snap(a), store.snapshot());
-    assert.deepEqual(snap(b), store.snapshot());
   }
+  assert.equal(a.pending, 1);
+  a.link.goOnline(); a.connect();
+  await net.settle();
+  assert.equal(a.pending, 0);
+  assert.equal(a.state.tasks.k.title, 'Milk');
 });
 
-test('a newer deletion beats an older concurrent edit, and the editor drops the record', async () => {
-  const { store, net } = setup();
-  const timeA = fakeTime(1_000_000);
-  const timeB = fakeTime(1_000_000);
-  const a = net.client({ replicaId: 'a', initial: INITIAL, registers: REGISTERS, now: timeA });
-  const b = net.client({ replicaId: 'b', initial: INITIAL, registers: REGISTERS, now: timeB });
+test('undo takes back this client\'s own edit, and syncs', async () => {
+  const { net, now, client } = setup();
+  const a = client('a');
+  const b = client('b');
   await net.settle();
-  const id = a.collection('tasks').add({ title: 'Doomed', done: false });
+  a.state.tasks.k = { title: 'Milk' };
   await net.settle();
-
-  a.link.goOffline(); b.link.goOffline();
   await net.settle();
-  timeB.advance(10);
-  b.collection('tasks').update(id, { done: true });       // older
-  timeA.advance(20);
-  a.collection('tasks').remove(id);                        // newer
+  now.advance(10);
+  b.state.tasks.k.done = true;
   await net.settle();
-
-  b.link.goOnline(); b.connect(); await net.settle();
-  assert.equal(store.state.tasks[id].done, true, 'the edit landed first');
-  a.link.goOnline(); a.connect(); await net.settle();
-
-  assert.equal(store.state.tasks[id], undefined, 'the newer deletion removed the record');
-  assert.equal(b.collection('tasks').has(id), false, 'the editor was corrected to the deletion');
-  assert.deepEqual(snap(a), store.snapshot());
-  assert.deepEqual(snap(b), store.snapshot());
+  await net.settle();
+  now.advance(10);
+  a.state.tasks.k.title = 'Eggs';
+  await net.settle();
+  a.undo();
+  await net.settle();
+  assert.deepEqual(snap(b).tasks.k, { title: 'Milk', done: true });
+  assert.deepEqual(snap(a), snap(b));
 });
 
-test('an array of records outside a register is reverted locally, reported, and never sent', async () => {
-  const { store, net } = setup();
-  const a = net.client({ replicaId: 'a', initial: INITIAL, registers: REGISTERS });
-  await net.settle();
-  const errors = [];
-  a.on('error', err => errors.push(err));
-
-  a.state.tags = [{ id: 'urgent' }];
-  await net.settle();
-
-  assert.equal(errors.length, 1);
-  assert.match(errors[0].message, /The array at "tags" holds objects/);
-  assert.equal(a.state.tags, undefined, 'the write was rolled back');
-  assert.equal(a.pending, 0, 'nothing was queued');
-  assert.equal(store.state.tags, undefined);
-  assert.equal(a.canUndo, false, 'a rejected batch is not an undo step');
+test('a register is written and merged whole', async () => {
+  const { net, now } = setup();
+  const store2 = createStore({ ...SHAPE, registers: ['tasks/*/geo'], now });
+  const net2 = createNetwork(store2);
+  const a = net2.client({ replicaId: 'a', ...SHAPE, registers: ['tasks/*/geo'], now });
+  const b = net2.client({ replicaId: 'b', ...SHAPE, registers: ['tasks/*/geo'], now });
+  await net2.settle();
+  a.state.tasks.w = { geo: { x: 1, y: 1 } };
+  await net2.settle();
+  a.link.goOffline();
+  await net2.settle();
+  a.state.tasks.w.geo.x = 5;
+  await net2.settle();
+  now.advance(10);
+  b.state.tasks.w.geo.y = 9;
+  await net2.settle();
+  a.link.goOnline(); a.connect();
+  await net2.settle();
+  assert.deepEqual(snap(a).tasks.w.geo, { x: 1, y: 9 }, 'the later whole value wins; a\'s x is not merged in');
+  assert.deepEqual(snap(a), snap(b));
+  assert.ok(net);
 });
 
-test('a register array travels whole and the newest value wins', async () => {
-  const { store, net } = setup();
-  const timeA = fakeTime(1_000_000);
-  const timeB = fakeTime(1_000_000);
-  const a = net.client({ replicaId: 'a', initial: INITIAL, registers: REGISTERS, now: timeA });
-  const b = net.client({ replicaId: 'b', initial: INITIAL, registers: REGISTERS, now: timeB });
+test('a write that breaks the shape is reverted and reported', async () => {
+  const { net, client } = setup();
+  const a = client('a');
   await net.settle();
-  a.state.order.push('x', 'y');
+  const rejected = [];
+  a.on('rejected', event => rejected.push(event));
+  a.state.nothing = { x: 1 };
   await net.settle();
-  assert.deepEqual(b.state.order, ['x', 'y']);
-
-  a.link.goOffline(); b.link.goOffline(); await net.settle();
-  timeA.advance(30);
-  a.state.order.reverse();                 // ['y', 'x'] at the later time
-  timeB.advance(10);
-  b.state.order.push('z');                 // ['x', 'y', 'z'] earlier
-  await net.settle();
-  a.link.goOnline(); a.connect(); await net.settle();
-  b.link.goOnline(); b.connect(); await net.settle();
-
-  assert.deepEqual(store.state.order, ['y', 'x']);
-  assert.deepEqual(a.state.order, ['y', 'x']);
-  assert.deepEqual(b.state.order, ['y', 'x'], 'the older whole-value write lost entirely');
+  assert.equal(rejected.length, 1);
+  assert.equal(a.state.nothing, undefined);
+  assert.equal(a.pending, 0);
 });
 
-test('undo reverts only this replica\'s edits and survives a teammate\'s insert', async () => {
-  const { net } = setup();
-  const a = net.client({ replicaId: 'a', initial: INITIAL, registers: REGISTERS });
-  const b = net.client({ replicaId: 'b', initial: INITIAL, registers: REGISTERS });
+test('the server\'s own patch merges, makes what is missing, and reaches clients', async () => {
+  const { store, net, client } = setup();
+  const a = client('a');
   await net.settle();
-  const id = a.collection('tasks').add({ title: 'Mine', done: false });
+  store.patch({ tasks: { r: { runs: { d1: 'running' } } } });
+  store.patch({ tasks: { r: { runs: { d2: 'failed' } } } });
   await net.settle();
-  a.collection('tasks').update(id, { done: true });
+  assert.deepEqual(snap(a).tasks.r, { runs: { d1: 'running', d2: 'failed' } });
+  store.patch({ tasks: { r: null } });
   await net.settle();
-  b.collection('tasks').add({ title: 'Theirs' });        // a keyed insert: no shape change on a's history
-  b.collection('tasks').update(id, { title: 'Renamed by B' });
-  await net.settle();
-
-  assert.equal(a.canUndo, true);
-  assert.equal(a.undo(), true);
-  await net.settle();
-  assert.equal(a.collection('tasks').get(id).done, false, 'own edit reverted');
-  assert.equal(a.collection('tasks').get(id).title, 'Renamed by B', 'remote field edit kept');
-  assert.equal(a.collection('tasks').ids().length, 2, 'remote insert kept');
-  assert.equal(b.collection('tasks').get(id).done, false, 'the undo reached the other replica');
-});
-
-test('an outbox persisted before a reload is sent on the next connect, and duplicates are ignored', async () => {
-  const { store, net } = setup();
-  const storage = memoryOutbox();
-  const link = net.link();
-  link.goOffline();
-  const { createClient } = await import('../src/client/index.js');
-  const first = createClient({ transport: link.factory, reconnect: false, store: 'main', initial: INITIAL, registers: REGISTERS, storage, replicaId: 'a' });
-  const id = first.collection('tasks').add({ title: 'Survives reload' });
-  await net.settle();
-  assert.equal(storage.load().ops.length, 1);
-  first.dispose();
-
-  link.goOnline();
-  const second = createClient({ transport: link.factory, reconnect: false, store: 'main', initial: INITIAL, registers: REGISTERS, storage });
-  assert.equal(second.replicaId, 'a', 'the replica id is restored with the outbox');
-  second.connect();
-  await net.settle();
-  assert.deepEqual(store.state.tasks[id], { title: 'Survives reload', id });
-  assert.equal(second.pending, 0);
-
-  // A resent hello with the same ops changes nothing
-  const before = store.version;
-  store.session({ send: () => {} }).receive({ t: 'hello', proto: PROTOCOL, replicaId: 'a', ops: storage.load().ops.concat([{ replicaId: 'a', seq: 1, ts: [1, 0, 'a'], diff: { tasks: { [id]: { title: 'stale' } } } }]) });
-  assert.equal(store.version, before);
-  assert.equal(store.state.tasks[id].title, 'Survives reload');
-});
-
-test('a client restarted offline starts from its cached state with pending edits, and converges once back online', async () => {
-  const { store, net } = setup();
-  const storage = memoryOutbox();
-  const link = net.link();
-  const { createClient } = await import('../src/client/index.js');
-  const first = createClient({ transport: link.factory, reconnect: false, store: 'main', initial: INITIAL, registers: REGISTERS, storage, replicaId: 'a' });
-  first.connect();
-  await net.settle();
-  assert.equal(first.restored, false);
-  const id = first.collection('tasks').add({ title: 'Synced', done: false });
-  first.state.order.push(id);
-  await net.settle();
-
-  link.goOffline();
-  await net.settle();
-  first.collection('tasks').update(id, { done: true });      // stays pending
-  await net.settle();
-  assert.equal(first.pending, 1);
-  first.dispose();                                            // the tab is reloaded while offline
-  store.patch({ tasks: { [id]: { title: 'Renamed while away' } } });  // a teammate edits meanwhile
-
-  const second = createClient({ transport: link.factory, reconnect: false, store: 'main', initial: INITIAL, registers: REGISTERS, storage });
-  assert.equal(second.restored, true);
-  assert.equal(second.status, 'offline');
-  assert.deepEqual({ ...second.collection('tasks').get(id) }, { title: 'Synced', done: true, id }, 'the cached state includes the pending edit');
-  assert.deepEqual([...second.state.order], [id], 'registers are cached too');
-  assert.equal(second.pending, 1, 'the pending op survived with it');
-
-  link.goOnline();
-  second.connect();
-  await net.settle();
-  assert.equal(second.status, 'online');
-  assert.equal(second.pending, 0);
-  assert.deepEqual({ ...second.collection('tasks').get(id) }, { title: 'Renamed while away', done: true, id }, 'both sides\' edits merged');
-  assert.deepEqual(snap(second), store.snapshot());
-
-  const uncached = createClient({ transport: link.factory, reconnect: false, store: 'main', initial: INITIAL, registers: REGISTERS, storage, cache: false });
-  assert.equal(uncached.restored, false, 'cache: false starts from initial even with a cached state present');
-  assert.deepEqual(snap(uncached), INITIAL);
-});
-
-test('the server persists state and clocks through its storage adapter', async () => {
-  const storage = memoryStorage();
-  const one = createStore({ initial: INITIAL, registers: REGISTERS, storage });
-  one.patch({ tasks: { a: { id: 'a', title: 'Kept' } } });
-  one.patch({ tasks: { a: null } });
-  one.dispose();
-
-  const two = createStore({ initial: INITIAL, registers: REGISTERS, storage });
-  assert.deepEqual(two.snapshot(), { tasks: {}, order: [] });
-  // The tombstone survived: an older write from a replica that never saw the deletion is refused
-  const r = two.apply({ replicaId: 'late', seq: 1, ts: [1, 0, 'late'], diff: { tasks: { a: { title: 'ghost' } } } });
-  assert.equal(r.accepted, null);
-  assert.deepEqual(r.correction, { tasks: { a: null } });
-});
-
-test('a client whose registers differ from the server\'s is told so on every snapshot', async () => {
-  const { net } = setup();                                        // server declares ['order']
-  const agreed = net.client({ replicaId: 'ok', initial: INITIAL, registers: REGISTERS });
-  const differs = net.client({ replicaId: 'no', initial: INITIAL, registers: ['order', 'tags'] });
-  const errors = [];
-  agreed.on('error', err => errors.push(['ok', err.code]));
-  differs.on('error', err => errors.push(['no', err.code, err.message]));
-  await net.settle();
-  assert.equal(agreed.status, 'online');
-  assert.equal(differs.status, 'online', 'a mismatch is reported, not fatal');
-  assert.deepEqual(errors, [['no', 'registers-mismatch', 'Register paths differ: this client declares [order, tags], the server [order]']]);
-});
-
-test('a server-side patch reaches connected clients', async () => {
-  const { store, net } = setup();
-  const a = net.client({ replicaId: 'a', initial: INITIAL, registers: REGISTERS });
-  await net.settle();
-  store.patch({ tasks: { s: { id: 's', title: 'From the server' } } });
-  await net.settle();
-  assert.deepEqual(a.collection('tasks').get('s'), { id: 's', title: 'From the server' });
-});
-
-test('a patch that never arrived is noticed by the next one\'s version, and the client catches up from where it was', async () => {
-  const store = createStore({ initial: { tasks: {} } });
-  let drop = 0;   // patches still to lose on their way to b
-  const net = createNetwork({
-    session: ({ send, user }) => createHub(() => store, { send, user })
-  });
-  const lossy = createNetwork({
-    session: ({ send, user }) => createHub(() => store, {
-      send: m => { if (m.t === 'patch' && drop > 0) { drop--; return; } send(m); },
-      user
-    })
-  });
-  const a = net.client({ replicaId: 'a', initial: { tasks: {} } });
-  const b = lossy.client({ replicaId: 'b', initial: { tasks: {} } });
-  const settle = async () => { for (let i = 0; i < 3; i++) { await net.settle(); await lossy.settle(); } };
-  await settle();
-  drop = 1;
-  a.collection('tasks').add({ id: 'lost' });
-  await settle();
-  assert.equal(b.state.tasks.lost, undefined, 'the patch was dropped');
-  a.collection('tasks').add({ id: 'next' });
-  await settle();
-  assert.deepEqual(Object.keys(b.state.tasks).sort(), ['lost', 'next'], 'the gap brought a catch-up');
-  assert.equal(b.version, store.version);
-  assert.equal(b.status, 'online');
+  assert.equal(a.state.tasks.r, undefined);
 });

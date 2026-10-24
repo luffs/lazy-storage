@@ -1,105 +1,91 @@
 // persistence.js - What a client writes to its storage adapter, and how
 //
+// A client keeps two things: its OUTBOX (the ops the server has not
+// acknowledged) and its BASE (the state as the server last told it, with
+// the version and epoch it is at). The view the app sees is the base with
+// the outbox replayed on top, so nothing else needs keeping: a reload
+// builds the view the same way.
+//
 // Two kinds of adapter, told apart by whether `commit` exists:
 //
 // A DOCUMENT adapter ({ load, save, saveState }) keeps the outbox as one
-// document, written whenever it changes, and the state as another. One
-// that also takes the outbox op by op (saveOp, removeOp, dropOps, as
-// localStorageOutbox does) is handed each change instead, so an op costs
-// its own write rather than a rewrite of every op pending. The state costs
-// a serialization of everything, so it is written once changes have
-// settled for `cacheDelay` (and at least every ten of those under traffic
-// that never settles), when the page is hidden or goes away, and on
-// dispose. It may lag: it is saved with the version it reflects, a restore
-// replays the outbox over it, and the reconnect asks for what came since.
+// document, written whenever it changes (op by op when it has saveOp,
+// removeOp and dropOps, as localStorageOutbox does), and the base as
+// another, `saveState({ state, version, epoch })`. The base costs a
+// serialization of everything, so it is written once changes have settled
+// for `cacheDelay` (at least every ten of those under traffic that never
+// settles), when the page is hidden, and on dispose. It may lag: it is
+// saved with the version it reflects, and the reconnect asks for what came
+// since.
 //
-// A ROW adapter ({ load, commit, replace, saveOp, removeOp, dropOps })
-// keeps one row per leaf and one per pending op, so a batch costs the
-// leaves it touched: every diff the state sees is walked into leaves
-// (registers as whole values) and handed over as puts and deletes, where
-// a delete removes the path and everything under it. When a snapshot
-// lands the rows are replaced from the state, which also heals any row a
-// failed write left behind. An op is written with `saveOp` (again when a
-// newer op pruned it), removed one at a time with `removeOp` when a newer
-// op emptied it, and dropped up to an acknowledged seq with `dropOps`.
-// Every write carries the client's meta ({ replicaId, seq, version,
-// epoch }) so the adapter stores it in the same transaction.
-// A row adapter's load() may return a promise (IndexedDB does), which is
-// what openClient() is for.
-import { LazyWatch } from 'lazy-watch';
-import { leaves, expandRegisters } from '../core/model.js';
-import { pathKey } from '../core/paths.js';
+// A ROW adapter ({ load, commit, replace, saveOp, removeOp, dropOps }) keeps
+// one row per record of the base and one per pending op, so a patch costs
+// the records it touched: `commit({ puts: [[c, id, data]], deletes: [[c,
+// id]], meta })`, and `replace({ records, meta })` when a snapshot lands.
+// Every write carries the client's meta ({ replicaId, seq, version, epoch })
+// so the adapter stores it in the same transaction. Its load() may return a
+// promise (IndexedDB does), which is what openClient() is for.
 
 export const isRowAdapter = storage => typeof storage?.commit === 'function';
-
-/** A diff as row puts and deletes; register fragments are read whole from the live state */
-function toRows(diff, regs, state) {
-  const puts = [];
-  const deletes = [];
-  for (const [path, value] of leaves(expandRegisters(diff, regs, state), regs)) {
-    if (value === null) deletes.push(pathKey(path));
-    else puts.push([pathKey(path), value]);
-  }
-  return { puts, deletes };
-}
-
-/** Every leaf of a plain state as a row */
-export const stateRows = (state, regs) => leaves(state, regs).map(([path, value]) => [pathKey(path), value]);
 
 /**
  * @param {Object} deps
  * @param {Object} deps.storage - the adapter
- * @param {boolean} deps.cache - whether the state is persisted at all
- * @param {Object} deps.regs - the register matcher
- * @param {() => Object} deps.state - the live state
+ * @param {boolean} deps.cache - whether the base is persisted at all
+ * @param {Object} deps.shape
+ * @param {() => Object} deps.base - the base state (plain)
  * @param {() => {replicaId: string, seq: number, version: number, epoch: string|null}} deps.meta
  * @param {() => Object[]} deps.ops - the outbox
- * @param {(error: any) => void} deps.onError - a batch that could not be persisted
- * @param {number} [deps.cacheDelay=1000] - a document adapter's state is
- *   written once changes have settled for this long (ms)
+ * @param {(error: any) => void} deps.onError
+ * @param {number} [deps.cacheDelay=1000]
  */
-export function createPersistence({ storage, cache, regs, state, meta, ops, onError, cacheDelay = 1000 }) {
+export function createPersistence({ storage, cache, shape, base, meta, ops, onError, cacheDelay = 1000 }) {
+  const guard = fn => (...args) => {
+    try {
+      return fn(...args);
+    } catch (err) {
+      onError(err);
+    }
+  };
+  const recordOf = (c, id) => (shape.isSingleton(c) ? base()[c] : base()[c]?.[id]);
+  const allRecords = () => {
+    const out = [];
+    for (const c of shape.collections) for (const id of Object.keys(base()[c] ?? {})) out.push([c, id, structuredClone(base()[c][id])]);
+    for (const c of shape.singletons) out.push([c, null, structuredClone(base()[c])]);
+    return out;
+  };
+
   if (isRowAdapter(storage)) {
-    // The adapter lost what it held (IndexedDB deleted by another tab):
-    // everything is written again, the state's rows and every pending op
-    const stopReset = typeof storage.onReset === 'function' ? storage.onReset(() => {
+    const rewrite = () => {
       const m = meta();
-      try {
-        if (cache) storage.replace({ rows: stateRows(LazyWatch.snapshot(state()), regs), meta: m });
-        for (const op of ops()) storage.saveOp(op, m);
-      } catch (err) {
-        onError(err);
-      }
-    }) : null;
+      if (cache) storage.replace({ records: allRecords(), meta: m });
+      for (const op of ops()) storage.saveOp(op, m);
+    };
+    const stopReset = typeof storage.onReset === 'function' ? storage.onReset(guard(rewrite)) : null;
     return {
       rows: true,
-      /** A new op, after what it superseded in older ones: those rewritten, and the seqs of those emptied */
-      op(op, superseded) {
+      op: guard((op, superseded) => {
         const m = meta();
         for (const older of superseded?.changed ?? []) storage.saveOp(older, m);
         for (const seq of superseded?.removed ?? []) storage.removeOp(seq, m);
         storage.saveOp(op, m);
-      },
-      drop: seq => storage.dropOps(seq, meta()),
-      /** A batch the state just applied; `batchMeta.snapshot` marks a whole new state */
-      batch(diff, batchMeta) {
-        if (!cache) return;
-        try {
-          if (batchMeta?.snapshot) {
-            storage.replace({ rows: stateRows(LazyWatch.snapshot(state()), regs), meta: meta() });
-          } else {
-            const { puts, deletes } = toRows(diff, regs, state());
-            if (puts.length || deletes.length) storage.commit({ puts, deletes, meta: meta() });
-          }
-        } catch (err) {
-          // A state the model cannot express in rows (registers that
-          // differ from the server's, reported separately); the next
-          // snapshot replaces the rows wholesale
-          onError(err);
+      }),
+      drop: guard(seq => storage.dropOps(seq, meta())),
+      remove: guard(seq => storage.removeOp(seq, meta())),
+      /** The base changed for these records ([c, id] pairs) */
+      base: guard(touched => {
+        if (!cache || !touched.length) return;
+        const puts = [];
+        const deletes = [];
+        for (const [c, id] of touched) {
+          const record = recordOf(c, id);
+          if (record === undefined) deletes.push([c, id ?? null]);
+          else puts.push([c, id ?? null, structuredClone(record)]);
         }
-      },
-      /** The version moved without the state changing: the next drop or op carries it */
-      version() {},
+        storage.commit({ puts, deletes, meta: meta() });
+      }),
+      snapshot: guard(() => { if (cache) storage.replace({ records: allRecords(), meta: meta() }); }),
+      version: guard(() => { if (cache) storage.commit({ puts: [], deletes: [], meta: meta() }); }),
       flush() {},
       dispose() {
         if (typeof stopReset === 'function') stopReset();
@@ -108,35 +94,30 @@ export function createPersistence({ storage, cache, regs, state, meta, ops, onEr
   }
 
   const incremental = typeof storage.saveOp === 'function';
-  // The first outbox write of a life goes whole, so an adapter still
-  // holding another replica's ops (a client started with an id of its
-  // own) is brought in line; op by op after that
   let whole = true;
   let timer = null;
-  let dirtySince = null;   // when the state changed first since it was last written
-  function writeOutbox() {
+  let dirtySince = null;
+  const writeOutbox = () => {
     const { replicaId, seq } = meta();
     storage.save({ replicaId, seq, ops: ops() });
-  }
-  function writeState() {
+  };
+  const writeBase = guard(() => {
     clearTimeout(timer);
     timer = null;
     dirtySince = null;
     if (!cache) return;
     const { version, epoch } = meta();
-    storage.saveState({ state: LazyWatch.snapshot(state()), version, epoch });
-  }
-  /** Write the state once changes settle, and no later than ten delays after the first */
-  function stateSoon() {
+    storage.saveState({ state: structuredClone(base()), version, epoch });
+  });
+  function soon() {
     if (!cache) return;
     const now = Date.now();
     if (dirtySince === null) dirtySince = now;
     clearTimeout(timer);
-    timer = setTimeout(writeState, Math.max(0, Math.min(cacheDelay, dirtySince + 10 * cacheDelay - now)));
+    timer = setTimeout(writeBase, Math.max(0, Math.min(cacheDelay, dirtySince + 10 * cacheDelay - now)));
     if (typeof timer?.unref === 'function') timer.unref();
   }
-  const flush = () => { if (timer) writeState(); };
-  // A page being hidden may be the last chance it gets: what is pending goes now
+  const flush = () => { if (timer) writeBase(); };
   const onHide = event => {
     if (event?.type === 'pagehide' || globalThis.document?.visibilityState === 'hidden') flush();
   };
@@ -146,7 +127,7 @@ export function createPersistence({ storage, cache, regs, state, meta, ops, onEr
   }
   return {
     rows: false,
-    op(op, superseded) {
+    op: guard((op, superseded) => {
       if (!incremental || whole) {
         whole = false;
         return writeOutbox();
@@ -155,16 +136,24 @@ export function createPersistence({ storage, cache, regs, state, meta, ops, onEr
       for (const seq of superseded?.removed ?? []) storage.removeOp(seq, m);
       for (const older of superseded?.changed ?? []) storage.saveOp(older, m);
       storage.saveOp(op, m);
-    },
-    drop(seq) {
+    }),
+    drop: guard(seq => {
       if (!incremental || whole) {
         whole = false;
         return writeOutbox();
       }
       storage.dropOps(seq, meta());
-    },
-    batch: () => stateSoon(),
-    version: () => stateSoon(),
+    }),
+    remove: guard(seq => {
+      if (!incremental || whole) {
+        whole = false;
+        return writeOutbox();
+      }
+      storage.removeOp(seq, meta());
+    }),
+    base: () => soon(),
+    snapshot: () => soon(),
+    version: () => soon(),
     flush,
     dispose() {
       globalThis.removeEventListener?.('pagehide', onHide);
