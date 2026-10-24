@@ -30,7 +30,7 @@
 // `shutdown()` that does this and then stops the server.
 import { LazyWatch } from 'lazy-watch';
 import { createHub } from './hub.js';
-import { createRelayLink, credentialRequest, relaySockets } from './relays.js';
+import { followerHub, credentialRequest } from './follow.js';
 import { toJSON, closeUnauthorized, deflateOptions, TOO_FAR_BEHIND, REAUTHENTICATE, MIN_SESSION_MS, expiryOf, runAt, rollUpSockets } from './wire.js';
 import { snapshotOptions, snapshotId, serveSnapshot } from './snapshot.js';
 
@@ -292,7 +292,7 @@ export function createHandlers({
         }
       };
       if (ws.data.relay !== undefined) {
-        links.set(ws, createRelayLink(resolveStore, { send: message => send(ws, message), relay: ws.data.relay, admit, authorizeRelay: relays.authorize, authorizeId, authorize, channel, linger: relays.linger, rate: relays.rate, onError }));
+        links.set(ws, followerHub(resolveStore, { send: message => send(ws, message), relay: ws.data.relay, admit, authorizeRelay: relays.authorize, authorizeId, authorize, channel, onError }));
         const relayTimes = { opened: Date.now(), heard: Date.now(), expires: ws.data.expires ?? null, cancel: null };
         seen.set(ws, relayTimes);
         // A relay's own session runs out as a client's does: closed, and it comes back judged afresh
@@ -398,7 +398,7 @@ export function createHandlers({
     // this would have
     for (const [ws, link] of [...links]) {
       if (filter && !filter(link.relay)) {
-        count += link.disconnect(filter);
+        count += link.revoke(filter);
         continue;
       }
       reauthenticate(ws);
@@ -443,7 +443,7 @@ export function createHandlers({
     }
     for (const [ws, link] of links) {
       const times = seen.get(ws);
-      if (times) out.push(...relaySockets(link, { buffered: ws.getBufferedAmount(), idleMs: now - times.heard, openMs: now - times.opened }, now));
+      if (times) out.push({ relay: link.relay, stores: link.stores, buffered: ws.getBufferedAmount(), idleMs: now - times.heard, openMs: now - times.opened, expiresAt: times.expires });
     }
     return out;
   }

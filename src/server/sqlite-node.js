@@ -1,4 +1,4 @@
-// sqlite-node.js - Row-per-leaf persistence on node:sqlite (Node 22.13+)
+// sqlite-node.js - Row-per-record persistence on node:sqlite (Node 22.13+)
 //
 //   import { sqliteStorage } from 'lazy-storage/server/sqlite-node';
 //   const sqlite = sqliteStorage('data/app.sqlite');

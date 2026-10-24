@@ -1,9 +1,9 @@
-// sqlite-bun.js - Row-per-leaf persistence on bun:sqlite
+// sqlite-bun.js - Row-per-record persistence on bun:sqlite
 //
 //   const sqlite = sqliteStorage('data/app.sqlite');
-//   const store = createStore({ initial, registers, storage: sqlite.store('team-1') });
+//   const store = createStore({ initial, singletons, registers, storage: sqlite.store('team-1') });
 //
-// See sqlite-shared.js for the schema and the row model; this file only
+// See sqlite-shared.js for the schema and the records; this file only
 // supplies the driver.
 import { Database } from 'bun:sqlite';
 import { sqliteStorageOn } from './sqlite-shared.js';

@@ -1,17 +1,17 @@
-// sqlite-shared.js - Row-per-leaf persistence on SQLite, for any driver
+// sqlite-shared.js - Row-per-record persistence on SQLite, for any driver
 //
-// One database file holds any number of stores. Every leaf path is a row
-// in `leaves`, keyed by (store, path): live rows carry the JSON value and
-// the timestamp that won it, tombstones and barriers the timestamp only. A
-// commit is one transaction with exactly the upserts and deletes the op
-// produced, so the write cost of an edit is a few rows, not the state.
-// The delta log lives alongside (`log`), pruned to the floor the store
+// One database file holds any number of stores. Every record is a row in
+// `records`, keyed by (store, collection, id), `id` '' for a singleton:
+// its JSON data and its clock (the times by path the merge decides by,
+// core/doc.js). A commit is one transaction with exactly the records the
+// op touched, so the write cost of an edit is a row or two, not the state.
+// The delta log lives alongside (`oplog`), pruned to the floor the store
 // names, so a restart still answers reconnects with deltas.
 //
-// Paths are JSON-encoded arrays, so the descendants of a path share a
-// prefix ('["tasks","a",'), and the (store, path) primary key serves
-// prefix scans; the merge does its own descendant bookkeeping through
-// `deletes`, so the adapter never needs to scan.
+// A file written by lazy-storage before 1.0 keeps its rows in `leaves`, one
+// per leaf, which this adapter does not read: a store found there and not
+// in `records` is refused with code 'storage-format', so that it is
+// migrated (`fromLeaves`, sqlite-migrate.js) rather than served empty.
 //
 // SQLite writes whole pages, 4 KB each, whatever part of them changed, so
 // what a commit costs the disk is the pages it touches, not the size of the
@@ -112,42 +112,20 @@ function checkpointer({ file, driver, exec, onError }) {
   };
 }
 
-// What the `deleted` column says of a row: a live row (0), a tombstone (1), or a
-// barrier (2), a lifted tombstone that holds no value: the re-add's timestamp
-// and, in the `since` columns, `v` and `made_by`, the deletion's timestamp
-// and the re-add's version and replicas (core/merge.js)
-const TOMBSTONE = 1;
-const BARRIER = 2;
-/** A row's columns after (store, path): value, the timestamp's three parts, what the row is, and a barrier's `since`, `v` and `by` */
-const rowColumns = row => [
-  row.deleted || row.made ? null : JSON.stringify(row.value),
-  row.ts[0], row.ts[1], row.ts[2],
-  row.made ? BARRIER : row.deleted ? TOMBSTONE : 0,
-  ...(row.made ? [...row.since, row.v, JSON.stringify(row.by ?? [])] : [null, null, null, null, null])
-];
-
 const SCHEMA = `
-  CREATE TABLE IF NOT EXISTS leaves (
-    store      TEXT    NOT NULL,
-    path       TEXT    NOT NULL,
-    value      TEXT,
-    ts_ms      INTEGER NOT NULL,
-    ts_count   INTEGER NOT NULL,
-    ts_replica TEXT    NOT NULL,
-    deleted    INTEGER NOT NULL DEFAULT 0,
-    since_ms      INTEGER,
-    since_count   INTEGER,
-    since_replica TEXT,
-    v             INTEGER,
-    made_by       TEXT,
-    PRIMARY KEY (store, path)
+  CREATE TABLE IF NOT EXISTS records (
+    store      TEXT NOT NULL,
+    collection TEXT NOT NULL,
+    id         TEXT NOT NULL,
+    data       TEXT NOT NULL,
+    clock      TEXT NOT NULL,
+    PRIMARY KEY (store, collection, id)
   ) WITHOUT ROWID;
   CREATE TABLE IF NOT EXISTS stores (
     store   TEXT    PRIMARY KEY,
     version INTEGER NOT NULL DEFAULT 0,
     epoch   TEXT,
-    schema  INTEGER,
-    horizon INTEGER
+    schema  INTEGER
   ) WITHOUT ROWID;
   CREATE TABLE IF NOT EXISTS replicas (
     store   TEXT    NOT NULL,
@@ -157,10 +135,11 @@ const SCHEMA = `
     owner   TEXT,
     PRIMARY KEY (store, replica)
   ) WITHOUT ROWID;
-  CREATE TABLE IF NOT EXISTS log (
-    store TEXT    NOT NULL,
-    v     INTEGER NOT NULL,
-    diff  TEXT    NOT NULL,
+  CREATE TABLE IF NOT EXISTS oplog (
+    store   TEXT    NOT NULL,
+    v       INTEGER NOT NULL,
+    ts      INTEGER NOT NULL,
+    changes TEXT    NOT NULL,
     PRIMARY KEY (store, v)
   ) WITHOUT ROWID;
   CREATE TABLE IF NOT EXISTS leases (
@@ -171,6 +150,10 @@ const SCHEMA = `
     until  INTEGER NOT NULL
   ) WITHOUT ROWID;
 `;
+
+/** A record's id in its row: '' for a singleton's */
+const rowId = id => (id === null || id === undefined ? '' : id);
+const EMPTY_CLOCK = { live: {}, gone: {} };
 
 /** Whether a process on this machine is alive (true when that cannot be told) */
 function alive(pid) {
@@ -212,41 +195,35 @@ export function sqliteStorageOn({ exec, prepare, transaction, close, db, driver 
   exec(SCHEMA);
   // Files from before replicas had owners, or stores a schema, gain the column
   if (!prepare('PRAGMA table_info(replicas)').all().some(c => c.name === 'owner')) exec('ALTER TABLE replicas ADD COLUMN owner TEXT;');
-  for (const column of ['schema INTEGER', 'horizon INTEGER']) {
-    if (!prepare('PRAGMA table_info(stores)').all().some(c => c.name === column.split(' ')[0])) exec(`ALTER TABLE stores ADD COLUMN ${column};`);
-  }
-  // Files from before barriers gain the columns a barrier row carries: the deletion's timestamp, the re-add's version and replicas
-  for (const column of ['since_ms INTEGER', 'since_count INTEGER', 'since_replica TEXT', 'v INTEGER', 'made_by TEXT']) {
-    if (!prepare('PRAGMA table_info(leaves)').all().some(c => c.name === column.split(' ')[0])) exec(`ALTER TABLE leaves ADD COLUMN ${column};`);
-  }
+  if (!prepare('PRAGMA table_info(stores)').all().some(c => c.name === 'schema')) exec('ALTER TABLE stores ADD COLUMN schema INTEGER;');
+  // A file from before 1.0 has its stores in `leaves` (see the header)
+  const hasLeaves = prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'leaves'").get() != null;
+  const leavesOf = hasLeaves ? prepare('SELECT 1 AS one FROM leaves WHERE store = ? LIMIT 1') : null;
   const background = wal && file !== ':memory:' && checkpoints === 'worker' && driver ? checkpointer({ file, driver, exec, onError }) : null;
 
   const q = {
     upsert: prepare(`
-      INSERT INTO leaves (store, path, value, ts_ms, ts_count, ts_replica, deleted, since_ms, since_count, since_replica, v, made_by)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT (store, path) DO UPDATE SET
-        value = excluded.value, ts_ms = excluded.ts_ms, ts_count = excluded.ts_count,
-        ts_replica = excluded.ts_replica, deleted = excluded.deleted,
-        since_ms = excluded.since_ms, since_count = excluded.since_count, since_replica = excluded.since_replica, v = excluded.v, made_by = excluded.made_by`),
-    del: prepare('DELETE FROM leaves WHERE store = ? AND path = ?'),
-    rows: prepare('SELECT path, value, ts_ms, ts_count, ts_replica, deleted, since_ms, since_count, since_replica, v, made_by FROM leaves WHERE store = ?'),
-    version: prepare('SELECT version, epoch, schema, horizon FROM stores WHERE store = ?'),
+      INSERT INTO records (store, collection, id, data, clock) VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT (store, collection, id) DO UPDATE SET data = excluded.data, clock = excluded.clock`),
+    del: prepare('DELETE FROM records WHERE store = ? AND collection = ? AND id = ?'),
+    records: prepare('SELECT collection, id, data, clock FROM records WHERE store = ?'),
+    any: prepare('SELECT 1 AS one FROM records WHERE store = ? LIMIT 1'),
+    version: prepare('SELECT version, epoch, schema FROM stores WHERE store = ?'),
     setVersion: prepare(`
-      INSERT INTO stores (store, version, epoch, schema, horizon) VALUES (?, ?, ?, ?, ?)
-      ON CONFLICT (store) DO UPDATE SET version = excluded.version, epoch = excluded.epoch, schema = COALESCE(excluded.schema, stores.schema), horizon = COALESCE(excluded.horizon, stores.horizon)`),
+      INSERT INTO stores (store, version, epoch, schema) VALUES (?, ?, ?, ?)
+      ON CONFLICT (store) DO UPDATE SET version = excluded.version, epoch = excluded.epoch, schema = COALESCE(excluded.schema, stores.schema)`),
     replicas: prepare('SELECT replica, seq, seen, owner FROM replicas WHERE store = ?'),
     setReplica: prepare(`
       INSERT INTO replicas (store, replica, seq, seen, owner) VALUES (?, ?, ?, ?, ?)
       ON CONFLICT (store, replica) DO UPDATE SET seq = excluded.seq, seen = excluded.seen, owner = COALESCE(replicas.owner, excluded.owner)`),
     forgetReplica: prepare('DELETE FROM replicas WHERE store = ? AND replica = ?'),
     ids: prepare('SELECT store FROM stores ORDER BY store'),
-    putLog: prepare('INSERT INTO log (store, v, diff) VALUES (?, ?, ?) ON CONFLICT (store, v) DO UPDATE SET diff = excluded.diff'),
-    pruneLog: prepare('DELETE FROM log WHERE store = ? AND v < ?'),
-    log: prepare('SELECT v, diff FROM log WHERE store = ? ORDER BY v'),
-    dropLeaves: prepare('DELETE FROM leaves WHERE store = ?'),
+    putLog: prepare('INSERT INTO oplog (store, v, ts, changes) VALUES (?, ?, ?, ?) ON CONFLICT (store, v) DO UPDATE SET ts = excluded.ts, changes = excluded.changes'),
+    pruneLog: prepare('DELETE FROM oplog WHERE store = ? AND v < ?'),
+    log: prepare('SELECT v, ts, changes FROM oplog WHERE store = ? ORDER BY v'),
+    dropRecords: prepare('DELETE FROM records WHERE store = ?'),
     dropReplicas: prepare('DELETE FROM replicas WHERE store = ?'),
-    dropLog: prepare('DELETE FROM log WHERE store = ?'),
+    dropLog: prepare('DELETE FROM oplog WHERE store = ?'),
     dropStore: prepare('DELETE FROM stores WHERE store = ?'),
     dropLease: prepare('DELETE FROM leases WHERE store = ?')
   };
@@ -313,7 +290,7 @@ export function sqliteStorageOn({ exec, prepare, transaction, close, db, driver 
     const last = changes[changes.length - 1];
     // The version first: every commit writes it, and that first write takes
     // the file's write lock, so the lease read below is the latest
-    q.setVersion.run(id, last.version, last.epoch, Number.isInteger(last.schema) ? last.schema : null, Number.isInteger(last.horizon) ? last.horizon : null);
+    q.setVersion.run(id, last.version, last.epoch, Number.isInteger(last.schema) ? last.schema : null);
     if (leasing) {
       // Still ours, or another process has the store now and this one must not write
       const current = lq.get.get(id);
@@ -326,19 +303,19 @@ export function sqliteStorageOn({ exec, prepare, transaction, close, db, driver 
       const now = Date.now();
       if (current.until - now < ttl / 2) lq.renew.run(now + ttl, id, holder);
     }
-    const leaves = new Map();     // path key -> its row as the changes leave it; null: deleted
+    const records = new Map();    // [collection, id] -> its row as the changes leave it; null: deleted
     const replicas = new Map();   // replica id -> its progress as they leave it; null: forgotten
     for (const change of changes) {
-      // In the order one change's own rows go: its deletes, then its upserts
-      for (const key of change.deletes) leaves.set(key, null);
-      for (const [key, row] of change.upserts) leaves.set(key, row);
+      for (const [c, rid] of change.deletes ?? []) records.set(JSON.stringify([c, rowId(rid)]), null);
+      for (const [c, rid, data, clock] of change.upserts ?? []) records.set(JSON.stringify([c, rowId(rid)]), [data, clock]);
       if (change.replica) replicas.set(change.replica.id, change.replica);
       for (const replica of change.forgetReplicas ?? []) replicas.set(replica, null);
-      if (change.log) q.putLog.run(id, change.log.v, JSON.stringify(change.log.diff));
+      if (change.log) q.putLog.run(id, change.log.v, change.log.ts, JSON.stringify(change.log.changes));
     }
-    for (const [key, row] of leaves) {
-      if (row === null) q.del.run(id, key);
-      else q.upsert.run(id, key, ...rowColumns(row));
+    for (const [key, row] of records) {
+      const [c, rid] = JSON.parse(key);
+      if (row === null) q.del.run(id, c, rid);
+      else q.upsert.run(id, c, rid, JSON.stringify(row[0]), JSON.stringify(row[1] ?? EMPTY_CLOCK));
     }
     for (const [replica, r] of replicas) {
       if (r === null) q.forgetReplica.run(id, replica);
@@ -348,19 +325,16 @@ export function sqliteStorageOn({ exec, prepare, transaction, close, db, driver 
   });
 
   const replace = transaction((id, doc) => {
-    q.dropLeaves.run(id);
+    q.dropRecords.run(id);
     q.dropReplicas.run(id);
     q.dropLog.run(id);
-    for (const [key, row] of doc.rows) {
-      q.upsert.run(id, key, ...rowColumns(row));
-    }
+    for (const [c, rid, data, clock] of doc.records) q.upsert.run(id, c, rowId(rid), JSON.stringify(data), JSON.stringify(clock ?? EMPTY_CLOCK));
     for (const [replica, r] of Object.entries(doc.replicas ?? {})) q.setReplica.run(id, replica, r.seq, r.seen ?? null, r.owner ?? null);
-    // The document's horizon, or none: the replaced store's belongs to a lineage the new epoch is not in
-    q.setVersion.run(id, doc.version, newEpoch(), Number.isInteger(doc.schema) ? doc.schema : null, Number.isInteger(doc.horizon) ? doc.horizon : 0);
+    q.setVersion.run(id, doc.version, newEpoch(), Number.isInteger(doc.schema) ? doc.schema : null);
   });
 
   const remove = transaction(id => {
-    q.dropLeaves.run(id);
+    q.dropRecords.run(id);
     q.dropReplicas.run(id);
     q.dropLog.run(id);
     q.dropStore.run(id);
@@ -394,17 +368,16 @@ export function sqliteStorageOn({ exec, prepare, transaction, close, db, driver 
           acquire(id);
           const meta = q.version.get(id);
           if (!meta) return null;
-          const rows = q.rows.all(id).map(r => [
-            r.path,
-            r.deleted === BARRIER
-              ? { ts: [r.ts_ms, r.ts_count, r.ts_replica], made: true, since: [r.since_ms, r.since_count, r.since_replica], v: r.v, by: JSON.parse(r.made_by) }
-              : r.deleted
-                ? { ts: [r.ts_ms, r.ts_count, r.ts_replica], deleted: true }
-                : { value: JSON.parse(r.value), ts: [r.ts_ms, r.ts_count, r.ts_replica] }
-          ]);
+          if (leavesOf?.get(id) && !q.any.get(id)) {
+            this.close();
+            const err = new Error(`Store "${id}" was written by lazy-storage before 1.0, one row per leaf: migrate the file with fromLeaves before serving it`);
+            err.code = 'storage-format';
+            throw err;
+          }
+          const records = q.records.all(id).map(r => [r.collection, r.id === '' ? null : r.id, JSON.parse(r.data), JSON.parse(r.clock)]);
           const replicas = Object.fromEntries(q.replicas.all(id).map(r => [r.replica, r.owner === null ? { seq: r.seq, seen: r.seen } : { seq: r.seq, seen: r.seen, owner: r.owner }]));
-          const log = q.log.all(id).map(r => ({ v: r.v, diff: JSON.parse(r.diff) }));
-          return { rows, replicas, version: meta.version, epoch: meta.epoch, ...(meta.schema === null || meta.schema === undefined ? {} : { schema: meta.schema }), ...(meta.horizon === null || meta.horizon === undefined ? {} : { horizon: meta.horizon }), log };
+          const log = q.log.all(id).map(r => ({ v: r.v, ts: r.ts, changes: JSON.parse(r.changes) }));
+          return { records, replicas, version: meta.version, epoch: meta.epoch, ...(meta.schema === null || meta.schema === undefined ? {} : { schema: meta.schema }), log };
         },
         commit: change => commitMany([change]),
         commitMany,
@@ -443,7 +416,7 @@ export function sqliteStorageOn({ exec, prepare, transaction, close, db, driver 
     },
     /** Ids of every store that has committed at least once */
     ids: () => q.ids.all().map(r => r.store),
-    /** Delete a store's rows, replicas, log, and version */
+    /** Delete a store's records, replicas, log, and version */
     remove(id) {
       assertId(id);
       remove(id);
@@ -465,6 +438,79 @@ export function sqliteStorageOn({ exec, prepare, transaction, close, db, driver 
       } finally {
         exec('DETACH DATABASE lazy_backup;');
       }
+    },
+    /**
+     * Move the stores a file from before 1.0 keeps in `leaves` (one row per
+     * leaf) into `records`, one transaction a store, and drop their leaf rows
+     * and their delta log (which spoke of leaves). `shapeOf(storeId)` says
+     * which top-level keys are singletons (`{ singletons }`, or the store's
+     * whole shape); every other key is a collection whose records are its
+     * keys. Each leaf's time becomes its path's time in its record's clock,
+     * a deletion inside a living record a deleted path, and a record deleted
+     * whole is left out. The stores get a new epoch, so every client takes a
+     * snapshot. Run it with no store loaded. Returns the ids it moved
+     */
+    fromLeaves(shapeOf = () => ({})) {
+      if (!hasLeaves) return [];
+      const ids = prepare('SELECT DISTINCT store FROM leaves').all().map(r => r.store);
+      const rowsOf = prepare('SELECT path, value, ts_ms, deleted FROM leaves WHERE store = ?');
+      const dropLeaves = prepare('DELETE FROM leaves WHERE store = ?');
+      const dropOldLog = prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'log'").get() ? prepare('DELETE FROM log WHERE store = ?') : null;
+      const setEpoch = prepare('UPDATE stores SET epoch = ? WHERE store = ?');
+      const moveOne = transaction(id => {
+        const singles = new Set(shapeOf(id)?.singletons ?? []);
+        const records = new Map();   // [c, id] -> { rows: [[inner path, row]] }
+        for (const row of rowsOf.all(id)) {
+          const path = JSON.parse(row.path);
+          if (!Array.isArray(path) || path.length === 0) continue;
+          const single = singles.has(path[0]);
+          if (!single && path.length < 2) continue;
+          const key = JSON.stringify(single ? [path[0], ''] : [path[0], path[1]]);
+          if (!records.has(key)) records.set(key, []);
+          records.get(key).push([single ? path.slice(1) : path.slice(2), row]);
+        }
+        for (const [key, rows] of records) {
+          const [c, rid] = JSON.parse(key);
+          rows.sort((a, b) => a[0].length - b[0].length);
+          const whole = rows.find(([inner]) => inner.length === 0);
+          if (whole && whole[1].deleted === 1) continue;
+          let data = {};
+          const clock = { live: {}, gone: {} };
+          for (const [inner, row] of rows) {
+            const pk = JSON.stringify(inner);
+            if (row.deleted === 1) {
+              if (inner.length) {
+                let node = data;
+                for (const seg of inner.slice(0, -1)) node = node && typeof node === 'object' ? node[seg] : undefined;
+                if (node && typeof node === 'object') delete node[inner[inner.length - 1]];
+              }
+              clock.gone[pk] = row.ts_ms;
+              continue;
+            }
+            const value = row.deleted === 2 ? {} : JSON.parse(row.value);
+            if (inner.length === 0) {
+              data = value;
+            } else {
+              if (data === null || typeof data !== 'object' || Array.isArray(data)) data = {};
+              let node = data;
+              for (const seg of inner.slice(0, -1)) {
+                if (node[seg] === null || typeof node[seg] !== 'object' || Array.isArray(node[seg])) node[seg] = {};
+                node = node[seg];
+              }
+              const last = inner[inner.length - 1];
+              const container = value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === 0;
+              if (!(container && node[last] && typeof node[last] === 'object')) node[last] = value;
+            }
+            clock.live[pk] = row.ts_ms;
+          }
+          q.upsert.run(id, c, rid, JSON.stringify(data), JSON.stringify(clock));
+        }
+        dropLeaves.run(id);
+        dropOldLog?.run(id);
+        setEpoch.run(newEpoch(), id);
+      });
+      for (const id of ids) moveOne(id);
+      return ids;
     },
     /** The underlying database object, for backups or ad-hoc queries */
     db,

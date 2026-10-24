@@ -478,7 +478,11 @@ export function createRelay({
         edge.queue = edge.queue.filter(e => e.as !== msg.as);
         persist(edge);
         const code = msg.t === 'revoked' ? (msg.code ?? 'evicted') : (msg.code ?? 'forbidden');
-        for (const ss of sessionsOf(edge, msg.as)) ss.end(code, msg.message ?? 'Not allowed to open this store');
+        for (const ss of sessionsOf(edge, msg.as)) {
+          // Taken back to be judged afresh: the client's socket closes, and it comes back with what it has by then
+          if (code === 'reauthenticate') ss.evictSocket();
+          else ss.end(code, msg.message ?? 'Not allowed to open this store');
+        }
         return;
       }
       case 'closed': {
@@ -621,6 +625,7 @@ export function createRelay({
         synced: false,
         hello: null,
         send: message => { if (!gone) send({ ...message, store: id }); },
+        evictSocket: () => socket.evict(),
         end(code, message) {
           leave(id);
           ss.send({ t: 'closed', code, message });
@@ -634,9 +639,10 @@ export function createRelay({
       if (!ss) return;
       stores.delete(id);
       ss.edge.sessions.delete(ss);
-      if (!local && ss.edge.grants.has(ss.as)) {
+      const grant = local ? null : ss.edge.grants.get(ss.as);
+      if (grant) {
         ss.edge.grants.delete(ss.as);
-        if (ss.edge.synced && linkUp()) ss.edge.link.send({ t: 'leave', as: ss.as });
+        if (grant.state === 'admitted' && ss.edge.synced && linkUp()) ss.edge.link.send({ t: 'leave', as: ss.as });
         // What it had queued and the server has not taken: the client keeps it in its outbox and sends it again
         const mine = ss.edge.queue.filter(e => e.as === ss.as && !e.sent);
         if (mine.length) {
@@ -646,7 +652,7 @@ export function createRelay({
       }
     }
 
-    return {
+    const socket = {
       receive(msg) {
         if (gone || !isObj(msg)) return;
         if (msg.t === 'ping') return send({ t: 'pong' });
@@ -692,12 +698,13 @@ export function createRelay({
         for (const id of [...stores.keys()]) leave(id);
         gone = true;
       },
-      /** For the host: end this socket, as the server's eviction would */
+      /** End this socket, as the server's eviction would */
       evict() {
-        this.close();
+        socket.close();
         onEvict?.();
       }
     };
+    return socket;
   }
 
   /** The relay's own write to a store: a diff in the tree's shape, as an op of its own replica */

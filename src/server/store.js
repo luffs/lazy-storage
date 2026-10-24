@@ -719,6 +719,8 @@ export function createStore({
         const as = msg.as;
         if (as !== undefined && msg.t !== 'hello') {
           const grant = s.grants?.get(as);
+          // A client that left before it was let in has nothing to leave
+          if (!grant && msg.t === 'leave') return;
           if (!grant) return send({ t: 'error', as, code: 'forbidden', message: 'No client is vouched for under that name' });
           if (msg.t === 'op') return liveOp(msg.op, grant, as);
           if (msg.t === 'share') {
@@ -827,6 +829,18 @@ export function createStore({
           noteChange(g, 'join');
         }
         return null;
+      },
+      /** Take back the follower's clients `filter(user)` picks, telling the follower why; returns how many */
+      revoke(filter, code, message) {
+        if (!s.grants) return 0;
+        let count = 0;
+        for (const g of [...s.grants.values()]) {
+          if (!filter(g.user)) continue;
+          s.ungrant(g.as);
+          s.send({ t: 'revoked', as: g.as, code, message });
+          count++;
+        }
+        return count;
       },
       /** The follower's client left */
       ungrant(as) {

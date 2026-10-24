@@ -228,6 +228,17 @@ export function createHub(resolveStore, { send, user, authorizeId, authorize, vo
       admit(id, [msg]);
     },
     revalidate,
+    /**
+     * On a follower's socket: take back the clients behind it that
+     * `filter(user)` picks, on every store, with `code` ('reauthenticate':
+     * the follower closes the client's socket, which comes back judged
+     * afresh). Returns how many
+     */
+    revoke(filter, code = 'reauthenticate', message = 'Your session was closed by the server') {
+      let count = 0;
+      for (const session of sessions.values()) if (typeof session.revoke === 'function') count += session.revoke(filter, code, message);
+      return count;
+    },
     /** Store ids with a live session on this connection */
     get stores() { return [...sessions.keys()]; },
     get user() { return user; },

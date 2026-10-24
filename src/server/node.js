@@ -18,7 +18,7 @@ import { createServer } from 'node:http';
 import { WebSocketServer } from 'ws';
 import { LazyWatch } from 'lazy-watch';
 import { createHub } from './hub.js';
-import { createRelayLink, credentialRequest, relaySockets } from './relays.js';
+import { followerHub, credentialRequest } from './follow.js';
 import { toJSON, closeUnauthorized, deflateOptions, TOO_FAR_BEHIND, REAUTHENTICATE, MIN_SESSION_MS, expiryOf, runAt, rollUpSockets } from './wire.js';
 import { snapshotOptions, snapshotId, serveSnapshot } from './snapshot.js';
 
@@ -153,7 +153,7 @@ export function createHandlers({
   function open(ws, user, expires, relay) {
     // A broadcast is encoded once for every socket it reaches (see wire.js)
     const hub = relay !== undefined
-      ? createRelayLink(resolveStore, { send: message => send(ws, message), relay, admit, authorizeRelay: relays.authorize, authorizeId, authorize, linger: relays.linger, rate: relays.rate, onError })
+      ? followerHub(resolveStore, { send: message => send(ws, message), relay, admit, authorizeRelay: relays.authorize, authorizeId, authorize, onError })
       : createHub(resolveStore, {
         send: message => send(ws, message),
         user,
@@ -308,7 +308,7 @@ export function createHandlers({
     // this would have
     for (const [ws, link] of [...links]) {
       if (filter && !filter(link.relay)) {
-        count += link.disconnect(filter);
+        count += link.revoke(filter);
         continue;
       }
       reauthenticate(ws);
@@ -351,7 +351,7 @@ export function createHandlers({
       openMs: now - opened.get(ws),
       expiresAt: expiring.get(ws)?.at ?? null
     }));
-    for (const [ws, link] of links) out.push(...relaySockets(link, { buffered: ws.bufferedAmount, idleMs: now - heard.get(ws), openMs: now - opened.get(ws) }, now));
+    for (const [ws, link] of links) out.push({ relay: link.relay, stores: link.stores, buffered: ws.bufferedAmount, idleMs: now - heard.get(ws), openMs: now - opened.get(ws), expiresAt: null });
     return out;
   }
 
