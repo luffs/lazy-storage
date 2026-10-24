@@ -344,7 +344,9 @@ export function createRelay({
         edge.synced = false;
         const own = edge.queue.filter(e => e.own).map(e => e.op);
         for (const entry of edge.queue) entry.sent = false;
-        const hello = { t: 'hello', proto: PROTOCOL, replica: replicaId, ops: own, follower: true, clocks: true };
+        // A site's relay speaks for clients of its own; a browser's is one replica, listed and sharing as itself
+        const hello = { t: 'hello', proto: PROTOCOL, replica: replicaId, ops: own, clocks: true };
+        if (!local) hello.follower = true;
         if (edge.have && edge.epoch) Object.assign(hello, { since: edge.v, epoch: edge.epoch });
         attached.send(hello);
         for (const entry of own.length ? edge.queue.filter(e => e.own) : []) entry.sent = true;
@@ -805,9 +807,13 @@ export function createRelay({
       setMode('local');
     },
     upstreamUp() {
+      const held = forcedDown && connection.status === 'online';
       forcedDown = false;
       connection.connect();
       noteLink();
+      // The link stayed up while the host held it down: nothing reopens it, so each store says hello again,
+      // and what waited meanwhile (its queue, its clients to vouch for) goes up once the server has answered
+      if (held) for (const edge of edges.values()) if (!edge.loading && edge.link) upstreamHandler(edge).onOpen(edge.link);
     },
     stats() {
       const stores = {};
