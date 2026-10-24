@@ -2,11 +2,16 @@
 //
 // The state is a plain tree: `state[c][id]` for a collection's record,
 // `state[c]` for a singleton. Each record has a CLOCK: a timestamp per
-// path inside it, in two maps. `live` holds, for a leaf, when it was
-// written, and for a container (the record itself at `[]` included), when
-// it was made: its BIRTH. `gone` holds, for a path deleted inside a living
-// record, when it was deleted. A record that is deleted leaves nothing:
-// its row and its clock go.
+// path inside it. `at` is when the record was made, with what it held:
+// its BIRTH, and the time of every path inside it that has no entry of
+// its own. `live` holds the paths written since: for a leaf, when it was
+// written, and for a container, when it was made. `gone` holds, for a
+// path deleted inside a living record, when it was deleted. So a record
+// written whole costs one timestamp, and one more for each path edited
+// after. A record that is deleted leaves nothing: its row and its clock
+// go. Entries older than the retention window are dropped (`prune`): an
+// op older than that is refused before it is judged, so nothing can
+// lose to them any more.
 //
 // A change is { c, id?, path?, put | set | del } (shape.js checks it). Each
 // is decided on its own, against the record's clock, by the op's
@@ -62,20 +67,27 @@ function beneath(path, inclusive) {
 const maxOf = clock => {
   let max = -1;
   if (!clock) return max;
+  if (clock.at !== null && clock.at > max) max = clock.at;
   for (const ts of clock.live.values()) if (ts > max) max = ts;
   for (const ts of clock.gone.values()) if (ts > max) max = ts;
   return max;
 };
 
-/** A clock as it is stored: { live: { pathKey: ts }, gone: { pathKey: ts } } */
-export const clockToJSON = clock => ({ live: Object.fromEntries(clock?.live ?? []), gone: Object.fromEntries(clock?.gone ?? []) });
-export const clockFromJSON = json => ({ live: new Map(Object.entries(json?.live ?? {})), gone: new Map(Object.entries(json?.gone ?? {})) });
+/** A clock as it is stored: { at?: ts, live: { pathKey: ts }, gone: { pathKey: ts } }, `at` left out where there is none */
+export const clockToJSON = clock => ({ ...(clock?.at != null ? { at: clock.at } : {}), live: Object.fromEntries(clock?.live ?? []), gone: Object.fromEntries(clock?.gone ?? []) });
+export const clockFromJSON = json => ({ at: Number.isFinite(json?.at) ? json.at : null, live: new Map(Object.entries(json?.live ?? {})), gone: new Map(Object.entries(json?.gone ?? {})) });
+const newClock = () => ({ at: null, live: new Map(), gone: new Map() });
+
+/** When a path in a living record was written or made: its own entry, else the record's `at`; undefined where there is neither */
+const liveAt = (clock, key) => (clock.live.has(key) ? clock.live.get(key) : (clock.at ?? undefined));
+/** An entry for a path, unless it says no more than the record's `at` */
+const setLive = (clock, key, ts) => { if (ts === clock.at) clock.live.delete(key); else clock.live.set(key, ts); };
 
 /**
  * @param {Object} shape - from createShape
  * @param {Object} [options]
  * @param {Object} [options.state] - the state to start from (default: `initial`)
- * @param {Map<string, {live: Map, gone: Map}>} [options.clocks] - by record key
+ * @param {Map<string, {at: number|null, live: Map, gone: Map}>} [options.clocks] - by record key
  * @param {boolean} [options.track=true] - keep clocks (false for a client's base and view)
  */
 export function createDoc(shape, { state, clocks, track = true } = {}) {
@@ -92,7 +104,7 @@ export function createDoc(shape, { state, clocks, track = true } = {}) {
   const clockOf = (key, make) => {
     if (!clocks) return null;
     let clock = clocks.get(key);
-    if (!clock && make) clocks.set(key, clock = { live: new Map(), gone: new Map() });
+    if (!clock && make) clocks.set(key, clock = newClock());
     return clock;
   };
 
@@ -141,8 +153,15 @@ export function createDoc(shape, { state, clocks, track = true } = {}) {
     return max;
   }
 
+  /** A value written at a path, at `ts`: the record whole is its `at`, anything inside it an entry per path */
   function stamp(clock, c, id, path, value, ts) {
-    clock.live.set(pathKey(path), ts);
+    if (path.length === 0) {
+      clock.at = ts;
+      clock.live.clear();
+      clock.gone.clear();
+      return;
+    }
+    setLive(clock, pathKey(path), ts);
     if (isObj(value) && !shape.isRegister(c, id, path)) {
       for (const key of Object.keys(value)) stamp(clock, c, id, [...path, key], value[key], ts);
     }
@@ -168,6 +187,7 @@ export function createDoc(shape, { state, clocks, track = true } = {}) {
 
   function newerBeneath(clock, path, ts) {
     if (!clock) return false;
+    if (clock.at !== null && clock.at > ts) return true;
     const test = beneath(path, false);
     for (const map of [clock.live, clock.gone]) for (const [key, at] of map) if (at > ts && test(key)) return true;
     return false;
@@ -245,13 +265,13 @@ export function createDoc(shape, { state, clocks, track = true } = {}) {
     if (record === undefined) {
       if (!makes) return lose('missing');
       state[c][id] = record = {};
-      if (clocks) clockOf(key, true).live.set(ROOT, ts);
+      if (clocks) clockOf(key, true).at = ts;
       out.applied.push({ c, id, put: {} });
     }
     const clock = clockOf(key, true);
     if (judging) {
       for (let i = 0; i < path.length; i++) {
-        const birth = clock.live.get(pathKey(path.slice(0, i)));
+        const birth = liveAt(clock, pathKey(path.slice(0, i)));
         if (birth !== undefined && ts < birth) return lose('stale');
       }
     }
@@ -263,8 +283,7 @@ export function createDoc(shape, { state, clocks, track = true } = {}) {
       if (!isObj(record)) {
         record = {};
         if (shape.isSingleton(c)) state[c] = record; else state[c][id] = record;
-        dropBeneath(clock, [], false);
-        clock?.live.set(ROOT, ts);
+        if (clock) stamp(clock, c, id, [], record, ts);
       }
       let node = record;
       for (let i = 0; i < parentPath.length; i++) {
@@ -272,7 +291,7 @@ export function createDoc(shape, { state, clocks, track = true } = {}) {
         if (!isObj(node[seg])) {
           node[seg] = {};
           dropBeneath(clock, parentPath.slice(0, i + 1), true, false);
-          clock?.live.set(pathKey(parentPath.slice(0, i + 1)), ts);
+          if (clock) setLive(clock, pathKey(parentPath.slice(0, i + 1)), ts);
         }
         node = node[seg];
       }
@@ -301,19 +320,19 @@ export function createDoc(shape, { state, clocks, track = true } = {}) {
     }
     if (kind === 'set') {
       if (judging) {
-        if ((clock.live.get(own) ?? -1) > ts || (clock.gone.get(own) ?? -1) > ts) return lose('newer');
+        if ((liveAt(clock, own) ?? -1) > ts || (clock.gone.get(own) ?? -1) > ts) return lose('newer');
         if (isObj(current) && newerBeneath(clock, path, ts)) return lose('newer');
       }
       parent[last] = clone(value);
       if (clocks) {
         dropBeneath(clock, path, true, isObj(current));
-        clock.live.set(own, ts);
+        setLive(clock, own, ts);
       }
       out.applied.push({ ...entry(c, id, path), why: undefined, set: clone(value) });
     }
     if (kind === 'del') {
       if (current === undefined) return;
-      if (judging && ((clock.live.get(own) ?? -1) > ts || (isObj(current) && newerBeneath(clock, path, ts)))) return lose('newer');
+      if (judging && ((liveAt(clock, own) ?? -1) > ts || (isObj(current) && newerBeneath(clock, path, ts)))) return lose('newer');
       delete parent[last];
       if (clocks) {
         dropBeneath(clock, path, true, isObj(current));
@@ -388,7 +407,11 @@ export function createDoc(shape, { state, clocks, track = true } = {}) {
     newest(c, id) {
       return maxOf(clockOf(shape.recordKey(c, id)));
     },
-    /** Forget deletions inside records older than `cutoff`; returns the records it touched as [c, id] */
+    /**
+     * Forget what is older than `cutoff` in every clock: deletions, and
+     * the times of writes and births, which nothing an op may still
+     * carry is older than. Returns the records it touched as [c, id]
+     */
     prune(cutoff) {
       const touched = [];
       if (!clocks) return touched;
@@ -399,6 +422,9 @@ export function createDoc(shape, { state, clocks, track = true } = {}) {
           if (!clock) continue;
           let dropped = false;
           for (const [key, ts] of [...clock.gone]) if (ts < cutoff) { clock.gone.delete(key); dropped = true; }
+          if (clock.at !== null && clock.at < cutoff) { clock.at = null; dropped = true; }
+          // An entry dropped falls back to `at`: only once that is gone too
+          if (clock.at === null) for (const [key, ts] of [...clock.live]) if (ts < cutoff) { clock.live.delete(key); dropped = true; }
           if (dropped) touched.push([c, id]);
         }
       }

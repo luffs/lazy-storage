@@ -82,8 +82,9 @@ export function isForbiddenKey(key: string): boolean;
 
 // --- The rule -------------------------------------------------------------------
 
-/** A record's clock: times by path key, of what lives and what was deleted inside it */
+/** A record's clock: when it was made (`at`, the time of every path with no entry of its own; left out once older than retention), and times by path key of what was written since and what was deleted inside it */
 export interface RecordClock {
+  at?: Timestamp;
   live: Record<string, Timestamp>;
   gone: Record<string, Timestamp>;
 }

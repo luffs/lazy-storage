@@ -118,7 +118,7 @@ test('a timestamp far ahead is clamped to the server\'s time: it wins nothing ov
   const { op, last } = rawSession(store, 'mallory', { id: 'mallory' });
   op(1, [{ c: 'notes', id: 'n', put: { text: 'from the future' } }], now() + 365 * 86_400_000);
   assert.equal(last().t, 'ack', 'taken, at the server\'s time');
-  assert.equal(store.clock('notes', 'n').live['["text"]'], now(), 'stamped no later than it arrived');
+  assert.equal(store.clock('notes', 'n').at, now(), 'stamped no later than it arrived');
   op(2, [{ c: 'notes', id: 'n', put: { text: 'later still' } }], Number.MAX_SAFE_INTEGER);
   assert.equal(last().t, 'ack');
 

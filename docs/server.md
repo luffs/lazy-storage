@@ -147,15 +147,18 @@ unacknowledged ops, and a registry loads the store afresh from what is on
 disk. The SQLite adapters wait up to five seconds for another
 connection's lock before a commit fails.
 
-Two things would otherwise grow without bound: the times of paths deleted
-inside living records, and the progress kept per replica (every browser
-tab that ever connected). A store keeps both for its **retention window**
-(`retention`, default 30 days) and forgets what is older, on load and
-then once an hour as ops arrive (`store.compact()` does it on demand and
-reports what it removed). A deleted record keeps nothing to forget. To
-make forgetting safe, an op stamped before the window is refused whole
-with code `expired`: it might bring back a path whose deletion has since
-been forgotten, or be one the store applied and no longer remembers. That
+Three things would otherwise grow without bound: the times in a record's
+clock (its birth, its writes, and the paths deleted inside it), and the
+progress kept per replica (every browser tab that ever connected). A
+store keeps them for its **retention window** (`retention`, default 30
+days) and forgets what is older, on load and then once an hour as ops
+arrive (`store.compact()` does it on demand and reports what it removed);
+a record nobody has touched for a window carries no times at all. A
+deleted record keeps nothing to forget. To make forgetting safe, an op
+stamped before the window is refused whole with code `expired`: it might
+bring back a path whose deletion has since been forgotten, win over a
+write whose time has, or be one the store applied and no longer
+remembers. That
 is enough because the store clamps every timestamp to its own time, so
 nothing it applied is stamped later than it arrived. The client drops
 such an op and takes its edit back, and the app hears `rejected` with

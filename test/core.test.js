@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { LazyWatch } from 'lazy-watch';
 import {
-  createShape, createDoc, docFromRecords, compile, createClock, parsePathKey, pathKey, deleteAt, setAt, valueAt
+  createShape, createDoc, docFromRecords, compile, createClock, parsePathKey, pathKey, deleteAt, setAt, valueAt, clockToJSON, clockFromJSON
 } from '../src/core/index.js';
 import { createRules, RuleError } from '../src/core/rules.js';
 
@@ -24,8 +24,9 @@ test('the server\'s own write makes what is missing on the way; a judged one los
   assert.deepEqual(made.applied.at(-1), { c: 'tasks', id: 'a', path: ['meta', 'color'], set: 'red' }, 'what was made, then the write');
   assert.deepEqual(doc.get('tasks', 'a'), { meta: { color: 'red' } });
   const clock = doc.clock('tasks', 'a');
-  assert.equal(clock.live['[]'], 20, 'the record made at the write\'s time');
-  assert.equal(clock.live['["meta"]'], 20, 'and the object on the way');
+  assert.equal(clock.at, 20, 'the record made at the write\'s time');
+  assert.equal(clock.live['["meta"]'], undefined, 'the object on the way made with it: no entry of its own');
+  assert.deepEqual(clock.live, {}, 'a record written whole costs one timestamp');
   assert.equal(doc.newest('tasks', 'a'), 20);
   doc.apply({ c: 'settings', path: ['a', 'b'], set: 1 }, 30, 'authority');
   assert.deepEqual(doc.get('settings'), { a: { b: 1 } }, 'a singleton too');
@@ -81,7 +82,7 @@ test('a rule that throws refuses with its message, and one that says false with 
   const run = (list, user, ts = 5) => judge(doc, list, user, 'r', {}, () => list.map(ch => doc.apply(ch, ts, 'judge')));
   assert.throws(() => run([{ c: 'tasks', id: 'a', path: ['title'], set: 'secret' }], 'ann'), err => err instanceof RuleError && err.message === 'no secrets');
   assert.deepEqual(doc.get('tasks', 'a'), { title: 'x' }, 'a refusal puts back what the trial wrote');
-  assert.equal(doc.clock('tasks', 'a').live['["title"]'], 1, 'and its clock');
+  assert.deepEqual(doc.clock('tasks', 'a'), { at: 1, live: {}, gone: {} }, 'and its clock');
   assert.throws(() => run([{ c: 'tasks', id: 'a', path: ['title'], set: 'y' }], 'bob'), /Not allowed to write tasks\/a/);
   assert.throws(() => run([{ c: 'settings', path: ['x'], set: 1 }], 'ann'), /settings/);
   assert.doesNotThrow(() => run([{ c: 'tasks', id: 'a', path: ['title'], set: 'y' }], 'ann'));
@@ -143,7 +144,7 @@ test('a rule judges what the merge makes of an op, not what it asked for', () =>
   const list = [{ c: 'tasks', id: 't', path: ['assignee'], set: 'mallory' }, { c: 'tasks', id: 't', path: ['status'], set: 'done' }];
   assert.throws(() => judge(doc, list, 'mallory', 'm', {}, () => list.map(ch => doc.apply(ch, 1500, 'judge'))), /Not allowed to write tasks\/t/);
   assert.deepEqual(doc.get('tasks', 't'), { status: 'open', assignee: 'bob' }, 'nothing of it stays');
-  assert.equal(doc.clock('tasks', 't').live['["status"]'], 1000);
+  assert.deepEqual(doc.clock('tasks', 't'), { at: 1000, live: { '["assignee"]': 2000 }, gone: {} });
 });
 
 test('a trial that throws puts back what it did, a deleted record and its children included', () => {
@@ -157,4 +158,24 @@ test('a trial that throws puts back what it did, a deleted record and its childr
   assert.deepEqual(doc.get('tasks', 'p'), { title: 'x' });
   assert.deepEqual(doc.get('subtasks', 's'), { taskId: 'p' });
   assert.deepEqual(doc.childrenOf('tasks', 'p'), [['subtasks', 's']], 'and the index of children');
+});
+
+test('a record written whole has one timestamp, `at`; a path written since has an entry of its own, and never one that says no more than `at`', () => {
+  const doc = createDoc(shape);
+  doc.apply({ c: 'tasks', id: 'a', put: { title: 'x', meta: { color: 'red', size: 2 }, tags: ['a'] } }, 10, 'authority');
+  assert.deepEqual(doc.clock('tasks', 'a'), { at: 10, live: {}, gone: {} });
+  doc.apply({ c: 'tasks', id: 'a', path: ['title'], set: 'y' }, 20, 'judge');
+  doc.apply({ c: 'tasks', id: 'a', path: ['meta', 'size'], set: 3 }, 10, 'judge');   // the same time as the record: nothing to add
+  assert.deepEqual(doc.clock('tasks', 'a'), { at: 10, live: { '["title"]': 20 }, gone: {} });
+  // The paths with no entry are as old as the record: an edit from before it is stale, one from after lands
+  assert.equal(doc.apply({ c: 'tasks', id: 'a', path: ['meta', 'color'], set: 'blue' }, 5, 'judge').lost[0]?.why, 'stale');
+  assert.equal(doc.apply({ c: 'tasks', id: 'a', path: ['meta', 'color'], set: 'blue' }, 15, 'judge').lost.length, 0);
+  assert.equal(doc.apply({ c: 'tasks', id: 'a', path: ['title'], set: 'z' }, 15, 'judge').lost[0]?.why, 'newer', 'the entry of its own counts');
+  assert.equal(doc.apply({ c: 'tasks', id: 'a', del: true }, 5, 'judge').lost[0]?.why, 'newer', 'the record itself is newer than a deletion from before it');
+  assert.equal(doc.newest('tasks', 'a'), 20);
+  // The clock as stored and back: `at` kept, and left out where there is none
+  const again = createDoc(shape, { state: { tasks: { a: structuredClone(doc.get('tasks', 'a')) } }, clocks: new Map([[shape.recordKey('tasks', 'a'), clockFromJSON(doc.clock('tasks', 'a'))]]) });
+  assert.deepEqual(again.clock('tasks', 'a'), doc.clock('tasks', 'a'));
+  assert.deepEqual(clockToJSON(clockFromJSON({ live: { '["x"]': 1 }, gone: {} })), { live: { '["x"]': 1 }, gone: {} });
+  assert.deepEqual(clockToJSON(clockFromJSON(undefined)), { live: {}, gone: {} });
 });

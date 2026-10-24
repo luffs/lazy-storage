@@ -101,11 +101,13 @@ sort agree.
 Every op carries a timestamp: milliseconds, stamped by its client so
 that an edit made after seeing something is always newer than it, and
 clamped by the server to its own time, so a clock that runs fast wins
-nothing (see [Time](#time)). Each record has a **clock**: for every path
-inside it, when it was written, when the container there was made (its
-**birth**), and, for a path deleted inside a living record, when it was
-deleted. The server decides each change of an op on its own, against
-that clock:
+nothing (see [Time](#time)). Each record has a **clock**: when the
+record was made, with what it held (its **birth**, `at`, the time of
+every path inside it that has none of its own); for a path written or
+made since, when; and, for a path deleted inside a living record, when
+it was deleted. So a record written whole costs one timestamp, and one
+more for each path edited after. The server decides each change of an op
+on its own, against that clock:
 
 - A **write** lands when its record and its parent are there, and
   nothing at its path is newer. One that replaces a container also needs
@@ -124,8 +126,11 @@ that clock:
 A deleted record leaves nothing behind: its row and its clock go. A
 write to it finds no parent, and a record made again under the same id
 has a new birth that older edits lose to. Only a deleted path inside a
-living record keeps its time, in the record's clock, until it is older
-than the retention window.
+living record keeps its time, in the record's clock. Every time in a
+clock is kept until it is older than the retention window: an op older
+than that is refused unjudged, so nothing can lose to it any more, and
+it goes at the next compaction. A record nobody has touched for a
+window carries no times at all.
 
 What lost is reported, with why: `missing` (the record, the parent, or a
 child's parent record was not there), `newer` (a later write), or
