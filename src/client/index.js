@@ -296,7 +296,17 @@ function build({
   // --- Status and presence -----------------------------------------------------------
 
   const linked = () => Boolean(link) && connection.status !== 'offline';
-  const status = () => (!linked() ? 'offline' : !synced ? 'connecting' : 'online');
+  // Behind a shared connection (a browser's tabs, a page on a port) the link may be up while the
+  // browser's socket is down: the client is then as offline as that socket, though its edits still
+  // reach the browser's replica
+  const status = () => {
+    if (!linked()) return 'offline';
+    if (!synced) return 'connecting';
+    const upstream = connection.upstream;
+    if (upstream === undefined || upstream === 'online') return 'online';
+    return upstream === 'offline' ? 'offline' : 'connecting';
+  };
+  const browserPending = () => (typeof connection.pending === 'function' ? connection.pending(storeId) : 0);
 
   function refreshStatus() {
     const next = status();
@@ -305,6 +315,7 @@ function build({
     emit('status', next);
   }
   const stopStatus = connection.on('status', refreshStatus);
+  const stopSync = typeof connection.pending === 'function' ? connection.on('sync', () => emit('sync')) : () => {};
 
   function setPresence(users) {
     if (JSON.stringify(users) === JSON.stringify(presence)) return;
@@ -727,10 +738,10 @@ function build({
     connection,
     shape,
     get status() { return status(); },
-    get pending() { return outbox.length; },
+    get pending() { return outbox.length + browserPending(); },
     stats() {
       return {
-        pending: outbox.length,
+        pending: outbox.length + browserPending(),
         oldestPendingMs: outbox.length ? Math.max(0, clock.time - outbox[0].ts) : null,
         ackMs
       };
@@ -783,6 +794,7 @@ function build({
       persistence.dispose();
       storage.close?.();
       stopStatus();
+      stopSync();
       undoManager?.dispose();
       LazyWatch.dispose(state);
     }

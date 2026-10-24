@@ -1,13 +1,12 @@
 // indexeddb.js - Row persistence in IndexedDB (browsers)
 //
-// One database per adapter, three object stores: `leaves` (key: the path
-// key, value: the leaf), `ops` (key: seq, value: the op), and `meta` (one
-// record). A batch is one readwrite transaction of exactly the rows it
-// touched, so an edit costs its leaves rather than the state; a deletion
-// removes the path and, through a key range over the descendant prefix,
-// everything under it (descendant keys share the ancestor's key minus
-// its closing bracket, plus a comma — see core/paths.js). A snapshot
-// clears the leaves and writes them afresh.
+// One database per adapter, three object stores: `records` (key: the
+// record's [collection, id] as JSON, value: [c, id, data, clock]), `ops`
+// (key: seq, value: the op), and `meta` (one record). A patch is one
+// readwrite transaction of exactly the records it touched, so an edit
+// costs its records rather than the state. A snapshot clears the records
+// and writes them afresh. A database from before 1.0 (version 1, a row per
+// leaf, ops as diffs) is cleared on open: the client takes a snapshot.
 //
 // load() returns a promise, so a client on this adapter is opened with
 // openClient(). Writes are fire-and-forget: IndexedDB runs overlapping
@@ -30,14 +29,10 @@
 // Use one name per store (and per replica: a tab is a replica), and
 // `destroy()` to drop a database a closed tab left behind.
 
-const STORES = ['leaves', 'ops', 'meta'];
+const STORES = ['records', 'ops', 'meta'];
 const META_KEY = 'meta';
-
-/** The key range of every strict descendant of a path key */
-const descendants = (key, IDBKeyRange) => {
-  const prefix = key.slice(0, -1) + ',';
-  return IDBKeyRange.bound(prefix, prefix + '￿');
-};
+const VERSION = 2;
+const keyOf = (c, id) => JSON.stringify([c, id ?? null]);
 
 /**
  * @param {string} [name='lazy-storage'] - the database name
@@ -67,11 +62,15 @@ export function indexedDBStorage(name = 'lazy-storage', {
 
   const open = () => {
     opening ??= new Promise((resolve, reject) => {
-      const request = idb.open(name, 1);
+      const request = idb.open(name, VERSION);
       let created = false;
       request.onupgradeneeded = event => {
         created = event.oldVersion === 0;
         const d = request.result;
+        // Before 1.0: leaves, and ops this version cannot send. What was there is let go
+        if (event.oldVersion > 0 && event.oldVersion < VERSION) {
+          for (const store of ['leaves', 'ops', 'meta']) if (d.objectStoreNames.contains(store)) d.deleteObjectStore(store);
+        }
         for (const store of STORES) if (!d.objectStoreNames.contains(store)) d.createObjectStore(store);
       };
       request.onsuccess = () => {
@@ -117,29 +116,25 @@ export function indexedDBStorage(name = 'lazy-storage', {
     async load() {
       const d = await open();
       const tx = d.transaction(STORES, 'readonly');
-      const [meta, keys, values, ops] = await Promise.all([
+      const [meta, records, ops] = await Promise.all([
         result(tx.objectStore('meta').get(META_KEY)),
-        result(tx.objectStore('leaves').getAllKeys()),
-        result(tx.objectStore('leaves').getAll()),
+        result(tx.objectStore('records').getAll()),
         result(tx.objectStore('ops').getAll())
       ]);
       if (!meta) return null;
-      return { ...meta, ops, rows: keys.map((key, i) => [key, values[i]]) };
+      return { ...meta, ops, records };
     },
     commit({ puts, deletes, meta }) {
-      write(['leaves', 'meta'], stores => {
-        for (const key of deletes) {
-          stores.leaves.delete(key);
-          stores.leaves.delete(descendants(key, KeyRange));
-        }
-        for (const [key, value] of puts) stores.leaves.put(value, key);
+      write(['records', 'meta'], stores => {
+        for (const [c, id] of deletes) stores.records.delete(keyOf(c, id));
+        for (const record of puts) stores.records.put(record, keyOf(record[0], record[1]));
         stores.meta.put(meta, META_KEY);
       });
     },
-    replace({ rows, meta }) {
-      write(['leaves', 'meta'], stores => {
-        stores.leaves.clear();
-        for (const [key, value] of rows) stores.leaves.put(value, key);
+    replace({ records, meta }) {
+      write(['records', 'meta'], stores => {
+        stores.records.clear();
+        for (const record of records) stores.records.put(record, keyOf(record[0], record[1]));
         stores.meta.put(meta, META_KEY);
       });
     },

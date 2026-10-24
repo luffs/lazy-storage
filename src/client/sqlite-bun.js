@@ -1,26 +1,24 @@
 // sqlite-bun.js - Row persistence on bun:sqlite, for a client that runs in Bun
 //
-// The same rows the IndexedDB adapter keeps, in three tables: `leaves`
-// (path key -> JSON leaf), `ops` (seq -> JSON op), and `meta` (one row).
-// bun:sqlite is synchronous, so this adapter fits createClient() as it
-// is: no openClient() needed. A batch is one transaction of the rows it
-// touched; a deletion removes the path and, through a range over the
-// descendant prefix, everything under it. One file per client.
+// The same rows the IndexedDB adapter keeps, in three tables: `records`
+// ([collection, id] -> the record and its clock), `ops` (seq -> JSON op),
+// and `meta` (one row). bun:sqlite is synchronous, so this adapter fits
+// createClient() as it is: no openClient() needed. A patch is one
+// transaction of the records it touched. One file per client. A file from
+// before 1.0 (a `leaves` table) has its rows and ops let go: the client
+// takes a snapshot.
 //
 //   const db = createClient({ store: 'team-1', storage: sqliteClientStorage('mirror.sqlite'), ... });
 import { Database } from 'bun:sqlite';
 
 const SCHEMA = `
-  CREATE TABLE IF NOT EXISTS leaves (path TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;
+  CREATE TABLE IF NOT EXISTS records (collection TEXT NOT NULL, id TEXT NOT NULL, data TEXT NOT NULL, clock TEXT NOT NULL, PRIMARY KEY (collection, id)) WITHOUT ROWID;
   CREATE TABLE IF NOT EXISTS ops (seq INTEGER PRIMARY KEY, op TEXT NOT NULL);
   CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;
 `;
 
-/** The bounds of every strict descendant of a path key: keys share the ancestor's key minus `]`, plus `,` */
-const descendants = key => {
-  const prefix = key.slice(0, -1) + ',';
-  return [prefix, prefix + '￿'];
-};
+const rowId = id => (id === null || id === undefined ? '' : id);
+const EMPTY_CLOCK = { live: {}, gone: {} };
 
 /**
  * @param {string} [file=':memory:'] - database file (created if missing)
@@ -30,14 +28,16 @@ export function sqliteClientStorage(file = ':memory:', { wal = true } = {}) {
   const db = new Database(file, { create: true });
   if (wal && file !== ':memory:') db.exec('PRAGMA journal_mode = WAL;');
   db.exec('PRAGMA synchronous = NORMAL;');
+  if (db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'leaves'").get()) {
+    db.exec('DROP TABLE leaves; DROP TABLE IF EXISTS ops; DROP TABLE IF EXISTS meta;');
+  }
   db.exec(SCHEMA);
 
   const q = {
-    put: db.prepare('INSERT INTO leaves (path, value) VALUES (?, ?) ON CONFLICT (path) DO UPDATE SET value = excluded.value'),
-    del: db.prepare('DELETE FROM leaves WHERE path = ?'),
-    delRange: db.prepare('DELETE FROM leaves WHERE path >= ? AND path < ?'),
-    clear: db.prepare('DELETE FROM leaves'),
-    rows: db.prepare('SELECT path, value FROM leaves'),
+    put: db.prepare('INSERT INTO records (collection, id, data, clock) VALUES (?, ?, ?, ?) ON CONFLICT (collection, id) DO UPDATE SET data = excluded.data, clock = excluded.clock'),
+    del: db.prepare('DELETE FROM records WHERE collection = ? AND id = ?'),
+    clear: db.prepare('DELETE FROM records'),
+    records: db.prepare('SELECT collection, id, data, clock FROM records'),
     putOp: db.prepare('INSERT INTO ops (seq, op) VALUES (?, ?) ON CONFLICT (seq) DO UPDATE SET op = excluded.op'),
     delOp: db.prepare('DELETE FROM ops WHERE seq = ?'),
     dropOps: db.prepare('DELETE FROM ops WHERE seq <= ?'),
@@ -46,18 +46,16 @@ export function sqliteClientStorage(file = ':memory:', { wal = true } = {}) {
     setMeta: db.prepare("INSERT INTO meta (key, value) VALUES ('meta', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value")
   };
   const setMeta = meta => q.setMeta.run(JSON.stringify(meta));
+  const put = ([c, id, data, clock]) => q.put.run(c, rowId(id), JSON.stringify(data), JSON.stringify(clock ?? EMPTY_CLOCK));
 
   const commit = db.transaction(({ puts, deletes, meta }) => {
-    for (const key of deletes) {
-      q.del.run(key);
-      q.delRange.run(...descendants(key));
-    }
-    for (const [key, value] of puts) q.put.run(key, JSON.stringify(value));
+    for (const [c, id] of deletes) q.del.run(c, rowId(id));
+    for (const record of puts) put(record);
     setMeta(meta);
   });
-  const replace = db.transaction(({ rows, meta }) => {
+  const replace = db.transaction(({ records, meta }) => {
     q.clear.run();
-    for (const [key, value] of rows) q.put.run(key, JSON.stringify(value));
+    for (const record of records) put(record);
     setMeta(meta);
   });
   const saveOp = db.transaction((op, meta) => {
@@ -80,7 +78,7 @@ export function sqliteClientStorage(file = ':memory:', { wal = true } = {}) {
       return {
         ...JSON.parse(row.value),
         ops: q.ops.all().map(r => JSON.parse(r.op)),
-        rows: q.rows.all().map(r => [r.path, JSON.parse(r.value)])
+        records: q.records.all().map(r => [r.collection, r.id === '' ? null : r.id, JSON.parse(r.data), JSON.parse(r.clock)])
       };
     },
     commit,

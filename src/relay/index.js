@@ -65,6 +65,8 @@ const clone = value => (value === null || value === undefined || typeof value !=
  * @param {number|false} [options.keepalive]
  * @param {(error: any) => void} [options.onError]
  * @param {() => number} [options.now]
+ * @param {string} [options.replicaId] - the relay's own replica (default: the one storage keeps, else new);
+ *   it must stay the same across restarts, for the ops it keeps go up under it
  */
 export function createRelay({
   shapeOf,
@@ -76,19 +78,20 @@ export function createRelay({
   reconnect = { min: 500, max: 10_000 },
   keepalive = 30_000,
   onError = err => console.error('lazy-storage relay:', err),
-  now = Date.now
+  now = Date.now,
+  replicaId: givenReplica
 } = {}) {
   if (typeof shapeOf !== 'function') throw new TypeError('createRelay needs shapeOf(storeId)');
   if (typeof link !== 'function') throw new TypeError('createRelay needs a link: a transport factory to the server');
   if (acknowledge !== 'upstream' && acknowledge !== 'local') throw new TypeError("acknowledge is 'upstream' or 'local'");
   const local = acknowledge === 'local';
   const meta = storage.loadMeta?.() ?? null;
-  const replicaId = meta?.replicaId ?? randomId();
-  if (!meta) storage.saveMeta?.({ replicaId });
+  const replicaId = givenReplica ?? meta?.replicaId ?? randomId();
+  if (meta?.replicaId !== replicaId) storage.saveMeta?.({ replicaId });
   const clock = createClock({ now });
   const connection = createConnection({ transport: link, reconnect, keepalive });
   const edges = new Map();
-  const listeners = { mode: new Set(), error: new Set() };
+  const listeners = { mode: new Set(), error: new Set(), sync: new Set(), status: new Set() };
   let mode = 'through';
   let downSince = null;
   let graceTimer = null;
@@ -117,6 +120,7 @@ export function createRelay({
     mode = next;
     emit('mode', mode);
     for (const edge of edges.values()) for (const ss of edge.sessions) if (ss.synced) ss.send({ t: 'relay', status: mode === 'local' ? 'local' : 'through' });
+    emit('status', linkUp() ? 'online' : connection.status);
   }
   function noteLink() {
     if (linkUp()) {
@@ -135,10 +139,18 @@ export function createRelay({
     }, grace);
     if (typeof graceTimer?.unref === 'function') graceTimer.unref();
   }
-  connection.on('status', noteLink);
+  connection.on('status', status => {
+    noteLink();
+    emit('status', status);
+  });
 
   // --- A store's copy --------------------------------------------------------------------
 
+  /**
+   * A store's copy, made on first use from what storage keeps. Storage that
+   * loads asynchronously (a browser's IndexedDB) has the copy wait for it:
+   * meanwhile it is `loading`, and what comes for the store waits too
+   */
   function edgeOf(storeId) {
     if (edges.has(storeId)) return edges.get(storeId);
     let declared;
@@ -150,14 +162,38 @@ export function createRelay({
     }
     if (!declared) return null;
     const shape = createShape(declared);
-    const saved = storage.load(storeId);
+    let saved;
+    try {
+      saved = storage.load(storeId);
+    } catch (err) {
+      fault(err);
+      saved = null;
+    }
+    if (saved && typeof saved.then === 'function') {
+      const waiting = { id: storeId, loading: true, waiting: [], sessions: new Set() };
+      edges.set(storeId, waiting);
+      saved.then(copy => copy, err => { fault(err); return null; }).then(copy => {
+        if (closed) return;
+        const edge = makeEdge(storeId, declared, shape, copy);
+        for (const ss of waiting.sessions) {
+          ss.edge = edge;
+          edge.sessions.add(ss);
+        }
+        for (const run of waiting.waiting) run();
+      });
+      return waiting;
+    }
+    return makeEdge(storeId, declared, shape, saved);
+  }
+
+  function makeEdge(storeId, declared, shape, saved) {
     const edge = {
       id: storeId,
       shape,
       judge: createRules(shape, declared.rules ?? {}, declared.readOnly === true),
-      base: saved ? docFromRecords(shape, saved.records) : createDoc(shape),
+      base: saved ? docFromRecords(shape, saved.records ?? []) : createDoc(shape),
       view: null,
-      have: Boolean(saved),
+      have: Boolean(saved?.records),
       v: saved?.v ?? 0,
       epoch: saved?.epoch ?? null,
       fepoch: saved?.fepoch ?? randomId(),
@@ -184,6 +220,7 @@ export function createRelay({
     return edge;
   }
 
+
   function safeApply(doc, change, ts, mode = 'judge') {
     try {
       return doc.apply(change, ts, mode);
@@ -194,9 +231,13 @@ export function createRelay({
   }
 
   function persist(edge) {
+    const own = edge.queue.filter(e => e.own).length;
+    if (own !== edge.ownPending) {
+      edge.ownPending = own;
+      emit('sync', { store: edge.id, pending: own });
+    }
     const admitted = {};
     for (const [key, set] of edge.admitted) admitted[key] = [...set];
-    const own = edge.queue.filter(e => e.own).map(e => e.op);
     try {
       storage.save(edge.id, {
         records: [...edge.base.records()].map(([c, id, data, clockJSON]) => [c, id ?? null, data, clockJSON]),
@@ -204,7 +245,7 @@ export function createRelay({
         epoch: edge.epoch,
         fepoch: edge.fepoch,
         fv: edge.fv,
-        own: { seq: edge.ownSeq, ops: own },
+        own: { seq: edge.ownSeq, ops: edge.queue.filter(e => e.own).map(e => e.op) },
         admitted
       });
     } catch (err) {
@@ -639,7 +680,7 @@ export function createRelay({
       if (!ss) return;
       stores.delete(id);
       ss.edge.sessions.delete(ss);
-      const grant = local ? null : ss.edge.grants.get(ss.as);
+      const grant = local || ss.edge.loading ? null : ss.edge.grants.get(ss.as);
       if (grant) {
         ss.edge.grants.delete(ss.as);
         if (grant.state === 'admitted' && ss.edge.synced && linkUp()) ss.edge.link.send({ t: 'leave', as: ss.as });
@@ -668,6 +709,8 @@ export function createRelay({
           edge.sessions.add(ss);
         }
         const edge = ss.edge;
+        // Its copy is still being read from storage: this waits for it, in order
+        if (edge.loading) return void edge.waiting.push(() => socket.receive(msg));
         switch (msg.t) {
           case 'hello': {
             if (msg.proto !== PROTOCOL) return ss.end('outdated', `This relay speaks protocol ${PROTOCOL}; the client speaks ${msg.proto ?? 'an older one'}`);
@@ -735,9 +778,13 @@ export function createRelay({
     session,
     patch,
     /** What the relay shows of a store: its copy with the queue on top (plain; read only) */
-    copy: storeId => edges.get(storeId)?.view.state,
+    copy: storeId => edges.get(storeId)?.view?.state,
+    /** The relay's own ops on a store the server has not acknowledged: in 'local' mode, every client's */
+    pending: storeId => edges.get(storeId)?.queue?.filter(e => e.own).length ?? 0,
     /** 'through' while the server answers, 'local' once it has been away for `grace` */
     get mode() { return mode; },
+    /** The link to the server: 'offline' | 'connecting' | 'online' */
+    get status() { return connection.status; },
     on(event, fn) {
       if (!listeners[event]) throw new TypeError(`Unknown relay event "${event}"`);
       listeners[event].add(fn);
@@ -758,6 +805,7 @@ export function createRelay({
     stats() {
       const stores = {};
       for (const [id, edge] of edges) {
+        if (edge.loading) continue;
         stores[id] = {
           sessions: edge.sessions.size,
           queue: edge.queue.length,
@@ -774,6 +822,7 @@ export function createRelay({
       closed = true;
       clearTimeout(graceTimer);
       for (const edge of edges.values()) {
+        if (edge.loading) continue;
         clearTimeout(edge.retry);
         persist(edge);
       }

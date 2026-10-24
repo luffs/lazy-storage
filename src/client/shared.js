@@ -1,85 +1,163 @@
 // shared.js - One socket per browser, however many tabs
 //
 // Every tab of an app is a client, but only one of them should talk to the
-// server: one socket, one replica, one persisted outbox per browser, rather
-// than one of each per tab. The tabs elect a leader with the Web Locks API
-// (the lock's holder; when that tab goes, the next in line gets it), and
-// the leader runs the browser's replica: a hidden client per store on the
-// real connection, persisted through `storage(storeId)`. The app's own
-// clients, in every tab including the leader's, are followers: ordinary
-// clients whose transport reaches the leader over a BroadcastChannel (or
-// directly, in the leader's own tab), where a relay speaks the server
-// protocol to them on the replica's behalf. A follower's hello is answered
-// with the replica's state, its ops are applied to the replica (and so go
-// upstream under the browser's replica id, and into the browser's
-// persisted outbox at once, socket or no socket) and acknowledged, every
-// batch the replica sees goes to the followers as a patch, and presence is
-// passed along. A follower's undo history is its own. Its status and its
-// pending count are the browser's: the socket's status and the replica's
-// unsent ops, which the leader tells the tabs (see `upstream` and
-// `pending` below, which the client reads).
+// server: one socket, one replica, one persisted outbox per browser. The
+// tabs elect a leader with the Web Locks API (the lock's holder; when that
+// tab goes, the next in line gets it), and the leader runs the browser's
+// replica: a relay in 'local' mode (src/relay) on the real socket, its copy
+// of each store and its outbox persisted through `storage(storeId)`. The
+// app's own clients, in every tab including the leader's, are ordinary
+// clients of that relay: their messages reach it over a BroadcastChannel
+// (directly, in the leader's own tab), it acknowledges their ops once they
+// are in the browser's outbox, socket or no socket, and sends every change
+// to every tab. A tab's status and pending count are the browser's: the
+// socket's status, and the replica's unsent ops, which the leader tells the
+// tabs.
 //
-// When the leader tab closes, the next tab acquires the lock, loads the
-// replica's outbox and state from `storage` (asynchronously, for an
-// adapter such as IndexedDB; the tabs' messages wait), connects, and
-// announces itself; the followers reconnect to it and resend whatever the
-// old leader had not acknowledged. Without Web Locks or BroadcastChannel
-// (an old browser, a test) a tab is its own leader and this is one
-// connection.
+// When the leader tab closes, the next tab takes the lock, loads the
+// replica from `storage`, connects, and announces itself; the other tabs
+// say hello to it again, with whatever the old leader had not acknowledged.
+// A tab that closes without a word is found by the lock it held. Without
+// Web Locks or BroadcastChannel a tab is its own leader.
 //
 //   const connection = sharedConnection({
-//     name: 'app',                                            // one per app; names the channel and the lock
+//     name: 'app',                                            // one per app; names the channel and the locks
 //     transport: webSocketTransport(() => `${url}?token=${token()}`),
-//     storage: store => localStorageOutbox(`app:${store}`)   // the browser's replica, per store
+//     storage: store => indexedDBStorage(`app:${store}`)      // the browser's replica, per store
 //   });
-//   const db = createClient({ connection, store: 'team-1', initial, lists });   // in every tab, as ever
+//   const db = createClient({ connection, store: 'team-1', initial });   // in every tab, as ever
 import { LazyWatch } from 'lazy-watch';
 import { createConnection } from './connection.js';
-import { createClient, openClient } from './index.js';
 import { memoryOutbox } from './storage.js';
-import { createClock } from '../core/hlc.js';
+import { createRelay } from '../relay/index.js';
 import { randomId } from '../core/ids.js';
-import { registerSet } from '../core/paths.js';
-import { replacingRegisters } from '../core/model.js';
 
 const { Utils } = LazyWatch;
 
 /**
+ * The relay's copies (relay/storage.js) kept in client storage adapters,
+ * one per store: a row adapter (IndexedDB) holds the records and the
+ * outbox as rows, a document adapter the copy as its cache and the outbox
+ * as its outbox. The outbox is written at once; the records once changes
+ * settle (and on flush)
+ */
+function copiesIn(adapterOf, { delay = 200, onError }) {
+  const adapters = new Map();
+  const written = new Map();   // store -> seqs of the ops written
+  const timers = new Map();
+  const latest = new Map();
+  const adapterFor = id => {
+    if (!adapters.has(id)) adapters.set(id, adapterOf(id));
+    return adapters.get(id);
+  };
+  const metaOf = copy => ({ replicaId: copy.replicaId, seq: copy.own.seq, version: copy.v, epoch: copy.epoch, fepoch: copy.fepoch, fv: copy.fv, admitted: copy.admitted });
+  const writeBase = id => {
+    clearTimeout(timers.get(id));
+    timers.delete(id);
+    const copy = latest.get(id);
+    if (!copy) return;
+    const adapter = adapterFor(id);
+    try {
+      if (typeof adapter.commit === 'function') adapter.replace({ records: copy.records, meta: metaOf(copy) });
+      else adapter.saveState({ records: copy.records, version: copy.v, epoch: copy.epoch, fepoch: copy.fepoch, fv: copy.fv, admitted: copy.admitted });
+    } catch (err) {
+      onError(err);
+    }
+  };
+  let replicaId = null;
+  return {
+    loadMeta: () => (replicaId ? { replicaId } : null),
+    saveMeta: meta => { replicaId = meta.replicaId; },
+    load(id) {
+      const adapter = adapterFor(id);
+      const toCopy = saved => {
+        if (!Utils.isPlainObject(saved)) return null;
+        written.set(id, new Set((saved.ops ?? []).map(op => op.seq)));
+        return {
+          records: Array.isArray(saved.records) ? saved.records : null,
+          v: saved.version ?? 0,
+          epoch: saved.epoch ?? null,
+          fepoch: saved.fepoch,
+          fv: saved.fv,
+          admitted: saved.admitted ?? {},
+          own: { seq: saved.seq ?? 0, ops: Array.isArray(saved.ops) ? saved.ops : [] }
+        };
+      };
+      const saved = adapter.load();
+      return saved && typeof saved.then === 'function' ? saved.then(toCopy) : toCopy(saved);
+    },
+    save(id, copy) {
+      const adapter = adapterFor(id);
+      const full = { ...copy, replicaId };
+      latest.set(id, full);
+      const meta = metaOf(full);
+      const before = written.get(id) ?? new Set();
+      const now = new Set(copy.own.ops.map(op => op.seq));
+      try {
+        if (typeof adapter.saveOp === 'function') {
+          for (const op of copy.own.ops) if (!before.has(op.seq)) adapter.saveOp(op, meta);
+          for (const seq of before) if (!now.has(seq)) adapter.removeOp(seq, meta);
+        } else {
+          adapter.save({ replicaId, seq: copy.own.seq, ops: copy.own.ops });
+        }
+      } catch (err) {
+        onError(err);
+      }
+      written.set(id, now);
+      if (!timers.has(id)) {
+        const timer = setTimeout(() => writeBase(id), delay);
+        if (typeof timer?.unref === 'function') timer.unref();
+        timers.set(id, timer);
+      }
+    },
+    flush() {
+      for (const id of [...timers.keys()]) writeBase(id);
+    }
+  };
+}
+
+/** The relay's replica id, the same in every tab and across leaders: in localStorage when there is one */
+function replicaOf(name) {
+  const key = `lazy-storage:${name}:replica`;
+  try {
+    const known = globalThis.localStorage?.getItem(key);
+    if (known) return known;
+    const id = randomId();
+    globalThis.localStorage?.setItem(key, id);
+    return id;
+  } catch {
+    return randomId();
+  }
+}
+
+/**
  * @param {Object} options
- * @param {string} options.name - names the channel and the lock: one per app
- * @param {() => Object} options.transport - the browser's socket (see
- *   transport.js); opened by the leader only
- * @param {(storeId: string) => Object} [options.storage] - the browser
- *   replica's persistence per store: any adapter, IndexedDB included
- *   (default: memory, so nothing survives a reload)
+ * @param {string} options.name - names the channel and the locks: one per app
+ * @param {() => Object} options.transport - the browser's socket; opened by the leader only
+ * @param {(storeId: string) => Object} [options.storage] - the browser replica's persistence per store:
+ *   any client adapter, IndexedDB included (default: memory, so nothing survives a reload)
+ * @param {(storeId: string) => Object|null} [options.shapeOf] - a store's shape, for a store no tab of
+ *   this leader has declared yet (the tabs' clients declare theirs)
  * @param {{min: number, max: number}|false} [options.reconnect] - for the socket
  * @param {number|false} [options.keepalive] - for the socket
- * @param {boolean} [options.wake=true] - for the socket (see createConnection)
- * @param {((name: string) => Object)|null} [options.channel] - makes the
- *   channel between tabs (default: BroadcastChannel; null for none)
- * @param {Object|null} [options.locks] - a Web Locks manager (default:
- *   navigator.locks; null for none, and this tab leads on its own, as it
- *   does when the manager refuses the request)
+ * @param {((name: string) => Object)|null} [options.channel] - default BroadcastChannel; null for none
+ * @param {Object|null} [options.locks] - default navigator.locks; null for none
  * @param {string} [options.tabId]
- * @param {number} [options.linger=5000] - how long (ms) the replica keeps a
- *   store no tab has open anymore, so a tab reloading finds it as it was;
- *   then its client is disposed and its session on the server ends
- * @param {number} [options.sweepEvery=10000] - how often (ms) the leader
- *   looks for tabs that closed without a word, by the lock each tab holds
- * @param {(error: any) => void} [options.onError] - a replica's storage
- *   that failed to open; default console
+ * @param {string} [options.replicaId] - the browser's replica (default: kept in localStorage)
+ * @param {number} [options.sweepEvery=10000] - how often the leader looks for tabs that closed without a word
+ * @param {(error: any) => void} [options.onError]
  */
 export function sharedConnection({
   name,
   transport,
   storage = () => memoryOutbox(),
+  shapeOf,
   reconnect = { min: 500, max: 10_000 },
   keepalive = 30_000,
-  wake = true,
   channel = typeof BroadcastChannel === 'function' ? channelName => new BroadcastChannel(channelName) : null,
   locks = typeof navigator !== 'undefined' && navigator.locks ? navigator.locks : null,
   tabId = randomId(),
-  linger = 5000,
+  replicaId,
   sweepEvery = 10_000,
   onError = err => console.error('lazy-storage:', err)
 } = {}) {
@@ -88,14 +166,15 @@ export function sharedConnection({
   if (typeof storage !== 'function') throw new TypeError('sharedConnection: storage must be a function of the store id');
 
   const bus = channel ? channel(`lazy-storage:${name}`) : null;
-  const infos = new Map();            // store -> { initial, registers } this tab's clients declared
-  const ports = new Map();            // port followers (see follow): id -> { port, allowed }
+  const shapes = new Map();          // store -> the shape a client declared, here or in another tab
+  const ports = new Map();           // port id -> { port, allowed }
   let nextPort = 0;
   const listeners = { status: new Set(), sync: new Set() };
-  let relay = null;                   // the browser's replica, while this tab leads
-  let upstream = 'connecting';        // the socket's status, as the leader last told this tab
-  let pendingByStore = new Map();     // the replica's unsent ops per store, as the leader last told this tab
-  let current = null;                 // this tab's transport to the relay, while open
+  let relay = null;                  // the browser's replica, while this tab leads
+  const sessions = new Map();        // while leading: tab or port id -> its relay session
+  let upstream = 'connecting';       // the socket's status, as the leader last said
+  let pendingByStore = new Map();    // the replica's unsent ops per store, as the leader last said
+  let current = null;                // this tab's transport to the relay, while open
   let closedByUser = true;
   let disposed = false;
   let releaseLock = null;
@@ -114,20 +193,121 @@ export function sharedConnection({
     }
   }
 
-  // --- This tab's clients: followers of the browser's replica ---------------------------------------
-
   const post = message => bus?.postMessage({ from: tabId, ...message });
 
-  /** From this tab's clients to the relay: in this tab when it leads, else over the channel */
-  function up(message) {
-    if (relay) relay.receive(tabId, structuredClone(message));
-    else post({ kind: 'up', message });
+  // --- Leading ---------------------------------------------------------------------------
+
+  /** A tab's or a port's messages, to the relay here, on a session of its own */
+  function intoRelay(from, message) {
+    if (!relay || !Utils.isPlainObject(message)) return;
+    if (message.ctl === 'store') {
+      if (typeof message.store === 'string' && Utils.isPlainObject(message.shape)) shapes.set(message.store, message.shape);
+      return;
+    }
+    if (message.ctl === 'connect') return relay.upstreamUp();
+    let session = sessions.get(from);
+    if (!session) {
+      session = relay.session({ send: reply => toTab(from, reply), credential: null, key: 'browser' });
+      sessions.set(from, session);
+    }
+    session.receive(message);
+    // A tab saying hello learns where the socket and the replica's outbox stand
+    if (message.t === 'hello') {
+      tell(from, { lazy: 'status', status: relay.status });
+      tell(from, { lazy: 'pending', store: message.store, n: relay.pending(message.store) });
+    }
   }
 
-  /** From the relay to this tab's clients */
-  const down = message => current?.onmessage?.(message);
+  /** From the relay to a tab or a port */
+  function toTab(to, message) {
+    if (to === tabId) current?.onmessage?.(structuredClone(message));
+    else if (ports.has(to)) ports.get(to).port.postMessage(message);
+    else post({ kind: 'down', to, message });
+  }
 
-  /** The transport a follower connection opens: instant, the relay answering from whatever the replica has */
+  /** A control message to a tab or a port (to every one, without `to`) */
+  function tell(to, message) {
+    if (to === undefined) {
+      post({ kind: 'ctl', message });
+      control(message);
+      for (const { port, allowed } of ports.values()) if (message.store === undefined || allowed.has(message.store)) port.postMessage(message);
+      return;
+    }
+    if (to === tabId) return control(message);
+    if (ports.has(to)) return ports.get(to).port.postMessage(message);
+    post({ kind: 'ctl', to, message });
+  }
+
+  function lead() {
+    if (disposed || relay) return;
+    relay = createRelay({
+      acknowledge: 'local',
+      shapeOf: id => shapes.get(id) ?? shapeOf?.(id) ?? null,
+      link: transport,
+      storage: copiesIn(storage, { onError }),
+      replicaId: replicaId ?? replicaOf(name),
+      grace: 0,
+      reconnect,
+      keepalive,
+      onError
+    });
+    relay.on('status', status => tell(undefined, { lazy: 'status', status }));
+    relay.on('sync', ({ store, pending }) => tell(undefined, { lazy: 'pending', store, n: pending }));
+    pendingByStore = new Map();
+    startSweeping();
+    post({ kind: 'ctl', message: { lazy: 'leader' } });
+    // This tab's clients were talking to the old leader, or to nobody: they start over here
+    current?.close();
+    reconnectSoon();
+    for (const { port } of ports.values()) port.postMessage({ lazy: 'reconnect' });
+  }
+
+  function startSweeping() {
+    if (sweeper || !locks || typeof locks.query !== 'function') return;
+    sweeper = setInterval(async () => {
+      if (!relay) return;
+      try {
+        const { held } = await locks.query();
+        const alive = new Set(held.map(lock => lock.name).filter(n => n.startsWith(tabLockPrefix)).map(n => n.slice(tabLockPrefix.length)));
+        for (const [id, session] of [...sessions]) {
+          const owner = id.split('/port/')[0];
+          if (owner === tabId || alive.has(owner)) continue;
+          session.close();
+          sessions.delete(id);
+        }
+      } catch { /* a query that failed tells nothing */ }
+    }, sweepEvery);
+    if (typeof sweeper.unref === 'function') sweeper.unref();
+  }
+
+  // --- Following: this tab's clients ----------------------------------------------------------
+
+  /** This tab's clients to the relay: here when this tab leads, else over the channel */
+  function up(message, from = tabId) {
+    if (relay) intoRelay(from, structuredClone(message));
+    else post({ kind: 'up', from, message });
+  }
+
+  /** What the leader says of the socket and the outbox, which this tab's clients report as theirs */
+  function control(message) {
+    if (message.lazy === 'status' && typeof message.status === 'string') {
+      if (upstream === message.status) return;
+      upstream = message.status;
+      notify('status', follower.status);
+    } else if (message.lazy === 'pending' && typeof message.store === 'string') {
+      const n = Number.isInteger(message.n) ? message.n : 0;
+      if (pendingByStore.get(message.store) === n) return;
+      pendingByStore.set(message.store, n);
+      notify('sync');
+    } else if (message.lazy === 'leader' && !relay) {
+      // A new leader: start over with it, resending what the old one had not acknowledged
+      upstream = 'connecting';
+      current?.close();
+      reconnectSoon();
+      for (const { port } of ports.values()) port.postMessage({ lazy: 'reconnect' });
+    }
+  }
+
   function followerTransport() {
     const t = {
       onopen: null,
@@ -146,8 +326,8 @@ export function sharedConnection({
       if (disposed) return;
       t.open = true;
       current = t;
-      // What this tab's clients declared, so the relay can build the replica's client for a store it has not seen
-      for (const [store, info] of infos) up({ ctl: 'store', store, ...info });
+      // What this tab's clients declared, so the leader knows the shape of a store it has not seen
+      for (const [store, shape] of shapes) up({ ctl: 'store', store, shape });
       t.onopen?.();
     });
     return t;
@@ -155,121 +335,33 @@ export function sharedConnection({
 
   const follower = createConnection({ transport: followerTransport, reconnect: { min: 50, max: 2000 }, keepalive: false });
   follower.on('status', status => notify('status', status));
-
   function reconnectSoon() {
     if (!closedByUser && !disposed) queueMicrotask(() => follower.connect());
-  }
-
-  /** The socket's status as the leader tells it; this tab's clients report it as theirs */
-  function socketStatus(status) {
-    upstream = status;
-    notify('status', follower.status);
-    for (const { port } of ports.values()) port.postMessage({ lazy: 'status', status });
-  }
-
-  /** The replica's unsent ops for a store, to the pages whose store it is (see follow) */
-  function pendingToPorts(store, n) {
-    for (const { port, allowed } of ports.values()) if (allowed.has(store)) port.postMessage({ lazy: 'pending', store, n });
-  }
-
-  function pendingChanged(store, n) {
-    if (pendingByStore.get(store) === n) return;
-    pendingByStore.set(store, n);
-    notify('sync');
-    pendingToPorts(store, n);
   }
 
   if (bus) {
     bus.onmessage = event => {
       const m = event.data;
       if (!Utils.isPlainObject(m) || m.from === tabId) return;
-      if (m.kind === 'up') {
-        if (!relay) return;
-        relay.receive(m.from, m.message);
-        // A tab saying hello learns where the socket and the replica's outbox stand
-        if (Utils.isPlainObject(m.message) && m.message.t === 'hello') {
-          post({ kind: 'ctl', ctl: 'status', to: m.from, status: relay.status });
-          post({ kind: 'ctl', ctl: 'pending', to: m.from, store: m.message.store, n: relay.pending(m.message.store) });
-        }
-        return;
-      }
+      if (m.kind === 'up') return intoRelay(m.from, m.message);
       if (m.kind === 'down') {
-        if (m.to === tabId) down(m.message);
+        if (m.to === tabId) current?.onmessage?.(m.message);
         else ports.get(m.to)?.port.postMessage(m.message);
         return;
       }
-      if (m.kind !== 'ctl' || relay || (m.to !== undefined && m.to !== tabId)) return;   // a leader hears no other leader
-      if (m.ctl === 'leader') {
-        // A new leader: start over with it, resending what the old one had not acknowledged
-        upstream = 'connecting';
-        current?.close();
-        reconnectSoon();
-        reconnectPorts();
-      } else if (m.ctl === 'status') {
-        socketStatus(m.status);
-      } else if (m.ctl === 'pending') {
-        pendingChanged(m.store, m.n);
+      if (m.kind === 'ctl' && !relay && (m.to === undefined || m.to === tabId || ports.has(m.to))) {
+        if (ports.has(m.to)) return ports.get(m.to).port.postMessage(m.message);
+        control(m.message);
+        if (m.to === undefined) for (const { port, allowed } of ports.values()) if (m.message.store === undefined || allowed.has(m.message.store)) port.postMessage(m.message);
       }
     };
     if (typeof bus.unref === 'function') bus.unref();
   }
 
-  // --- Leading: the browser's replica lives in this tab ---------------------------------------------
-
-  /**
-   * A tab that closes rarely gets to say goodbye, but the lock it holds
-   * goes with it: the leader looks now and then for sessions whose tab
-   * holds no lock anymore, and drops them
-   */
-  function startSweeping() {
-    if (sweeper || !locks || typeof locks.query !== 'function') return;
-    sweeper = setInterval(async () => {
-      if (!relay) return;
-      try {
-        const { held } = await locks.query();
-        const alive = new Set(held.map(lock => lock.name).filter(n => n.startsWith(tabLockPrefix)).map(n => n.slice(tabLockPrefix.length)));
-        relay?.sweep(alive);
-      } catch {
-        // A query that failed tells nothing; the next one may
-      }
-    }, sweepEvery);
-    if (typeof sweeper.unref === 'function') sweeper.unref();
-  }
-
-  /** The pages on this tab's ports start over too: a fresh hello, to the leader there is now */
-  function reconnectPorts() {
-    for (const { port } of ports.values()) port.postMessage({ lazy: 'reconnect' });
-  }
-
-  function lead() {
-    if (disposed || relay) return;
-    relay = createReplicaRelay({
-      tabId, transport, storage, reconnect, keepalive, wake, infos, onError, linger,
-      send: (tab, message) => {
-        if (tab === tabId) down(structuredClone(message));
-        else if (ports.has(tab)) ports.get(tab).port.postMessage(message);
-        else post({ kind: 'down', to: tab, message });
-      },
-      onStatus: status => { post({ kind: 'ctl', ctl: 'status', status }); socketStatus(status); },
-      onPending: (store, n) => { post({ kind: 'ctl', ctl: 'pending', store, n }); notify('sync'); pendingToPorts(store, n); }
-    });
-    pendingByStore = new Map();
-    startSweeping();
-    post({ kind: 'ctl', ctl: 'leader' });
-    // Our own clients were talking to the old leader (or to nobody); they start over with the relay here
-    current?.close();
-    reconnectSoon();
-    reconnectPorts();
-  }
-
   if (locks && typeof locks.request === 'function') {
-    // Held for this tab's lifetime, so the leader can tell a closed tab from a quiet one
     locks.request(tabLockPrefix + tabId, { signal: aborter?.signal }, () => new Promise(resolve => {
       releaseTabLock = resolve;
     })).catch(() => {});
-    // A lock manager that refuses (a browser's policy, a bug) must not leave every tab waiting for a
-    // leader that never comes: this tab leads on its own, as without Web Locks. After dispose,
-    // the aborted request rejects too, and lead() is a no-op
     locks.request(`lazy-storage:${name}`, { signal: aborter?.signal }, () => new Promise(resolve => {
       releaseLock = resolve;
       lead();
@@ -289,74 +381,65 @@ export function sharedConnection({
     tabId,
     /** The replica's unsent ops for a store, counted into this tab's clients' `pending` */
     pending(storeId) { return relay ? relay.pending(storeId) : pendingByStore.get(storeId) ?? 0; },
-    /** 'status' (this tab's link, and the socket's status behind it), 'sync' (the replica's outbox changed), 'closed' (the socket was turned away) */
     on(event, fn) {
       if (event === 'closed') return follower.on('closed', fn);
       if (!listeners[event]) throw new TypeError(`Unknown connection event "${event}"`);
       listeners[event].add(fn);
       return () => listeners[event].delete(fn);
     },
-    /** Open this tab's way to the replica, and prod the browser's socket if it is down (a tab just looked at, say) */
+    /** Open this tab's way to the replica, and prod the browser's socket if it is down */
     connect() {
       closedByUser = false;
       follower.connect();
-      if (relay) relay.wake();
-      else post({ kind: 'up', message: { ctl: 'connect' } });
+      up({ ctl: 'connect' });
     },
-    /** Close this tab's clients' way to the replica; the replica itself stays up for the other tabs */
     close() {
       closedByUser = true;
       follower.close();
     },
-    attach(storeId, handler, info) {
-      if (info) {
-        infos.set(storeId, { initial: info.initial ?? {}, registers: info.registers ?? [] });
-        if (current?.open) up({ ctl: 'store', store: storeId, ...infos.get(storeId) });
+    attach(storeId, handler, shape) {
+      if (shape) {
+        shapes.set(storeId, shape);
+        if (current?.open) up({ ctl: 'store', store: storeId, shape });
       }
       return follower.attach(storeId, handler);
     },
     /**
-     * Let the page on the other end of a MessagePort (an iframe, a worker) have clients on
-     * the browser's replica, as this tab's are, for the stores named and no other: its
-     * messages go to the relay under this tab's rights, in a session of its own that lives
-     * as long as this tab's, and the replica's answers come back over the port. The other
-     * end runs an ordinary client on `messagePortTransport(port)`. `stores` are
-     * { store, initial, registers } as clients declare them. Returns what ends it
+     * Let the page on the other end of a MessagePort (an iframe, a worker)
+     * have clients on the browser's replica for the stores named and no
+     * other, under this tab's rights. The other end runs an ordinary client
+     * on `portConnection(port)`. `stores` are { store, ...shape }. Returns
+     * what ends it
      */
     follow(port, stores) {
       if (!port || typeof port.postMessage !== 'function') throw new TypeError('follow needs a MessagePort');
       if (!Array.isArray(stores) || stores.length === 0) throw new TypeError('follow needs the stores the port may use');
       const id = `${tabId}/port/${++nextPort}`;
       const allowed = new Set();
-      for (const { store, initial, registers } of stores) {
+      for (const { store, ...shape } of stores) {
         if (typeof store !== 'string' || !store) throw new TypeError('follow: each store needs an id');
         allowed.add(store);
-        if (!infos.has(store)) {
-          infos.set(store, { initial: initial ?? {}, registers: registers ?? [] });
-          if (current?.open) up({ ctl: 'store', store, ...infos.get(store) });
+        if (!shapes.has(store)) {
+          shapes.set(store, shape);
+          up({ ctl: 'store', store, shape });
         }
       }
       const entry = { port, allowed };
       ports.set(id, entry);
-      // What the page's clients report as theirs: the socket's status, and the replica's unsent ops
       port.postMessage({ lazy: 'status', status: relay ? relay.status : upstream });
       for (const store of allowed) port.postMessage({ lazy: 'pending', store, n: relay ? relay.pending(store) : pendingByStore.get(store) ?? 0 });
-      const toRelay = message => {
-        if (relay) relay.receive(id, message);
-        else post({ kind: 'up', from: id, message });
-      };
-      // Only wire messages for the stores allowed: nothing a tab says about itself (ctl), no other store
       port.onmessage = event => {
         const message = event?.data;
-        if (!Utils.isPlainObject(message) || message.ctl !== undefined || !allowed.has(message.store)) return;
-        toRelay(message);
+        if (!Utils.isPlainObject(message) || message.ctl !== undefined) return;
+        if (message.t !== 'ping' && !allowed.has(message.store)) return;
+        up(message, id);
       };
       if (typeof port.start === 'function') port.start();
       return () => {
         if (ports.get(id) !== entry) return;
         ports.delete(id);
         port.onmessage = null;
-        for (const store of allowed) toRelay({ t: 'leave', store });
+        for (const store of allowed) up({ t: 'leave', store }, id);
       };
     },
     /** This tab is done: its clients disconnect and, if it led, the replica closes and another tab takes over */
@@ -367,7 +450,9 @@ export function sharedConnection({
       follower.close();
       clearInterval(sweeper);
       sweeper = null;
-      relay?.dispose();
+      for (const session of sessions.values()) session.close();
+      sessions.clear();
+      relay?.close();
       relay = null;
       aborter?.abort();
       releaseLock?.();
@@ -375,326 +460,4 @@ export function sharedConnection({
       bus?.close();
     }
   };
-}
-
-/** A fresh replica writes its identity at once, so a tab taking over before any edit continues it rather than minting another */
-function persistIdentity(adapter, client) {
-  if (typeof adapter.commit === 'function') adapter.commit({ puts: [], deletes: [], meta: { replicaId: client.replicaId, seq: 0, version: 0, epoch: null } });
-  else adapter.save({ replicaId: client.replicaId, seq: 0, ops: [] });
-}
-
-/**
- * The browser's replica and the server protocol spoken to the followers on
- * its behalf: a hidden client per store on the real connection, and per
- * follower and store a session that is answered like a server would.
- */
-function createReplicaRelay({ tabId, transport, storage, reconnect, keepalive, wake, infos, linger, send, onStatus, onPending, onError }) {
-  const socket = createConnection({ transport, reconnect, keepalive, wake });
-  const entries = new Map();   // store -> { client, registers, sessions: Map<tab, session>, queue, stops, timer }
-  const clock = createClock(`relay-${tabId}`);
-  // The socket opens with the first hidden client; until it has been tried it is connecting, not down
-  let attempted = false;
-  const stops = [
-    socket.on('status', status => {
-      attempted = true;
-      onStatus(status);
-    }),
-    // The socket was turned away (not signed in): final for every follower's connection too
-    socket.on('closed', info => {
-      for (const entry of [...entries.values()]) for (const s of [...entry.sessions.values()]) send(s.tab, { t: 'closed', code: info.code, message: info.message });
-    })
-  ];
-
-  /**
-   * The replica's client for a store, made on first use. An adapter that
-   * loads asynchronously (IndexedDB) makes it a moment later; the tabs'
-   * messages for the store wait in the entry's queue meanwhile. It hears
-   * presence only while a follower on the store wants it (see
-   * followPresence), from its first hello on: `presence` is the wish of the
-   * message that made it, a follower's hello
-   */
-  function entryFor(store, presence = true) {
-    let entry = entries.get(store);
-    if (entry) return entry;
-    const info = infos.get(store) ?? { initial: {}, registers: [] };
-    const regs = registerSet(info.registers);
-    // `base`, `floor` and `epoch`: the versions followers hear count on from the replica's across its epochs (see fv)
-    entry = { store, client: null, adapter: null, regs, registers: regs.patterns.map(p => p.join('/')), sessions: new Map(), queue: [], stops: [], timer: null, base: 0, floor: 0, lastFv: 0, epoch: undefined };
-    entries.set(store, entry);
-    const adapter = storage(store);
-    entry.adapter = adapter;
-    const options = { connection: socket, store, initial: structuredClone(info.initial), registers: info.registers, undo: false, presence };
-    const ready = (saved, client, persisted = true) => {
-      if (entries.get(store) !== entry) return void client.dispose();   // let go while it was opening
-      if (!saved && persisted) persistIdentity(adapter, client);
-      entry.client = client;
-      entry.epoch = client.epoch;
-      // Over a copy: a follower told may leave and come back from inside the event, which must not have it told again
-      const all = message => { for (const s of [...entry.sessions.values()]) send(s.tab, { ...message, store }); };
-      entry.stops = [
-        // Every batch the replica sees, its followers' own included, reaches every follower
-        client.watch(diff => all({ t: 'patch', diff, ts: clock.now(), v: fv(entry) })),
-        client.on('peers', peers => { for (const s of entry.sessions.values()) if (s.presence) send(s.tab, { t: 'presence', peers, store }); }),
-        // A store the server closed for us. The socket turned away is the hidden client's closed too,
-        // but reaches the followers once, as the socket's (above), after every hidden client has heard
-        client.on('closed', c => { if (!socket.closed) all({ t: 'closed', code: c.code, message: c.message }); }),
-        client.on('error', err => all({ t: 'error', code: err.code, message: err.message })),
-        // What the replica's ops lost or had refused: the browser's, so every tab hears it
-        client.on('conflict', conflict => all({ t: 'conflict', ...conflict })),
-        client.on('rejected', rejected => all({ t: 'rejected', ...rejected })),
-        // The store started over (a backup restored): only the replica can tell, by the epoch
-        client.on('reset', reset => all({ t: 'reset', ...reset })),
-        // An answer that moved the versions to another epoch without changing the state (a copy restored that
-        // equals it, the server back after a relay answered alone) forwards no batch: the followers are given the
-        // new numbering by a patch of nothing, or they would stay below the floor until something changed
-        client.on('sync', () => { if (renumber(entry)) all({ t: 'patch', diff: {}, ts: clock.now(), v: fv(entry) }); }),
-        // A relay on the way answers on its own (lazy-storage/relay), or no longer does: every tab's to know
-        client.on('relay', relayed => all({ t: 'relay', status: relayed ? 'local' : 'through' })),
-        client.on('sync', () => onPending(store, client.pending))
-      ];
-      client.connect();
-      const queued = entry.queue;
-      entry.queue = [];
-      for (const [tab, message] of queued) relay.receive(tab, message);
-    };
-    // Storage that cannot be opened (IndexedDB refused, a quota, a broken
-    // adapter) must not strand the tabs waiting on this store: the replica
-    // runs from memory instead, and every tab hears why its edits will not
-    // outlive the browser session
-    const inMemory = err => {
-      onError(err);
-      // Gone, or the client is up already (what threw came after it): nothing to stand in for
-      if (entries.get(store) !== entry || entry.client) return;
-      entry.adapter = null;
-      ready(null, createClient({ ...options, storage: memoryOutbox() }), false);
-      const warning = { t: 'error', store, code: 'storage-unavailable', message: `The browser's storage for "${store}" could not be opened (${err?.message ?? err}); edits are kept in memory only` };
-      for (const s of entry.sessions.values()) send(s.tab, warning);
-      entry.warning = warning;   // for a tab that says hello later
-    };
-    // The leader's lock already makes it the one tab on this storage: a
-    // lease a crashed leader left behind must not turn it away
-    if (typeof adapter.takeOver === 'function') adapter.takeOver();
-    let loaded;
-    try {
-      loaded = adapter.load();
-    } catch (err) {
-      inMemory(err);
-      return entry;
-    }
-    // The client loads from what was just loaded rather than loading it all
-    // again (an IndexedDB read of every row): the adapter, with that load
-    const loadedOnce = Object.create(adapter);
-    loadedOnce.load = () => loaded;
-    options.storage = loadedOnce;
-    if (loaded && typeof loaded.then === 'function') {
-      loaded.then(saved => openClient(options).then(client => ready(saved, client))).catch(inMemory);
-    } else {
-      try {
-        ready(loaded, createClient(options));
-      } catch (err) {
-        inMemory(err);
-      }
-    }
-    return entry;
-  }
-
-  /**
-   * A follower left a store. With nobody left on it the replica lingers a
-   * moment (a tab reloading comes straight back), then its client is
-   * disposed, which ends its session on the server; the persisted outbox
-   * and cache stay for the next tab to open the store
-   */
-  function dropSession(entry, tab) {
-    if (!entry.sessions.delete(tab)) return;
-    if (entry.sessions.size > 0) return void followPresence(entry);
-    clearTimeout(entry.timer);
-    entry.timer = setTimeout(() => release(entry.store), linger);
-    if (typeof entry.timer.unref === 'function') entry.timer.unref();
-  }
-
-  /** The replica hears presence while some follower on the store wants it, and not otherwise: the server sends none nobody reads */
-  function followPresence(entry) {
-    if (!entry.client || entry.sessions.size === 0) return;
-    let wanted = false;
-    for (const s of entry.sessions.values()) if (s.presence) wanted = true;
-    entry.client.wantPresence(wanted);
-  }
-
-  function release(store) {
-    const entry = entries.get(store);
-    if (!entry || entry.sessions.size > 0) return;
-    entries.delete(store);
-    for (const stop of entry.stops) stop();
-    entry.client?.dispose();
-    // An adapter holding a connection open (IndexedDB) lets it go with the store
-    if (typeof entry.adapter?.close === 'function') entry.adapter.close();
-  }
-
-  /**
-   * Run `then` once what the replica has been handed so far is in its
-   * storage: its batch closed now (so the op exists and is written), and,
-   * with storage that writes asynchronously (IndexedDB), those writes
-   * settled. A follower drops an op when it is acknowledged, so the
-   * acknowledgement waits: a leader tab killed in between would otherwise
-   * take the only copy with it
-   */
-  function durable(entry, then) {
-    LazyWatch.flush(entry.client.wire);
-    const settled = typeof entry.adapter?.settled === 'function' ? entry.adapter.settled() : null;
-    if (settled && typeof settled.then === 'function') settled.then(then, then);
-    else then();
-  }
-
-  /**
-   * Run `then` once the replica's client for a store is not still connecting:
-   * 'online' (the server's snapshot or delta applied, its state current) or
-   * 'offline' (the socket down: what the replica has is what there is). A
-   * replica made for a tab's first hello starts empty, or from its storage,
-   * and answering from that while the server's answer is on its way would
-   * have the tab report 'online' with a state that is not
-   */
-  function settled(client, then) {
-    if (client.status !== 'connecting') return void then();
-    const stop = client.on('status', status => {
-      if (status === 'connecting') return;
-      stop();
-      then();
-    });
-  }
-
-  /**
-   * The version a follower hears: the replica's, counted on across the
-   * epochs its versions count in. A restore starts the server's versions
-   * over (lower, as often as not), and a relay answering on its own counts
-   * past the server's; a follower's op says only a number. So the numbers
-   * followers hear never go back: at the first message of a new epoch (the
-   * snapshot that brought it, before anything else goes out) they count on
-   * from the last one sent (`floor`), offset from the replica's by `base`,
-   * and an op below the floor was made in sight of an earlier epoch
-   */
-  function fv(entry) {
-    renumber(entry);
-    return (entry.lastFv = Math.max(entry.lastFv, entry.base + entry.client.version));
-  }
-
-  /** Whether the replica's versions count in another epoch than the followers' numbering does; if so, count on from the last number sent */
-  function renumber(entry) {
-    const { client } = entry;
-    if (client.epoch === entry.epoch) return false;
-    entry.epoch = client.epoch;
-    entry.floor = entry.lastFv + 1;
-    entry.base = entry.floor - client.version;
-    return true;
-  }
-
-  /**
-   * Apply a follower's op to the replica (once per seq): a register it
-   * writes is replaced, as the server would. The batch goes with what the
-   * follower had seen and made (`seen`, `made`), so the op the replica
-   * sends says what the follower's did, not what this tab has: a follower
-   * that lags (a background tab, throttled) may still hold a container
-   * this tab saw deleted, and its edit of it must be judged as such; one
-   * from before the replica's last reset had seen nothing of this epoch
-   */
-  function apply(entry, session, op) {
-    if (!Utils.isPlainObject(op) || !Number.isInteger(op.seq)) return;
-    if (op.seq > session.lastSeq) {
-      session.lastSeq = op.seq;
-      renumber(entry);   // the numbering may have moved since anything was sent
-      const seen = Number.isInteger(op.v) && op.v >= entry.floor ? Math.max(0, op.v - entry.base) : 0;
-      if (Utils.isPlainObject(op.diff)) LazyWatch.patch(entry.client.wire, replacingRegisters(op.diff, entry.regs, entry.client.wire), { origin: 'follower', seen, made: op.made });
-    }
-  }
-
-  const relay = {
-    get status() { return attempted ? socket.status : 'connecting'; },
-    /** The replica's unsent ops for a store */
-    pending(store) { return entries.get(store)?.client?.pending ?? 0; },
-    /** A tab asked for the socket: reconnect now rather than at the next backoff step, unless it was turned away */
-    wake() {
-      if (attempted && socket.status === 'offline' && !socket.closed) socket.connect();
-    },
-    /** A message from a follower tab: a store declaration, a nudge, or a wire message for one of its stores */
-    receive(tab, message) {
-      if (!Utils.isPlainObject(message)) return;
-      if (message.ctl === 'store') {
-        if (typeof message.store === 'string' && !infos.has(message.store)) infos.set(message.store, { initial: message.initial ?? {}, registers: message.registers ?? [] });
-        return;
-      }
-      if (message.ctl === 'connect') return void relay.wake();
-      const { store } = message;
-      if (typeof store !== 'string' || !store) return;
-      // Let go of a store the replica never opened (a page's port allowed more than it used): nothing to do
-      if (message.t === 'leave' && !entries.has(store)) return;
-      const entry = entryFor(store, !(message.t === 'hello' && message.presence === false));
-      if (!entry.client) return void entry.queue.push([tab, message]);
-      const { client } = entry;
-      let session = entry.sessions.get(tab);
-      if (message.t === 'leave') return void dropSession(entry, tab);
-      if (!session) {
-        session = { tab, replicaId: null, lastSeq: 0, presence: true };
-        entry.sessions.set(tab, session);
-        clearTimeout(entry.timer);
-        entry.timer = null;
-      }
-      switch (message.t) {
-        case 'hello':
-          if (typeof message.replicaId !== 'string') return;
-          if (session.replicaId !== message.replicaId) {
-            session.replicaId = message.replicaId;
-            session.lastSeq = 0;
-          }
-          session.presence = message.presence !== false;
-          followPresence(entry);
-          // Answered from whatever the replica has, socket or no socket; a store the server had closed for us is tried again
-          if (client.closed) client.connect();
-          for (const op of Array.isArray(message.ops) ? message.ops : []) apply(entry, session, op);
-          if (message.share !== undefined) client.share(message.share);
-          if (entry.warning) send(tab, entry.warning);
-          // The answer acknowledges the hello's ops: sent once they are stored, and once the replica
-          // has the store from the server while the socket is up (a tab says 'online' on this answer,
-          // as a plain client does on the server's, so its state has to be current by then); with the
-          // socket down or failing, at once, from whatever the replica has
-          durable(entry, () => settled(client, () => {
-            if (entry.sessions.get(tab) !== session) return;
-            send(tab, { t: 'snapshot', store, state: LazyWatch.snapshot(client.wire), ts: clock.now(), seq: session.lastSeq, registers: entry.registers, v: fv(entry), epoch: null });
-            if (client.relayed) send(tab, { t: 'relay', store, status: 'local' });
-            if (session.presence) send(tab, { t: 'presence', store, peers: client.peers });
-          }));
-          return;
-        case 'op':
-          apply(entry, session, message.op);
-          if (Utils.isPlainObject(message.op)) {
-            const { seq } = message.op;
-            durable(entry, () => send(tab, { t: 'ack', store, seq, ts: clock.now(), correction: null }));
-          }
-          return;
-        case 'share':
-          client.share(message.data ?? null);
-          return;
-        case 'ping':
-          send(tab, { t: 'pong' });
-          return;
-      }
-    },
-    /** Drop the sessions of tabs no longer alive (their locks gone); `alive` holds the tab ids that are. A port's session lives as long as its tab's */
-    sweep(alive) {
-      const live = tab => alive.has(tab) || alive.has(tab.split('/port/')[0]);
-      for (const entry of [...entries.values()]) {
-        for (const tab of [...entry.sessions.keys()]) if (tab !== tabId && !live(tab)) dropSession(entry, tab);
-      }
-    },
-    dispose() {
-      for (const stop of stops) stop();
-      for (const entry of entries.values()) {
-        clearTimeout(entry.timer);
-        for (const stop of entry.stops) stop();
-        entry.client?.dispose();
-        if (typeof entry.adapter?.close === 'function') entry.adapter.close();
-      }
-      entries.clear();
-      socket.close();
-    }
-  };
-  return relay;
 }
