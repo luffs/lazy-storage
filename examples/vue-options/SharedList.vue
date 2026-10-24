@@ -4,7 +4,7 @@
     <button>Add</button>
   </form>
   <ul>
-    <li v-for="task in state.tasks" :key="task.id" :class="{ done: task.done }">
+    <li v-for="task in inOrder(state.tasks)" :key="task.id" :class="{ done: task.done }">
       <input type="checkbox" :checked="task.done" @change="toggle(task.id, $event.target.checked)">
       <span>{{ task.title }}</span>
       <button @click="remove(task.id)">x</button>
@@ -14,6 +14,7 @@
 </template>
 
 <script>
+import { inOrder } from 'lazy-storage';
 import { useClient } from 'lazy-storage/vue';
 
 /**
@@ -32,15 +33,15 @@ export default {
     return { ...useClient(this.db), title: '' };
   },
   methods: {
-    at(id) { return this.db.state.tasks.findIndex(task => task.id === id); },
+    inOrder,
     add() {
       const text = this.title.trim();
       if (!text) return;
-      this.db.state.tasks.push({ title: text, done: false });   // an id is minted and written back
+      this.db.list('tasks').add({ title: text, done: false });  // at the end; an id is minted
       this.title = '';
     },
-    toggle(id, done) { this.db.state.tasks[this.at(id)].done = done; },
-    remove(id) { this.db.state.tasks.splice(this.at(id), 1); },
+    toggle(id, done) { this.db.state.tasks[id].done = done; },
+    remove(id) { this.db.list('tasks').remove(id); },
     undo() { this.db.undo(); },
     redo() { this.db.redo(); }
   }

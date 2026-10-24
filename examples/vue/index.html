@@ -24,7 +24,7 @@
     <button>Add</button>
   </form>
   <ul>
-    <li v-for="task in state.tasks" :key="task.id" :class="{ done: task.done }">
+    <li v-for="task in inOrder(state.tasks)" :key="task.id" :class="{ done: task.done }">
       <input type="checkbox" :checked="task.done" @change="toggle(task.id, $event.target.checked)">
       <span>{{ task.title }}</span>
       <button @click="remove(task.id)">x</button>
@@ -46,7 +46,7 @@
 </script>
 <script type="module">
   import { createApp, ref, computed } from 'vue';
-  import { createClient, sharedConnection, webSocketTransport, localStorageOutbox } from 'lazy-storage';
+  import { createClient, sharedConnection, webSocketTransport, localStorageOutbox, inOrder } from 'lazy-storage';
   import { useClient } from 'lazy-storage/vue';
 
   const name = new URLSearchParams(location.search).get('name') || localStorage.getItem('example:name') || prompt('Your name?') || 'anonymous';
@@ -59,7 +59,8 @@
     transport: webSocketTransport(() => `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws?name=${encodeURIComponent(name)}`),
     storage: store => localStorageOutbox(`example:${store}`)
   });
-  const db = createClient({ connection, store: 'shared', initial: { tasks: [] }, lists: ['tasks'] });
+  const db = createClient({ connection, store: 'shared', initial: { tasks: {} } });
+  const tasks = db.list('tasks');   // the records in order; an add or a move writes one position
 
   createApp({
     setup() {
@@ -69,17 +70,16 @@
       const { state, status, presence } = useClient(db);
       const title = ref('');
       const statusText = computed(() => (status.value === 'online' ? `Online as ${name}` : status.value === 'connecting' ? 'Connecting…' : `Offline as ${name}`));
-      const at = id => db.state.tasks.findIndex(task => task.id === id);
       return {
-        db, state, presence, title, statusText,
+        db, state, presence, title, statusText, inOrder,
         add() {
           const text = title.value.trim();
           if (!text) return;
-          db.state.tasks.push({ title: text, done: false });      // an id is minted and written back
+          tasks.add({ title: text, done: false });                 // at the end; an id is minted
           title.value = '';
         },
-        toggle(id, done) { db.state.tasks[at(id)].done = done; },
-        remove(id) { db.state.tasks.splice(at(id), 1); }
+        toggle(id, done) { db.state.tasks[id].done = done; },
+        remove(id) { tasks.remove(id); }
       };
     }
   }).mount('#app');

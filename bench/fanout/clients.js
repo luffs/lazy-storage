@@ -188,7 +188,7 @@ function writeOp(c, i, at, pad) {
   c.pending.set(seq, sent);
   const ph = window.phase;
   const value = ph === null ? { i, at, sent, pad } : { i, at, sent, ph, pad };
-  c.ws.send(JSON.stringify({ t: 'op', store: c.store, op: { replicaId: c.replicaId, seq, ts: [ms, c.tick, c.replicaId], diff: { feed: { [`w-${c.id}`]: value } } } }));
+  c.ws.send(JSON.stringify({ t: 'op', store: c.store, op: { replica: c.replicaId, seq, ts: ms, changes: [{ c: 'feed', id: `w-${c.id}`, put: value }] } }));
   stats.written[c.store] = (stats.written[c.store] || 0) + 1;
 }
 
@@ -280,9 +280,9 @@ for (let j = 0; j < N; j++) {
   const url = new URL(TARGETS[i % TARGETS.length]);
   for (const [key, value] of QUERY) url.searchParams.set(key, value);
   url.searchParams.set(AUTH, id);
-  const helloMessage = { t: 'hello', proto: PROTOCOL, store, replicaId: `r-${RUN}${id}`, ops: [], ...(ADMIN ? {} : { presence: false }) };
+  const helloMessage = { t: 'hello', proto: PROTOCOL, store, replica: `r-${RUN}${id}`, ops: [], ...(ADMIN ? {} : { presence: false }) };
   clients.push({
-    id, store, replicaId: helloMessage.replicaId, url: url.href, answered: false, v: null, epoch: null,
+    id, store, replicaId: helloMessage.replica, url: url.href, answered: false, v: null, epoch: null,
     helloMessage, hello: JSON.stringify(helloMessage),
     // A writer's: its last seq, its clock (ms and the count within it), and its ops not yet acknowledged (seq -> when sent)
     seq: 0, ms: 0, tick: 0, pending: new Map(),

@@ -15,13 +15,13 @@ import { LazyWatch } from 'lazy-watch';
 import { createStore, toJSON, snapshotResponse } from '../src/server/index.js';
 import { createClient } from '../src/client/index.js';
 import { localStorageOutbox } from '../src/client/storage.js';
-import { createClock } from '../src/core/hlc.js';
+import { createClock } from '../src/core/clock.js';
 import { PROTOCOL } from '../src/core/index.js';
 
 const args = Object.fromEntries(process.argv.slice(2).map((a, i, all) => (a.startsWith('--') ? [a.slice(2), Number(all[i + 1]) || true] : [])).filter(x => x.length));
 const ROUNDS = Number(args.rounds) || 5;
-const INITIAL = { tasks: {}, order: [] };
-const REGISTERS = ['order'];
+const INITIAL = { tasks: {}, meta: { order: [] } };
+const SHAPE = { initial: INITIAL, singletons: ['meta'] };
 const results = [];
 
 function bench(name, { setup, run, iterations, unit = 'op' }) {
@@ -42,13 +42,13 @@ const ids = n => Array.from({ length: n }, (_, i) => `t${i.toString(36).padStart
 
 /** A store seeded with `n` tasks, plus a clock and ids for ops against it */
 function seeded(n, options = {}) {
-  const store = createStore({ initial: INITIAL, registers: REGISTERS, rateLimit: false, ...options });
+  const store = createStore({ ...SHAPE, rateLimit: false, ...options });
   const all = ids(n);
   const tasks = {};
   for (const id of all) tasks[id] = { id, title: `task ${id}`, done: false, n: 1 };
-  store.patch({ tasks, order: all });
+  store.patch({ tasks, meta: { order: all } });
   store.flush();   // the seed stored before the timing starts, not with the first case's commit
-  return { store, ids: all, clock: createClock('bench'), seq: 0, dispose: () => store.dispose() };
+  return { store, ids: all, clock: createClock(), seq: 0, dispose: () => store.dispose() };
 }
 
 // --- The merge -----------------------------------------------------------------------
@@ -57,7 +57,7 @@ bench('merge: one-leaf op into a 10k-task store', {
   setup: () => seeded(10_000),
   iterations: 5000,
   run: (c, n) => {
-    for (let i = 0; i < n; i++) c.store.apply({ replicaId: 'bench', seq: ++c.seq, ts: c.clock.now(), diff: { tasks: { [c.ids[i % c.ids.length]]: { title: `edit ${i}` } } } });
+    for (let i = 0; i < n; i++) c.store.apply({ replica: 'bench', seq: ++c.seq, ts: c.clock.stamp(), changes: [{ c: 'tasks', id: c.ids[i % c.ids.length], path: ['title'], set: `edit ${i}` }] });
     c.store.flush();   // the commit (grouped: see the store's groupCommit) and what waited for it, timed too
   }
 });
@@ -67,30 +67,30 @@ bench('merge: ten-leaf record add', {
   iterations: 5000,
   run: (c, n) => {
     for (let i = 0; i < n; i++) {
-      c.store.apply({ replicaId: 'bench', seq: ++c.seq, ts: c.clock.now(), diff: { tasks: { [`new${i}`]: { id: `new${i}`, title: 'x', done: false, a: 1, b: 2, c: 3, d: 4, e: 5, f: 6, g: 7 } } } });
+      c.store.apply({ replica: 'bench', seq: ++c.seq, ts: c.clock.stamp(), changes: [{ c: 'tasks', id: `new${i}`, put: { id: `new${i}`, title: 'x', done: false, a: 1, b: 2, c: 3, d: 4, e: 5, f: 6, g: 7 } }] });
     }
     c.store.flush();
   }
 });
 
-bench('merge: register write, 1000 ids', {
+bench('merge: an array of 1000 ids written whole', {
   setup: () => seeded(1000),
   iterations: 2000,
   run: (c, n) => {
-    for (let i = 0; i < n; i++) c.store.apply({ replicaId: 'bench', seq: ++c.seq, ts: c.clock.now(), diff: { order: i % 2 ? c.ids : [...c.ids].reverse() } });
+    for (let i = 0; i < n; i++) c.store.apply({ replica: 'bench', seq: ++c.seq, ts: c.clock.stamp(), changes: [{ c: 'meta', path: ['order'], set: i % 2 ? c.ids : [...c.ids].reverse() }] });
     c.store.flush();
   }
 });
 
-bench('session: one-leaf op through the gates (read-only paths, validate, skew, retention)', {
+bench('session: one-change op through the gates (rules, validate, retention)', {
   setup: () => {
-    const c = seeded(10_000, { readOnly: ['team'], validate: () => true });
+    const c = seeded(10_000, { readOnly: ['meta'], rules: { tasks: () => true }, validate: () => true });
     c.session = c.store.session({ send: () => {} });
     return c;
   },
   iterations: 5000,
   run: (c, n) => {
-    for (let i = 0; i < n; i++) c.session.receive({ t: 'op', op: { replicaId: 'bench', seq: ++c.seq, ts: c.clock.now(), diff: { tasks: { [c.ids[i % c.ids.length]]: { title: `edit ${i}` } } } } });
+    for (let i = 0; i < n; i++) c.session.receive({ t: 'op', op: { replica: 'bench', seq: ++c.seq, ts: c.clock.stamp(), changes: [{ c: 'tasks', id: c.ids[i % c.ids.length], path: ['title'], set: `edit ${i}` }] } });
     c.store.flush();
   }
 });
@@ -125,15 +125,16 @@ function fakeLocalStorage() {
 
 /** An in-memory row adapter that clones like IndexedDB does */
 function memoryRows() {
-  const leaves = new Map();
+  const records = new Map();
   const ops = new Map();
+  const key = (c, id) => JSON.stringify([c, id]);
   return {
     load: () => null,
     commit({ puts, deletes }) {
-      for (const key of deletes) leaves.delete(key);
-      for (const [key, value] of puts) leaves.set(key, structuredClone(value));
+      for (const [c, id] of deletes) records.delete(key(c, id));
+      for (const record of puts) records.set(key(record[0], record[1]), structuredClone(record));
     },
-    replace({ rows }) { leaves.clear(); for (const [k, v] of rows) leaves.set(k, structuredClone(v)); },
+    replace({ records: all }) { records.clear(); for (const record of all) records.set(key(record[0], record[1]), structuredClone(record)); },
     saveOp(op) { ops.set(op.seq, structuredClone(op)); },
     removeOp(seq) { ops.delete(seq); },
     dropOps(seq) { for (const k of ops.keys()) if (k <= seq) ops.delete(k); }
@@ -141,11 +142,11 @@ function memoryRows() {
 }
 
 function clientWith(storage, n) {
-  const client = createClient({ transport: idle, reconnect: false, store: 'bench', initial: INITIAL, registers: REGISTERS, storage, replicaId: 'bench' });
+  const client = createClient({ transport: idle, reconnect: false, store: 'bench', ...SHAPE, storage, replicaId: 'bench' });
   const all = ids(n);
   const tasks = {};
   for (const id of all) tasks[id] = { id, title: `task ${id}`, done: false };
-  LazyWatch.patch(client.state, { tasks, order: all }, { origin: 'remote' });
+  LazyWatch.patch(client.state, { tasks, meta: { order: all } }, { origin: 'remote' });
   return { client, ids: all, dispose: () => client.dispose() };
 }
 
@@ -184,7 +185,7 @@ bench('hello: answered with a snapshot after an op, 10k-task store (encoded)', {
   run: (c, n) => {
     for (let i = 0; i < n; i++) {
       c.store.patch({ tasks: { [c.ids[i]]: { title: `edit ${i}` } } });   // the cached encoding is stale
-      c.session.receive({ t: 'hello', proto: PROTOCOL, replicaId: `r${i}`, ops: [] });
+      c.session.receive({ t: 'hello', proto: PROTOCOL, replica: `r${i}`, ops: [] });
     }
     c.store.flush();
   }
@@ -195,12 +196,12 @@ bench('hello: answered with a snapshot while the store is quiet (cached encoding
   setup: () => {
     const c = seeded(10_000);
     c.session = c.store.session({ send: message => { toJSON(message); } });
-    c.session.receive({ t: 'hello', proto: PROTOCOL, replicaId: 'warm', ops: [] });
+    c.session.receive({ t: 'hello', proto: PROTOCOL, replica: 'warm', ops: [] });
     return c;
   },
   iterations: 200,
   run: (c, n) => {
-    for (let i = 0; i < n; i++) c.session.receive({ t: 'hello', proto: PROTOCOL, replicaId: `r${i}`, ops: [] });
+    for (let i = 0; i < n; i++) c.session.receive({ t: 'hello', proto: PROTOCOL, replica: `r${i}`, ops: [] });
   }
 });
 
@@ -215,7 +216,7 @@ bench('hello: answered with a delta of 10 ops, 10k-task store (encoded)', {
   },
   iterations: 200,
   run: (c, n) => {
-    for (let i = 0; i < n; i++) c.session.receive({ t: 'hello', proto: PROTOCOL, replicaId: `r${i}`, ops: [], since: c.since, epoch: c.store.epoch });
+    for (let i = 0; i < n; i++) c.session.receive({ t: 'hello', proto: PROTOCOL, replica: `r${i}`, ops: [], since: c.since, epoch: c.store.epoch });
   }
 });
 
@@ -231,13 +232,13 @@ bench('hello: snapshot on the socket, compressed per socket (deflate of the cach
   setup: () => {
     const c = seeded(10_000);
     c.session = c.store.session({ send: message => { c.json = toJSON(message); } });
-    c.session.receive({ t: 'hello', proto: PROTOCOL, replicaId: 'warm', ops: [] });
+    c.session.receive({ t: 'hello', proto: PROTOCOL, replica: 'warm', ops: [] });
     return c;
   },
   iterations: 20,
   run: (c, n) => {
     for (let i = 0; i < n; i++) {
-      c.session.receive({ t: 'hello', proto: PROTOCOL, replicaId: `r${i}`, ops: [] });
+      c.session.receive({ t: 'hello', proto: PROTOCOL, replica: `r${i}`, ops: [] });
       deflateRawSync(c.json);   // what the socket does with the answer, per socket
     }
   }
@@ -255,7 +256,7 @@ bench('hello: snapshot over HTTP, the route answering the fetch that follows (co
   iterations: 2000,
   run: (c, n) => {
     for (let i = 0; i < n; i++) {
-      c.session.receive({ t: 'hello', proto: PROTOCOL, replicaId: `r${i}`, ops: [], fetch: true });   // answered with the route
+      c.session.receive({ t: 'hello', proto: PROTOCOL, replica: `r${i}`, ops: [], fetch: true });   // answered with the route
       snapshotResponse(c.store, c.request);                                            // the fetch
     }
   }
@@ -273,7 +274,7 @@ bench('hello: snapshot over HTTP, a reload of a store that has not changed (304)
   iterations: 2000,
   run: (c, n) => {
     for (let i = 0; i < n; i++) {
-      c.session.receive({ t: 'hello', proto: PROTOCOL, replicaId: `r${i}`, ops: [], fetch: true });
+      c.session.receive({ t: 'hello', proto: PROTOCOL, replica: `r${i}`, ops: [], fetch: true });
       snapshotResponse(c.store, c.request);
     }
   }
@@ -285,7 +286,7 @@ bench('hello: snapshot over HTTP, a reload of a store that has not changed (304)
 const sized = seeded(10_000);
 let snapshotJSON = '';
 sized.store.session({ send: message => { if (message.t === 'snapshot') snapshotJSON = toJSON(message); } })
-  .receive({ t: 'hello', proto: PROTOCOL, replicaId: 'size', ops: [] });
+  .receive({ t: 'hello', proto: PROTOCOL, replica: 'size', ops: [] });
 const rawBytes = Buffer.byteLength(snapshotJSON);
 const deflatedBytes = deflateRawSync(Buffer.from(snapshotJSON)).length;
 const routeBytes = async encoding => (await snapshotResponse(sized.store, new Request(SNAPSHOT_ROUTE, { headers: { 'accept-encoding': encoding } })).arrayBuffer()).byteLength;
@@ -313,8 +314,8 @@ console.log(`\nwire: a 10k-task snapshot is ${fmt(rawBytes / 1024)} KB of JSON, 
 const GUARDS = {
   'merge: one-leaf op into a 10k-task store': 400,
   'merge: ten-leaf record add': 800,
-  'merge: register write, 1000 ids': 6000,
-  'session: one-leaf op through the gates (read-only paths, validate, skew, retention)': 400,
+  'merge: an array of 1000 ids written whole': 6000,
+  'session: one-change op through the gates (rules, validate, retention)': 400,
   'broadcast: one patch to 100 sockets (encoded once)': 300,
   'broadcast: one patch to 1000 sockets (encoded once)': 400,
   'client: local op, document adapter (localStorage-like), 1k-task state': 1000,

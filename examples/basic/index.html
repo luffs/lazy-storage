@@ -27,7 +27,7 @@
   { "imports": { "lazy-storage": "/lib/lazy-storage/index.js", "lazy-watch": "/lib/lazy-watch/lazy-watch.js" } }
 </script>
 <script type="module">
-  import { createClient, sharedConnection, webSocketTransport, localStorageOutbox } from 'lazy-storage';
+  import { createClient, sharedConnection, webSocketTransport, localStorageOutbox, inOrder } from 'lazy-storage';
 
   // Who we are: `?name=` in the URL, else what this browser remembers, else ask
   const name = new URLSearchParams(location.search).get('name') || localStorage.getItem('example:name') || prompt('Your name?') || 'anonymous';
@@ -36,20 +36,21 @@
   // One socket per browser, however many tabs (this page, /vue, /react):
   // the tabs elect a leader that runs the browser's replica, with its
   // outbox and a cache of the state in localStorage, so a reload while
-  // offline keeps working. `tasks` is an ordered list of records: an array
-  // here, a keyed map with positions on the wire, so two people adding at
-  // once both keep theirs
+  // offline keeps working. `tasks` is an ordered list of records: a keyed
+  // map with a position on each, read in order with inOrder and written
+  // through db.list, so two people adding at once both keep theirs
   const connection = sharedConnection({
     name: 'example',
     transport: webSocketTransport(() => `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws?name=${encodeURIComponent(name)}`),
     storage: store => localStorageOutbox(`example:${store}`)
   });
-  const db = createClient({ connection, store: 'shared', initial: { tasks: [] }, lists: ['tasks'] });
+  const db = createClient({ connection, store: 'shared', initial: { tasks: {} } });
+  const tasks = db.list('tasks');
 
   const $ = id => document.getElementById(id);
   const render = () => {
     const list = $('tasks');
-    list.replaceChildren(...db.state.tasks.map((task, index) => {
+    list.replaceChildren(...inOrder(db.state.tasks).map(task => {
       const li = document.createElement('li');
       li.className = task.done ? 'done' : '';
       const box = document.createElement('input');
@@ -60,7 +61,7 @@
       label.textContent = task.title;
       const remove = document.createElement('button');
       remove.textContent = 'x';
-      remove.onclick = () => { db.state.tasks.splice(index, 1); };
+      remove.onclick = () => { tasks.remove(task.id); };
       li.append(box, label, remove);
       return li;
     }));
@@ -73,7 +74,7 @@
     event.preventDefault();
     const title = $('title').value.trim();
     if (!title) return;
-    db.state.tasks.push({ title, done: false });                     // an id is minted and written back
+    tasks.add({ title, done: false });                               // at the end; an id is minted
     $('title').value = '';
   };
   document.addEventListener('keydown', event => {

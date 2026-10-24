@@ -20,10 +20,11 @@
 // registry altogether.
 
 import { assertDocument } from './storage.js';
+import { isStoreId } from '../core/ids.js';
 
-const STORE_ID = /^[A-Za-z0-9][A-Za-z0-9._~-]{0,127}$/;
 
-export const isStoreId = id => typeof id === 'string' && STORE_ID.test(id);
+
+export { isStoreId };
 
 /**
  * @param {(id: string) => Object|null} factory - builds the store for an id

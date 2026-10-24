@@ -18,8 +18,8 @@ const relays = [];
 for (let j = 0; j < COUNT; j++) {
   const name = `${NAME}${j}`;
   const relay = createRelay({
+    shapeOf: () => ({ initial: { feed: {} } }),
     storage: memoryCopies(),
-    saveDelay: process.env.SAVE_DELAY ? Number(process.env.SAVE_DELAY) : 1000 + j * 37,
     onError: err => errors.length < 20 && errors.push(`${name}: ${err?.message || err}`),
     link: upstreamSocket(`${CENTRAL}/sync/relay?relay=${name}`)
   });
@@ -28,7 +28,6 @@ for (let j = 0; j < COUNT; j++) {
     path: '/sync',
     ...(process.env.DEFLATE === 'off' ? { perMessageDeflate: false } : {}),
     key: req => new URL(req.url).searchParams.get('id'),
-    upstream: req => upstreamSocket(`${CENTRAL}/sync${new URL(req.url).search}`),
     // What the server judges each client by: the query naming it, as its own socket would carry it
     credential: req => ({ query: new URL(req.url).search }),
     onError: err => errors.length < 20 && errors.push(`${name} handlers: ${err?.message || err}`)

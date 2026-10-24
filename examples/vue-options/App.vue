@@ -31,7 +31,7 @@ export default {
       transport: webSocketTransport(() => `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws?name=${encodeURIComponent(name)}`),
       storage: store => localStorageOutbox(`example:${store}`)
     });
-    const db = createClient({ connection, store: 'shared', initial: { tasks: [] }, lists: ['tasks'] });
+    const db = createClient({ connection, store: 'shared', initial: { tasks: {} } });
     const { status, presence } = useClient(db);   // refs, unwrapped as data; they stop with the component
     return { db: markRaw(db), status, presence };
   },

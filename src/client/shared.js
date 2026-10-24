@@ -29,7 +29,7 @@
 import { LazyWatch } from 'lazy-watch';
 import { createConnection } from './connection.js';
 import { memoryOutbox } from './storage.js';
-import { createRelay } from '../relay/index.js';
+import { createRelay } from '../relay/follower.js';
 import { randomId } from '../core/ids.js';
 
 const { Utils } = LazyWatch;

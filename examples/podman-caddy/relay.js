@@ -13,6 +13,8 @@ const root = join(import.meta.dir, '..', '..');
 const SERVER = `ws://127.0.0.1:${process.env.SERVER_PORT}/ws`;
 
 const relay = createRelay({
+  // What the server's stores hold, as the server declares them (server.js)
+  shapeOf: () => ({ initial: { tasks: {} } }),
   // The copies answer the clients while the server is away; the server's
   // disk has the data, so a relay keeps its copies in memory
   storage: memoryCopies(),
@@ -21,9 +23,9 @@ const relay = createRelay({
 
 // Who a client is, as the server's `authenticate` reads it: here the name in
 // the query string. A real app passes on the header that carries its token
-// or cookie instead, in all three: `key` (a fingerprint of it, for answering
-// the client while the server is away), `upstream` (the socket its edits go
-// up) and `credential` (what the server judges it by)
+// or cookie instead, in both: `key` (a fingerprint of it, for answering
+// the client while the server is away) and `credential` (what the server
+// judges it by, its edits included)
 const name = req => new URL(req.url).searchParams.get('name');
 const handlers = createRelayHandlers({
   relay,
@@ -34,7 +36,6 @@ const handlers = createRelayHandlers({
   // the cost is per client, here on a relay's core, not the store's
   perMessageDeflate: { threshold: 4096 },
   key: req => (name(req) ? new Bun.CryptoHasher('sha256').update(name(req)).digest('hex') : null),
-  upstream: req => upstreamSocket(SERVER + new URL(req.url).search),
   credential: req => ({ query: new URL(req.url).search })
 });
 

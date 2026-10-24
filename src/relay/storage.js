@@ -14,18 +14,7 @@
 import { existsSync, readFileSync, mkdirSync, writeFileSync, renameSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
-/** Copies in memory: a relay restarted starts empty */
-export function memoryCopies() {
-  let meta = null;
-  const copies = new Map();
-  return {
-    loadMeta: () => (meta ? { ...meta } : null),
-    saveMeta: next => { meta = { ...next }; },
-    load: id => (copies.has(id) ? structuredClone(copies.get(id)) : null),
-    save: (id, copy) => { copies.set(id, structuredClone(copy)); },
-    flush() {}
-  };
-}
+export { memoryCopies } from './copies.js';
 
 /**
  * One JSON file per store under `dir`, and `relay.json` for the relay's

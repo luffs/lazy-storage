@@ -18,6 +18,7 @@ import { createClient } from '../src/client/index.js';
 import { localStorageOutbox } from '../src/client/storage.js';
 import { createNetwork } from '../src/testing/index.js';
 import { keyBetween, keysBetween } from '../src/core/positions.js';
+import { inOrder } from '../src/client/list.js';
 
 GlobalRegistrator.register({ url: 'http://localhost' });
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
@@ -258,62 +259,47 @@ await bench('vue: remote edit of one task, 200 rows each on useClient', {
 });
 
 // --- Lists ----------------------------------------------------------------------------------
-// A 5k-record list declared as a list (db.state.tasks is an array), and
-// the same through db.list, which works on the keyed map directly
+// A 5k-record list: a keyed map with a position on each record, written
+// through db.list and read in order with inOrder, and a remote edit, which
+// the client takes into its base and works the one record out again for
 
 async function listed(n) {
-  const c = await linked(n, { initial: { tasks: [] }, lists: ['tasks'] });
-  c.dispose = () => { c.db.dispose(); c.store.dispose(); };
+  const c = await linked(n);
+  c.list = c.db.list('tasks');
+  for (const id of c.ids.slice(0, n)) c.db.state.tasks[id].pos = c.list.keyFor();
+  await c.net.settle();
+  c.peer = c.net.client({ replicaId: 'peer', initial: { tasks: {} } }, { user: { id: 'peer' } });
+  await c.net.settle();
+  c.dispose = () => { c.db.dispose(); c.peer.dispose(); c.store.dispose(); };
   return c;
 }
-/** Close the view's batch and the wire's it made, as the microtasks would */
-const settleView = db => { LazyWatch.flush(db.state); LazyWatch.flush(db.wire); };
 
-await bench('list view: push one record onto a 5k-record array', {
+await bench('list: move one record within 5k (one position written)', {
   setup: () => listed(5000),
-  iterations: 10,
+  iterations: 50,
   run: (c, n) => {
     for (let i = 0; i < n; i++) {
-      c.db.state.tasks.push({ title: `new ${i}`, done: false });
-      settleView(c.db);
+      c.list.move(c.ids[10 + i], { at: 4000 - i });
+      LazyWatch.flush(c.db.state);
     }
   }
 });
 
-await bench('list view: move one record within a 5k-record array (splice out, splice in)', {
+await bench('list: the 5k records in order (inOrder, what a view renders from)', {
   setup: () => listed(5000),
-  iterations: 10,
+  iterations: 20,
   run: (c, n) => {
-    for (let i = 0; i < n; i++) {
-      const [moved] = c.db.state.tasks.splice(10 + i, 1);
-      c.db.state.tasks.splice(4000 - i, 0, moved);
-      settleView(c.db);
-    }
+    for (let i = 0; i < n; i++) inOrder(c.db.state.tasks);
   }
 });
 
-await bench('list view: remote field edit, 5k-record array', {
+await bench('list: remote field edit, 5k records, through the network', {
   setup: () => listed(5000),
-  iterations: 200,
-  run: (c, n) => {
-    for (let i = 0; i < n; i++) LazyWatch.patch(c.db.wire, { tasks: { [c.ids[(i * 97) % 5000]]: { title: `remote ${i}` } } }, REMOTE);
-  }
-});
-
-// 2k records and 200 places, not 5k and thousands: a remote move shifts
-// every record it passes, a splice of the whole array each, which at 5k
-// records and 1000 places takes half a minute a move
-await bench('list view: remote move 200 places (a new position), 2k-record array', {
-  setup: async () => {
-    const c = await listed(2000);
-    c.keys = c.ids.map(id => c.db.wire.tasks[id].pos);
-    return c;
-  },
-  iterations: 1,
-  run: (c, n) => {
+  iterations: 50,
+  run: async (c, n) => {
     for (let i = 0; i < n; i++) {
-      const at = 200 + i;   // between two neighbours 200 places from the record's own
-      LazyWatch.patch(c.db.wire, { tasks: { [c.ids[i]]: { pos: keyBetween(c.keys[at], c.keys[at + 1]) } } }, REMOTE);
+      c.peer.state.tasks[c.ids[(i * 97) % 5000]].title = `remote ${i}`;
+      await c.net.settle();
     }
   }
 });
@@ -370,7 +356,8 @@ for (const size of [1000, 10_000]) {
     iterations: 200,
     run: async (c, n) => {
       for (let i = 0; i < n; i++) {
-        LazyWatch.patch(c.db.wire, { tasks: { [c.ids[i % c.ids.length]]: { title: `remote ${i}` } } }, REMOTE);
+        c.store.patch({ tasks: { [c.ids[i % c.ids.length]]: { title: `remote ${i}` } } });
+        await c.net.settle();
         await sleep(5);
       }
       await sleep(100);
@@ -465,10 +452,9 @@ const GUARDS = {
   'react: a peer shares a cursor, 500 rows on useClientSelector': { ms: 2, counts: perBatch(0) },
   'vue: mount 200 rows each on useClient, 1k-task state': { ms: 80, counts: ({ clones }) => clones <= 1 || `${clones} deep copies of the state, over 1` },
   'vue: remote edit of one task, 200 rows each on useClient': { ms: 2 },
-  'list view: push one record onto a 5k-record array': { ms: 60 },
-  'list view: move one record within a 5k-record array (splice out, splice in)': { ms: 60 },
-  'list view: remote field edit, 5k-record array': { ms: 2 },
-  'list view: remote move 200 places (a new position), 2k-record array': { ms: 20 },
+  'list: move one record within 5k (one position written)': { ms: 30 },
+  'list: the 5k records in order (inOrder, what a view renders from)': { ms: 30 },
+  'list: remote field edit, 5k records, through the network': { ms: 20 },
   'db.list: add one record at the end of 5k (the keyed map, no array view)': { ms: 30 },
   'persistence: remote patches every 5 ms for a second, localStorageOutbox, 1k-task state': { counts: ({ writes }) => writes <= 10 || `${writes} writes, over 10` },
   'persistence: remote patches every 5 ms for a second, localStorageOutbox, 10k-task state': { counts: ({ writes }) => writes <= 10 || `${writes} writes, over 10` },

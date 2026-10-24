@@ -34,7 +34,7 @@
   import React, { useState } from 'react';
   import { createRoot } from 'react-dom/client';
   import htm from 'htm';
-  import { createClient, sharedConnection, webSocketTransport, localStorageOutbox } from 'lazy-storage';
+  import { createClient, sharedConnection, webSocketTransport, localStorageOutbox, inOrder } from 'lazy-storage';
   import { useClient } from 'lazy-storage/react';
 
   const html = htm.bind(React.createElement);   // JSX without a build step
@@ -48,7 +48,8 @@
     transport: webSocketTransport(() => `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws?name=${encodeURIComponent(name)}`),
     storage: store => localStorageOutbox(`example:${store}`)
   });
-  const db = createClient({ connection, store: 'shared', initial: { tasks: [] }, lists: ['tasks'] });
+  const db = createClient({ connection, store: 'shared', initial: { tasks: {} } });
+  const tasks = db.list('tasks');   // the records in order; an add or a move writes one position
 
   function App() {
     // React needs no mirror: the component reads the client's state and
@@ -57,12 +58,11 @@
     // straight to db.state
     const { state, status, presence } = useClient(db);
     const [title, setTitle] = useState('');
-    const at = id => db.state.tasks.findIndex(task => task.id === id);
     const add = event => {
       event.preventDefault();
       const text = title.trim();
       if (!text) return;
-      db.state.tasks.push({ title: text, done: false });          // an id is minted and written back
+      tasks.add({ title: text, done: false });                     // at the end; an id is minted
       setTitle('');
     };
     return html`
@@ -73,11 +73,11 @@
         <button>Add</button>
       </form>
       <ul>
-        ${state.tasks.map(task => html`
+        ${inOrder(state.tasks).map(task => html`
           <li key=${task.id} className=${task.done ? 'done' : ''}>
-            <input type="checkbox" checked=${Boolean(task.done)} onChange=${e => { db.state.tasks[at(task.id)].done = e.target.checked; }} />
+            <input type="checkbox" checked=${Boolean(task.done)} onChange=${e => { db.state.tasks[task.id].done = e.target.checked; }} />
             <span>${task.title}</span>
-            <button onClick=${() => db.state.tasks.splice(at(task.id), 1)}>x</button>
+            <button onClick=${() => tasks.remove(task.id)}>x</button>
           </li>
         `)}
       </ul>
