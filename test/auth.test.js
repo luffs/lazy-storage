@@ -211,7 +211,7 @@ test('a user without an id is told apart by its whole value, and the store says 
   const hello = (store, user, replicaId) => {
     const sent = [];
     const session = store.session({ send: m => sent.push(m), user });
-    session.receive({ t: 'hello', proto: PROTOCOL, replicaId, ops: [] });
+    session.receive({ t: 'hello', proto: PROTOCOL, replica: replicaId, ops: [] });
     store.flush();
     return sent.at(-1);
   };

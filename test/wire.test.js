@@ -44,7 +44,7 @@ test('through a hub, every socket receives the same JSON for a broadcast, produc
     out.set(socket, []);
     return createHub(() => store, { send: message => out.get(socket).push(toJSON(message)) });
   });
-  for (const [i, hub] of hubs.entries()) hub.receive({ t: 'hello', proto: PROTOCOL, store: 'main', replicaId: `r${i}`, ops: [] });
+  for (const [i, hub] of hubs.entries()) hub.receive({ t: 'hello', proto: PROTOCOL, store: 'main', replica: `r${i}`, ops: [] });
   const original = JSON.stringify;
   let payloads = 0;
   JSON.stringify = value => { if (value && typeof value === 'object' && value.t === 'patch') payloads++; return original(value); };
@@ -57,7 +57,7 @@ test('through a hub, every socket receives the same JSON for a broadcast, produc
   const patches = [...out.values()].map(lines => lines.map(JSON.parse).find(m => m.t === 'patch'));
   assert.equal(patches.length, 3);
   for (const patch of patches) assert.deepEqual(patch, { ...patches[0] });
-  assert.deepEqual(patches[0], { t: 'patch', diff: { tasks: { a: { id: 'a', title: 'to everyone' } } }, ts: patches[0].ts, v: 1, store: 'main' });
+  assert.deepEqual(patches[0], { t: 'patch', changes: [{ c: 'tasks', id: 'a', put: { id: 'a', title: 'to everyone' } }], ts: patches[0].ts, v: 1, store: 'main' });
   assert.equal(payloads, 1, 'three sockets, one encoding of the patch');
 });
 
@@ -70,8 +70,8 @@ test('a snapshot is encoded from the cached state, spliced into the message, and
     const store = createStore({ initial: { tasks: {} } });
     store.patch({ tasks: { a: { id: 'a', title: 'one' } } });
     const sent = [];
-    store.session({ send: m => sent.push(m) }).receive({ t: 'hello', proto: PROTOCOL, replicaId: 'r1', ops: [] });
-    store.session({ send: m => sent.push(m) }).receive({ t: 'hello', proto: PROTOCOL, replicaId: 'r2', ops: [] });
+    store.session({ send: m => sent.push(m) }).receive({ t: 'hello', proto: PROTOCOL, replica: 'r1', ops: [] });
+    store.session({ send: m => sent.push(m) }).receive({ t: 'hello', proto: PROTOCOL, replica: 'r2', ops: [] });
     const snapshots = sent.filter(m => m.t === 'snapshot');
     assert.equal(snapshots.length, 2);
     assert.equal(encodings, 1, 'two hellos on a quiet store: the state was encoded once');
@@ -80,12 +80,12 @@ test('a snapshot is encoded from the cached state, spliced into the message, and
     const json = toJSON(tagged);
     assert.equal(encodings, 1, 'sending never re-encodes the state');
     assert.equal(seen.includes(snapshots[1]), false, 'nor the message');
-    assert.deepEqual(JSON.parse(json), { t: 'snapshot', store: 'main', state: { tasks: { a: { id: 'a', title: 'one' } } }, ts: snapshots[1].ts, seq: 0, registers: [], v: 1, epoch: store.epoch });
+    assert.deepEqual(JSON.parse(json), { t: 'snapshot', store: 'main', state: { tasks: { a: { id: 'a', title: 'one' } } }, seq: 0, v: 1, epoch: store.epoch, now: snapshots[1].now, shape: store.shape.hash });
     assert.deepEqual(snapshots[1].state, { tasks: { a: { id: 'a', title: 'one' } } }, 'reading the object decodes it');
     assert.equal(Object.getOwnPropertyDescriptor(tagged, 'state').get !== undefined, true, 'tagStore kept the getter');
 
     store.patch({ tasks: { a: { title: 'two' } } });
-    store.session({ send: m => sent.push(m) }).receive({ t: 'hello', proto: PROTOCOL, replicaId: 'r3', ops: [] });
+    store.session({ send: m => sent.push(m) }).receive({ t: 'hello', proto: PROTOCOL, replica: 'r3', ops: [] });
     assert.equal(encodings, 2, 'an op drops the cache; the next hello encodes again');
     assert.equal(sent.at(-1).state.tasks.a.title, 'two');
     assert.deepEqual(snapshots[1].state.tasks.a.title, 'one', 'an earlier message keeps the state it carried');

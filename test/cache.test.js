@@ -49,12 +49,12 @@ test('a local op writes the outbox at once and the state a moment later, once, w
 });
 
 test('a restore replays the outbox over the cached state, so a state written before the last ops still comes up current', () => {
-  const op = (seq, diff) => ({ replicaId: 'a', seq, ts: [1000 + seq, 0, 'a'], diff });
+  const op = (seq, changes) => ({ replica: 'a', seq, ts: 1000 + seq, changes });
   const storage = {
     load: () => ({
       replicaId: 'a',
       seq: 3,
-      ops: [op(2, { tasks: { t2: { id: 't2', title: 'second' } } }), op(3, { tasks: { t1: { done: true } } })],
+      ops: [op(2, [{ c: 'tasks', id: 't2', put: { id: 't2', title: 'second' } }]), op(3, [{ c: 'tasks', id: 't1', path: ['done'], set: true }])],
       state: { tasks: { t1: { id: 't1', title: 'first' } } },   // written when only op 1 had happened
       version: 7,
       epoch: 'e'

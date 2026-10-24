@@ -90,7 +90,7 @@ test('shared data must be JSON within maxShare; a refusal is an error on the sha
   // Straight at a session: what a client would never send
   const received = [];
   const raw = store.session({ send: m => received.push(m), user: { id: 'u3' } });
-  raw.receive({ t: 'hello', proto: PROTOCOL, replicaId: 'raw', ops: [] });
+  raw.receive({ t: 'hello', proto: PROTOCOL, replica: 'raw', ops: [] });
   raw.receive({ t: 'share', data: () => {} });
   store.flush();   // what it heard, as the turn ends (see groupCommit)
   assert.deepEqual(received.filter(m => m.t === 'error').map(m => m.code), ['invalid']);
@@ -110,7 +110,7 @@ test('a session counts, as a peer and in presence, from its hello; one that neve
   assert.deepEqual(a.presence.map(u => u.id), ['u1']);
   assert.deepEqual(received, [], 'nothing until it says hello');
 
-  silent.receive({ t: 'hello', proto: PROTOCOL, replicaId: 's', ops: [], share: { here: true } });
+  silent.receive({ t: 'hello', proto: PROTOCOL, replica: 's', ops: [], share: { here: true } });
   await net.settle();
   assert.deepEqual(received.map(m => m.t), ['snapshot', 'presence', 'presence'], 'the whole list follows its snapshot, then the delta everyone gets');
   assert.deepEqual(received[1].peers.map(p => p.replicaId), ['a', 's']);
@@ -118,7 +118,7 @@ test('a session counts, as a peer and in presence, from its hello; one that neve
   assert.deepEqual(a.presence.map(u => u.id).sort(), ['u1', 'u9']);
   assert.deepEqual(byReplica(a.peers).s, { user: { id: 'u9' }, data: { here: true } });
   const before = received.length;
-  silent.receive({ t: 'hello', proto: PROTOCOL, replicaId: 's', ops: [] });
+  silent.receive({ t: 'hello', proto: PROTOCOL, replica: 's', ops: [] });
   await net.settle();
   assert.deepEqual(received.slice(before).map(m => m.t), ['snapshot'], 'a re-hello on the same session is not a new peer: no presence follows');
 
@@ -136,7 +136,7 @@ test('a session counts, as a peer and in presence, from its hello; one that neve
 function observer(store, replicaId = 'obs') {
   const messages = [];
   const session = store.session({ send: m => { if (m.t === 'presence') messages.push(m); }, user: { id: replicaId } });
-  session.receive({ t: 'hello', proto: PROTOCOL, replicaId, ops: [] });
+  session.receive({ t: 'hello', proto: PROTOCOL, replica: replicaId, ops: [] });
   store.flush();   // the answer and the list follow its replica's claim once stored: at the end of the turn (see groupCommit), or now
   assert.ok(Array.isArray(messages[0]?.peers), 'the whole list comes first');
   let start = 1;
@@ -206,14 +206,14 @@ test('a join and a leave within one flush is just the leave; a share before the 
   a.on('peers', peers => events.push(peers.map(p => p.replicaId)));
 
   const brief = store.session({ send: () => {}, user: { id: 'u5' } });
-  brief.receive({ t: 'hello', proto: PROTOCOL, replicaId: 'brief', ops: [] });
+  brief.receive({ t: 'hello', proto: PROTOCOL, replica: 'brief', ops: [] });
   brief.close();
   await net.settle();
   assert.deepEqual(obs.deltas(), [{ t: 'presence', left: ['brief'] }], 'never announced as joined');
   assert.deepEqual(events, [], 'a leave of an unknown peer changes nothing for a client');
 
   const late = store.session({ send: () => {}, user: { id: 'u6' } });
-  late.receive({ t: 'hello', proto: PROTOCOL, replicaId: 'late', ops: [] });
+  late.receive({ t: 'hello', proto: PROTOCOL, replica: 'late', ops: [] });
   late.receive({ t: 'share', data: { cursor: 1 } });
   late.receive({ t: 'share', data: { cursor: 2 } });
   await net.settle();
@@ -272,7 +272,7 @@ test('presence is off by default: nothing is sent, the lists stay empty, and a s
   const net = createNetwork(store);
   const received = [];
   const raw = store.session({ send: m => received.push(m), user: { id: 'u0' } });
-  raw.receive({ t: 'hello', proto: PROTOCOL, replicaId: 'raw', ops: [], share: { here: true } });
+  raw.receive({ t: 'hello', proto: PROTOCOL, replica: 'raw', ops: [], share: { here: true } });
   const a = net.client({ replicaId: 'a', initial: INITIAL }, { user: { id: 'u1' } });
   const errors = [];
   a.on('error', err => errors.push(err.code));
@@ -395,7 +395,7 @@ test('a hello says whether its session hears presence: off, it hears none and is
   const received = [];
   const heard = () => received.filter(m => m.t === 'presence');
   const quiet = store.session({ send: m => received.push(m), user: { id: 'u9' } });
-  quiet.receive({ t: 'hello', proto: PROTOCOL, replicaId: 'q', ops: [], presence: false, share: { here: true } });
+  quiet.receive({ t: 'hello', proto: PROTOCOL, replica: 'q', ops: [], presence: false, share: { here: true } });
   await net.settle();
   assert.deepEqual(received.map(m => m.t), ['snapshot'], 'answered, with no whole list');
   assert.deepEqual(store.presence().map(u => u.id), ['u1', 'u9'], 'still listed');
@@ -412,7 +412,7 @@ test('a hello says whether its session hears presence: off, it hears none and is
 
   // On: the whole list right away, as a newcomer's, then the deltas
   let before = received.length;
-  quiet.receive({ t: 'hello', proto: PROTOCOL, replicaId: 'q', ops: [] });
+  quiet.receive({ t: 'hello', proto: PROTOCOL, replica: 'q', ops: [] });
   assert.deepEqual(received.slice(before).map(m => m.t), ['snapshot', 'presence'], 'the list follows the answer at once');
   assert.deepEqual(byReplica(received.at(-1).peers), { a: { user: { id: 'u1' }, data: undefined }, q: { user: { id: 'u9' }, data: { here: true } } }, 'its own share kept');
   const c = net.client({ replicaId: 'c', initial: INITIAL }, { user: { id: 'u3' } });
@@ -422,11 +422,11 @@ test('a hello says whether its session hears presence: off, it hears none and is
   await net.settle();
   assert.deepEqual(heard().at(-1), { t: 'presence', shared: [{ replicaId: 'c', data: { cursor: 2 } }] });
   before = received.length;
-  quiet.receive({ t: 'hello', proto: PROTOCOL, replicaId: 'q', ops: [] });
+  quiet.receive({ t: 'hello', proto: PROTOCOL, replica: 'q', ops: [] });
   assert.deepEqual(received.slice(before).map(m => m.t), ['snapshot'], 'already on: no list again');
 
   // Off again: nothing more, and still listed
-  quiet.receive({ t: 'hello', proto: PROTOCOL, replicaId: 'q', ops: [], presence: false });
+  quiet.receive({ t: 'hello', proto: PROTOCOL, replica: 'q', ops: [], presence: false });
   before = received.length;
   a.share({ editing: 'x' });
   c.disconnect();
@@ -437,36 +437,6 @@ test('a hello says whether its session hears presence: off, it hears none and is
   assert.deepEqual(store.presence().map(u => u.id), ['u1', 'u9', 'u4']);
   quiet.close();
   store.dispose();
-});
-
-test('a write-only session hears no presence whatever its hellos say; a peer says whether the store has presence', async () => {
-  const store = createStore({ initial: INITIAL, presence: true });
-  const net = createNetwork(store);
-  const a = net.client({ replicaId: 'a', initial: INITIAL }, { user: { id: 'u1' } });
-  await net.settle();
-  const peer = store.peer({ user: { id: 'u5' }, replicaId: 'w', via: 'hub' });
-  assert.equal(peer.presence, true);
-  const received = [];
-  const writer = store.session({ send: m => received.push(m), user: { id: 'u5' } });
-  writer.receive({ t: 'hello', proto: PROTOCOL, replicaId: 'w', ops: [], follow: false });
-  writer.receive({ t: 'hello', proto: PROTOCOL, replicaId: 'w', ops: [] });   // presence not refused: still none for it
-  writer.receive({ t: 'hello', proto: PROTOCOL, replicaId: 'w', ops: [], presence: true });
-  const b = net.client({ replicaId: 'b', initial: INITIAL }, { user: { id: 'u2' } });
-  await net.settle();
-  a.share({ cursor: 1 });
-  await net.settle();
-  assert.deepEqual(received.map(m => m.t), ['snapshot', 'snapshot', 'snapshot'], 'answered each time, and nothing else');
-  assert.deepEqual(Object.keys(byReplica(b.peers)), ['a', 'w', 'b'], 'listed once, as the peer');
-  writer.close();
-  peer.close();
-
-  const off = createStore({ initial: INITIAL });
-  const offPeer = off.peer({ user: { id: 'u5' }, replicaId: 'w' });
-  assert.equal(offPeer.presence, false);
-  assert.deepEqual(offPeer.peer, { replicaId: 'w' });
-  offPeer.close();
-  store.dispose();
-  off.dispose();
 });
 
 test('db.wantPresence turns presence on and off while the client runs: on fills its peers, off empties them at once and keeps them empty', async () => {
@@ -625,7 +595,7 @@ test('presence already on its way when a client stops wanting it is not kept, no
 
   // A join the server sends before it hears the hello that says off
   const raw = store.session({ send: () => {}, user: { id: 'u9' } });
-  raw.receive({ t: 'hello', proto: PROTOCOL, replicaId: 'raw', ops: [] });
+  raw.receive({ t: 'hello', proto: PROTOCOL, replica: 'raw', ops: [] });
   await new Promise(resolve => setImmediate(resolve));   // the flush: the delta is on the wire to m
   assert.ok(net.pending > 0, 'the delta waits in the network');
   const events = [];

@@ -90,7 +90,7 @@ test('with idle set, a store with no sessions for that long is released by the s
 
 test('stats() rolls up the live stores: how many are live and idle, and the sums across them', async () => {
   const stores = createStores(id => createStore({ initial: INITIAL, storage: memoryStorage() }));
-  assert.deepEqual(stores.stats(), { stores: 0, idle: 0, sessions: 0, replicas: 0, rows: 0, tombstones: 0, barriers: 0, log: 0, sent: {} });
+  assert.deepEqual(stores.stats(), { stores: 0, idle: 0, sessions: 0, replicas: 0, records: 0, log: 0, sent: {} });
   const a = stores.get('a');
   const b = stores.get('b');
   a.patch({ tasks: { x: { id: 'x', title: 'one' } } });
@@ -103,8 +103,8 @@ test('stats() rolls up the live stores: how many are live and idle, and the sums
   assert.equal(s.stores, 2);
   assert.equal(s.idle, 1, 'b has no session');
   assert.equal(s.sessions, 1);
-  assert.ok(s.tombstones >= 1, 'the deleted task');
-  for (const key of ['replicas', 'rows', 'tombstones', 'log']) assert.equal(s[key], a.stats()[key] + b.stats()[key], key);
+  assert.equal(a.stats().records, 0, 'the deleted task leaves nothing');
+  for (const key of ['replicas', 'records', 'log']) assert.equal(s[key], a.stats()[key] + b.stats()[key], key);
   // What they sent, summed by type: a store with a session has sent something
   const netB = createNetwork(b);
   const other = netB.client({ replicaId: 'd', initial: INITIAL });
@@ -121,7 +121,7 @@ test('stats() rolls up the live stores: how many are live and idle, and the sums
   client.dispose();
   other.dispose();
   stores.dispose();
-  assert.deepEqual(stores.stats(), { stores: 0, idle: 0, sessions: 0, replicas: 0, rows: 0, tombstones: 0, barriers: 0, log: 0, sent: {} });
+  assert.deepEqual(stores.stats(), { stores: 0, idle: 0, sessions: 0, replicas: 0, records: 0, log: 0, sent: {} });
 });
 
 test('a writer holding a store the sweep released is told so, and what to do', () => {
@@ -133,9 +133,9 @@ test('a writer holding a store the sweep released is told so, and what to do', (
   time.advance(150);
   assert.deepEqual(stores.sweep(), ['panel'], 'idle for longer than `idle`, writer or not');
   assert.equal(held.disposed, true);
-  assert.throws(() => held.patch({ tasks: { a: { done: true } } }), /Cannot patch a disposed store.*stores\.get\(id\)/);
+  assert.throws(() => held.patch({ tasks: { a: { done: true } } }), /Cannot write to a disposed store.*stores\.get\(id\)/);
   assert.throws(() => held.session({ send() {} }), /Cannot open a session on a disposed store/);
-  assert.throws(() => held.apply({ replicaId: 'x', seq: 1, ts: [1000, 0, 'x'], diff: {} }), /Cannot apply an op to a disposed store/);
+  assert.throws(() => held.apply({ replica: 'x', seq: 1, ts: 1000, changes: [] }), /Cannot write to a disposed store/);
   held.dispose();   // again: harmless
   // Resolving again is the cure: a fresh instance, and get() resets the idle clock
   const fresh = stores.get('panel');

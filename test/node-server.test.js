@@ -9,7 +9,7 @@ import { createClient, createConnection, webSocketTransport } from '../src/index
 import { probeFrames, stalledSocket } from './frames.js';
 import { randomBytes } from 'node:crypto';
 
-const INITIAL = { tasks: {} };
+const INITIAL = { tasks: {}, filler: '' };   // filler: a leaf, so a singleton, to make a large snapshot
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const until = async (pred, label) => {
   for (let i = 0; i < 500; i++) {
@@ -142,7 +142,7 @@ test('serve: other requests reach the app, a bad token is refused, two sockets s
 
     // On the wire, by default: a message over the threshold goes compressed, a small one plain
     stores.get('t2').patch({ filler: 'x'.repeat(3000) });
-    const probed = await probeFrames(port, '/ws?token=alice', [JSON.stringify({ t: 'hello', proto: PROTOCOL, store: 't2', replicaId: 'probe', ops: [] }), JSON.stringify({ t: 'ping', store: 't2' })]);
+    const probed = await probeFrames(port, '/ws?token=alice', [JSON.stringify({ t: 'hello', proto: PROTOCOL, store: 't2', replica: 'probe', ops: [] }), JSON.stringify({ t: 'ping', store: 't2' })]);
     assert.match(probed.extensions, /permessage-deflate/);
     const largest = [...probed.frames].sort((x, y) => y.bytes - x.bytes)[0];
     assert.equal(largest.compressed, true, `the snapshot frame is compressed (${largest.bytes} B)`);
@@ -175,7 +175,7 @@ test('createHandlers mounts on an existing http server; maxPayload closes a sock
     const raw = new WebSocket(`ws://localhost:${port}/sync`);
     const closeCode = await new Promise(resolve => {
       raw.onclose = e => resolve(e.code);
-      raw.onopen = () => raw.send(JSON.stringify({ t: 'hello', proto: PROTOCOL, store: 'main', replicaId: 'r', ops: [], pad: 'x'.repeat(600) }));
+      raw.onopen = () => raw.send(JSON.stringify({ t: 'hello', proto: PROTOCOL, store: 'main', replica: 'r', ops: [], pad: 'x'.repeat(600) }));
     });
     assert.equal(closeCode, 1009, 'message too big');
 
@@ -222,7 +222,7 @@ test('shutdown refuses new sockets, closes the open ones, flushes the stores, an
   await until(() => client.status === 'offline', 'the socket was closed');
   await closed;
   assert.deepEqual(stores1.ids(), [], 'the registry was disposed');
-  assert.equal(storage.load().rows.length, 1);
+  assert.equal(storage.load().records.filter(([c]) => c === 'tasks').length, 1);
 
   const stores2 = registry();
   stores2.get('team').patch({ tasks: { meanwhile: { id: 'meanwhile' } } });

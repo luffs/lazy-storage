@@ -1,238 +1,159 @@
 // Type declarations for `lazy-storage/core`: the pieces both sides share,
 // and the wire protocol they speak. Hand-written; the runtime is plain JS.
-import type { ChangeSet } from 'lazy-watch';
 
-/** A hybrid-logical-clock timestamp: wall ms, a counter within the ms, the replica as tie-break */
-export type Timestamp = [ms: number, count: number, replicaId: string];
+/** Milliseconds: a replica stamps causally, the server clamps (see clock.js) */
+export type Timestamp = number;
 
-/** A path into the state, one segment per level */
+/** A path inside a record, one segment per level */
 export type Path = string[];
 
-/**
- * A plain lazy-watch diff: nested objects for containers, `null` for a
- * deletion, and arrays only at register paths, where they are whole
- * values.
- */
-export type Diff = ChangeSet;
+/** One change to one record: put (make, or merge into), set (write whole), or del */
+export type Change =
+  | { c: string; id?: string; path?: Path; put: Record<string, unknown> }
+  | { c: string; id?: string; path?: Path; set: unknown }
+  | { c: string; id?: string; path?: Path; del: true };
 
 /** One op: a replica's batch, numbered and timestamped */
 export interface Op {
-  replicaId: string;
+  replica: string;
   seq: number;
   ts: Timestamp;
-  diff: Diff;
-  /** The store version the replica had applied when it made the batch: what the batch was made in sight of (see MergeOptions.seen) */
-  v?: number;
-  /** The storage life `v` counts in: the server's epoch, or null for a relay's own counting (the server then takes the batch as made in sight of nothing) */
-  epoch?: string | null;
-  /** The containers the batch made, absent in the replica's state before it: the server re-adds what was deleted there (see MergeOptions.made) */
-  made?: Path[];
+  changes: Change[];
 }
 
-// --- Clocks -----------------------------------------------------------------
+/** Why a change did not land */
+export type LostReason = 'missing' | 'newer' | 'stale';
+export interface Lost { c: string; id?: string; path: Path; why: LostReason }
+
+// --- Time ---------------------------------------------------------------------
 
 export interface Clock {
-  readonly replicaId: string;
-  /** A timestamp for a local event; strictly greater than every earlier one */
-  now(): Timestamp;
-  /** Observe a remote timestamp so later local events sort after it */
-  receive(ts: unknown): void;
-  /** Fall back to the wall clock after it was corrected, never behind what was received */
-  rewind(): void;
-  /** The current value without advancing */
-  peek(): Timestamp;
+  /** A timestamp for a local event: never below one seen, never repeated */
+  stamp(): Timestamp;
+  /** A timestamp received: later stamps sort after it */
+  observe(ts: unknown): void;
+  /** The server's time as it said it: adopted as an offset */
+  adopt(serverNow: unknown): void;
+  readonly time: number;
+  readonly offset: number;
+  readonly highest: number;
 }
-
-export function createClock(replicaId: string, now?: () => number): Clock;
-/** Total order over timestamps; a missing one sorts first */
-export function compareTs(a: Timestamp | undefined, b: Timestamp | undefined): number;
+export function createClock(options?: { now?: () => number }): Clock;
 export function isTimestamp(value: unknown): value is Timestamp;
+export function clamp(ts: number, limit: number): number;
 
-// --- Paths and registers ------------------------------------------------------
+// --- Shape --------------------------------------------------------------------
 
-/** A register path: `'order'`, `'tasks/*\/subtaskOrder'`, or segments; `*` matches one segment */
+/** A register path: `'tasks/*\/geo'`, or segments; `*` matches one segment */
 export type RegisterSpec = string | string[];
 
-export interface RegisterSet {
-  readonly patterns: string[][];
-  readonly size: number;
-  /** True when some pattern has the path's length and matches every segment */
-  matches(path: Path): boolean;
+/** What a store holds, declared alike on the server and every client */
+export interface ShapeOptions {
+  /** The top level: collections as `{}`, singletons with their starting value */
+  initial?: Record<string, unknown>;
+  /** Top-level keys that are one record rather than a collection */
+  singletons?: string[];
+  /** Paths whose value is one leaf, written and merged whole */
+  registers?: RegisterSpec[];
+  /** `{ child: { field: 'parentCollection' } }`: children not let in without their parent, and deleted with it */
+  parents?: Record<string, Record<string, string>>;
 }
 
-export function registerKey(spec: RegisterSpec): string[];
-export function registerSet(specs?: RegisterSpec[]): RegisterSet;
-/** The map key of a path: its JSON encoding */
-export function pathKey(path: Path): string;
-export function parsePathKey(key: string): Path;
-/** The prefix shared by the keys of every strict descendant of a path */
-export function descendantPrefix(path: Path): string;
-export function setAt<T extends object>(target: T, path: Path, value: unknown): T;
-export function valueAt(root: unknown, path: Path): unknown;
-export function deleteAt(target: unknown, path: Path): void;
-
-// --- The model ------------------------------------------------------------------
+export interface Shape {
+  readonly initial: Record<string, unknown>;
+  readonly hash: string;
+  readonly collections: string[];
+  readonly singletons: string[];
+  has(key: string): boolean;
+  isCollection(key: string): boolean;
+  isSingleton(key: string): boolean;
+  full(c: string, id: string | undefined, path?: Path): Path;
+  isRegister(c: string, id: string | undefined, path?: Path): boolean;
+  recordKey(c: string, id?: string): string;
+}
+export function createShape(options?: ShapeOptions): Shape;
 
 export class ModelError extends TypeError {
-  readonly name: 'ModelError';
-  readonly path: Path;
-  constructor(message: string, path: Path);
+  path: Path;
+}
+export function assertChange(shape: Shape, change: unknown): asserts change is Change;
+export function assertValue(value: unknown, path: Path): void;
+export function isForbiddenKey(key: string): boolean;
+
+// --- The rule -------------------------------------------------------------------
+
+/** A record's clock: times by path key, of what lives and what was deleted inside it */
+export interface RecordClock {
+  live: Record<string, Timestamp>;
+  gone: Record<string, Timestamp>;
 }
 
-/** A leaf of a diff: its path and value (`null` for a deletion) */
-export type Leaf = [path: Path, value: unknown];
+export type Mode = 'judge' | 'authority' | 'trust' | 'replay' | 'optimistic';
 
-/** A persisted row on the client, or a row handed to `rebuild`: a path key and the leaf's value */
-export type Row = [key: string, value: unknown];
+export interface Doc {
+  readonly state: Record<string, any>;
+  get(c: string, id?: string): unknown;
+  childrenOf(c: string, id: string): Array<[string, string]>;
+  /** Decide one change at `ts`: what landed, and what lost with why */
+  apply(change: Change, ts: Timestamp, mode?: Mode): { applied: Change[]; lost: Lost[] };
+  setRecord(c: string, id: string | undefined, data: unknown, clock?: RecordClock | null): void;
+  clock(c: string, id?: string): RecordClock;
+  newest(c: string, id?: string): number;
+  prune(cutoff: number): Array<[string, string | undefined]>;
+  records(): Iterable<[string, string | undefined, unknown, RecordClock]>;
+}
+export function createDoc(shape: Shape, options?: { state?: Record<string, any>; clocks?: Map<string, unknown>; track?: boolean }): Doc;
+export function docFromRecords(shape: Shape, records?: Array<[string, string | null | undefined, unknown, RecordClock?]>): Doc;
+export function changeFor(base: { c: string; id?: string; path?: Path }, value: unknown): Change;
+export function clockToJSON(clock: unknown): RecordClock;
+export function clockFromJSON(json: RecordClock): unknown;
 
-/** Flatten a diff into leaves; throws a ModelError for an array outside a register */
-export function leaves(diff: Diff, registers: RegisterSet, path?: Path, out?: Leaf[]): Leaf[];
-export function assertModel(diff: Diff, registers: RegisterSet): void;
-/** Turn a diff that writes a register into one that replaces it: keys of the current value the new one lacks become null, all the way down */
-export function replacingRegisters(diff: Diff, registers: RegisterSet, state: object): Diff;
-/** Replace every register fragment in a diff with the register's whole value from the live state */
-export function expandRegisters(diff: Diff, registers: RegisterSet, state: object): Diff;
-export function fromLeaves(entries: Leaf[]): Diff;
-/** An array whose every element is a primitive or null: a whole value anywhere in the state */
-export function isPrimitiveArray(value: unknown): value is Array<string | number | boolean | null>;
+/** A lazy-watch batch as the changes it makes */
+export function compile(shape: Shape, diff: unknown, inverse: unknown, state: unknown): Change[];
 
-// --- Positions (ordered lists) --------------------------------------------------------
+// --- Paths --------------------------------------------------------------------------
 
-/** A key strictly between `a` and `b`; null on a side means no bound. Both null: the first key */
+export function pathKey(path: Path): string;
+export function parsePathKey(key: string): Path;
+export function registerKey(spec: RegisterSpec): Path;
+export function registerSet(specs?: RegisterSpec[]): { readonly patterns: Path[]; readonly size: number; matches(path: Path): boolean };
+export function setAt<T extends object>(target: T, path: Path, value: unknown): T;
+export function valueAt(root: unknown, path: Path): unknown;
+export function deleteAt(target: object, path: Path): void;
+
+// --- Positions ----------------------------------------------------------------------
+
 export function keyBetween(a: string | null, b: string | null): string;
-/** `n` ordered keys strictly between `a` and `b` */
 export function keysBetween(a: string | null, b: string | null, n: number): string[];
-export function isPositionKey(key: unknown): key is string;
-/** By key, a missing key last, ties by id */
 export function comparePositions(keyA: unknown, idA: string, keyB: unknown, idB: string): number;
-/** `initial` with rows applied on top, shallow paths first; a `null` value deletes the path */
-export function rebuild<S extends object>(initial: S, rows: Row[]): S;
-export function isArrayish(value: unknown): boolean;
-
-// --- The merge --------------------------------------------------------------------
-
-export interface ClockEntry {
-  ts: Timestamp;
-  /** A tombstone: the path was deleted at `ts` */
-  deleted?: boolean;
-  /** A barrier: a tombstone lifted by a write that re-added the container (`ts` its timestamp); the container is there, and only a replica that had applied `v` edits beneath it */
-  made?: boolean;
-  /** A barrier's: the deletion's timestamp; a write that re-adds the container passes the barrier when newer than this */
-  since?: Timestamp;
-  /** A barrier's: the store version the re-add became */
-  v?: number;
-  /** A barrier's: the replicas that re-added the container; their later ops write beneath it whatever they had seen */
-  by?: string[];
-}
-
-export interface MergeResult {
-  /** The winning leaves as a diff, or null when none won */
-  accepted: Diff | null;
-  /** Paths of the losing leaves */
-  rejected: Path[];
-  won: Leaf[];
-  /** Clock keys removed: descendants of a winning write or deletion */
-  dropped: string[];
-  /** Clock keys whose entry is a barrier this op set, moved or stood on: the row at each is the barrier's */
-  barriers: string[];
-}
-
-/** The clock table with a children index, so a write finds its descendants without scanning every key */
-export class ClockMap extends Map<string, ClockEntry> {
-  constructor(entries?: Iterable<[string, ClockEntry]>);
-  /** Keys of every entry strictly under `path` */
-  descendants(path: Path): IterableIterator<string>;
-}
-
-export interface MergeOptions {
-  /** The op is the server's own: a newer tombstone at any object it writes is lifted, `id` or not */
-  authority?: boolean;
-  /** Containers the op's replica made (had nothing at before the batch): a newer tombstone at one, or at a container the op writes under one, is lifted */
-  made?: Path[];
-  /** The store version the op's replica had applied when it made the op (0: none); a plain write under a barrier lands only from a replica that had applied the barrier's `v` */
-  seen?: number;
-  /** The version the op's patch becomes, stamped on the barriers it leaves */
-  v?: number;
-  /** The op's replica (its timestamp's when absent): named by the barriers it leaves or passes, which let its later ops through */
-  author?: string;
-}
-
-/** With a ClockMap descendants come from its index; with a plain Map every key is scanned */
-export function mergeOp(clocks: Map<string, ClockEntry>, ts: Timestamp, diff: Diff, registers: RegisterSet, options?: MergeOptions): MergeResult;
-/** Forget tombstones older than a timestamp; returns the removed keys */
-export function compactTombstones(clocks: Map<string, ClockEntry>, olderThan: Timestamp): string[];
-/** Turn barriers older than a timestamp into the live entries of containers written empty; returns their keys, each with the barrier it was */
-export function settleBarriers(clocks: Map<string, ClockEntry>, olderThan: Timestamp): Array<[string, ClockEntry]>;
-/** Whether something names a path a replica made: a non-empty array of keys */
-export function isMadePath(path: unknown): path is Path;
-/** The clock entry a persisted row stands for */
-export function clockEntry(row: { ts: Timestamp; deleted?: boolean; made?: boolean; since?: Timestamp; v?: number; by?: string[] }): ClockEntry;
+export function isPositionKey(key: unknown): key is string;
 
 export function randomId(): string;
-/** The wire protocol's version, said in every hello; a server that speaks another closes the store with code 'outdated' */
+/** The wire protocol's version, said in every hello */
 export const PROTOCOL: number;
 
-// --- The wire protocol --------------------------------------------------------------
-
-/** Why the server refused an op */
-export type ErrorCode = 'invalid' | 'forbidden' | 'expired' | 'too-large' | 'rate-limited' | 'clock-skew';
-
-/** Why the server ended a store for a client */
-/** `unauthorized` ends the socket itself (the request did not authenticate); the others end one store on it */
-export type ClosedCode = 'evicted' | 'forbidden' | 'unknown-store' | 'invalid-store' | 'unauthorized' | 'unavailable' | 'replica-taken' | 'outdated';
-
-/** A live session on a store, as presence lists them; `key` is what presence groups users by (absent for an anonymous session), `data` what that client shares */
-export interface Peer {
-  replicaId: string;
-  user?: unknown;
-  key?: string;
-  data?: unknown;
-}
-
-/** A peer sharing anew, in a presence delta */
-export interface PeerShare {
-  replicaId: string;
-  data?: unknown;
-}
+// --- The wire protocol ------------------------------------------------------------
 
 export type ClientMessage =
-  | { t: 'hello'; proto: number; replicaId: string; ops: Op[]; since?: number; epoch?: string | null; share?: unknown; presence?: false; fetch?: true; follow?: false }
-  | { t: 'op'; op: Op }
-  | { t: 'share'; data: unknown }
-  | { t: 'ping' }
-  | { t: 'leave' };
+  | { t: 'hello'; store?: string; proto: number; replica: string; ops: Op[]; since?: number; epoch?: string | null; share?: unknown; presence?: boolean; fetch?: boolean; clocks?: boolean; follower?: boolean }
+  | { t: 'op'; store?: string; op: Op; as?: string }
+  | { t: 'leave'; store?: string; as?: string }
+  | { t: 'share'; store?: string; data: unknown; as?: string }
+  | { t: 'vouch'; store?: string; as: string; credential: unknown; replica: string }
+  | { t: 'ping' };
 
-/** What one op of a hello lost: the paths of its leaves that did not win */
-export interface LostOp {
-  seq: number;
-  paths: string[][];
-}
+export interface Peer { replicaId: string; user?: unknown; key?: string; data?: unknown }
 
-/**
- * `epoch` is null in an answer a relay made from its own copy (lazy-storage/relay,
- * or a browser's shared connection), where versions are the relay's own
- */
 export type ServerMessage =
-  | { t: 'snapshot'; state: object; fetch?: undefined; ts: Timestamp; seq: number; registers: string[]; v: number; epoch: string | null; lost?: LostOp[] }
-  /** A large snapshot for a client that said it can fetch: where to fetch it (the server's snapshot route) in place of the state */
-  | { t: 'snapshot'; fetch: string; state?: undefined; ts: Timestamp; seq: number; registers: string[]; v: number; epoch: string; lost?: LostOp[] }
-  | { t: 'delta'; patches: Diff[]; ts: Timestamp; seq: number; registers: string[]; v: number; epoch: string | null; lost?: LostOp[] }
-  | { t: 'patch'; diff: Diff; ts: Timestamp; v: number }
-  | { t: 'ack'; seq: number; ts: Timestamp; correction: Diff | null; lost?: string[][]; v?: number }
-  | { t: 'presence'; peers: Peer[] }
-  | { t: 'presence'; peers?: undefined; left?: string[]; joined?: Peer[]; shared?: PeerShare[] }
-  | { t: 'closed'; code: ClosedCode; message: string }
-  /** From a relay: whether it answers this store from its own copy ('local', the server away) or passes the server's answers on ('through') */
-  | { t: 'relay'; status: 'local' | 'through' }
-  | { t: 'error'; seq?: number; code?: ErrorCode; message: string; now?: number; ts?: Timestamp; retryAfter?: number }
+  | { t: 'snapshot'; store?: string; state?: Record<string, any>; fetch?: string; clocks?: Array<[string, string | null, RecordClock]>; v: number; epoch: string | null; seq: number; now: number; shape: string; lost?: Array<{ seq: number; lost: Lost[] }>; relay?: true }
+  | { t: 'delta'; store?: string; ops: Array<{ v: number; ts: Timestamp; changes: Change[] }>; v: number; epoch: string | null; seq: number; now: number; shape: string; lost?: Array<{ seq: number; lost: Lost[] }>; relay?: true }
+  | { t: 'patch'; store?: string; changes: Change[]; v: number; ts: Timestamp }
+  | { t: 'ack'; store?: string; seq: number; v: number; now: number; lost?: Lost[]; as?: string; replica?: string }
+  | { t: 'error'; store?: string; seq?: number; code?: string; message: string; retryAfter?: number; as?: string; replica?: string }
+  | { t: 'presence'; store?: string; peers?: Peer[]; left?: string[]; joined?: Peer[]; shared?: Array<{ replicaId: string; data?: unknown }> }
+  | { t: 'relay'; store?: string; status: 'local' | 'through' }
+  | { t: 'closed'; store?: string; code: string; message: string }
+  | { t: 'admitted'; store?: string; as: string }
+  | { t: 'refused' | 'revoked'; store?: string; as: string; code: string; message?: string }
+  | { t: 'reset'; store?: string; previous: { epoch: string | null } }
   | { t: 'pong' };
-
-/** On a multiplexed connection every message but ping and pong carries its store id */
-export type Tagged<M> = M & { store: string };
-
-/** What the snapshot route serves: the state with the version and epoch it is at */
-export interface SnapshotDocument {
-  v: number;
-  epoch: string;
-  state: object;
-}

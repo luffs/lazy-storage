@@ -422,6 +422,11 @@ function build({
     clock.adopt(msg.now);
     checkShape(msg.shape);
     const previousEpoch = known.epoch;
+    // The server's storage started over (a backup put back): what this client showed, for the app to tell its user.
+    // A relay counts in versions of its own, so moving between it and the server is not that
+    const viaRelay = msg.relay === true;
+    const resetting = !viaRelay && !answeredByRelay && previousEpoch !== null && known.v > 0 && typeof msg.epoch === 'string' && previousEpoch !== msg.epoch;
+    const previous = resetting ? { epoch: previousEpoch, version: known.v, state: LazyWatch.snapshot(state) } : null;
     const touched = acknowledge(Number.isInteger(msg.seq) ? msg.seq : 0);
     const changedRecords = applyToBase();
     known = { epoch: typeof msg.epoch === 'string' ? msg.epoch : null, v: Number.isInteger(msg.v) ? msg.v : known.v };
@@ -433,9 +438,7 @@ function build({
       persistence.base(changedRecords.map(ch => [ch.c, ch.id]));
       if (!changedRecords.length) persistence.version();
     }
-    // A relay counts in versions of its own: moving between it and the server is not the server starting over
-    const viaRelay = msg.relay === true;
-    if (!viaRelay && !answeredByRelay && previousEpoch !== null && known.epoch !== null && previousEpoch !== known.epoch) emit('reset', { previous: { epoch: previousEpoch } });
+    if (previous) emit('reset', { epoch: known.epoch, previous });
     answeredByRelay = viaRelay;
     synced = true;
     refreshStatus();

@@ -92,7 +92,7 @@ function snapshotBody(store) {
   const json = store.snapshotJSON();
   let body = bodies.get(store);
   if (!body || body.json !== json || body.v !== store.version) {
-    body = { json, v: store.version, epoch: store.epoch, plain: `{"v":${store.version},"epoch":${JSON.stringify(store.epoch)},"state":${json}}`, plainBytes: undefined, br: null, gzip: null };
+    body = { json, v: store.version, epoch: store.epoch, plain: `{"v":${store.version},"epoch":${JSON.stringify(store.epoch)},"state":${json},"clocks":${store.clocksJSON()}}`, plainBytes: undefined, br: null, gzip: null };
     bodies.set(store, body);
   }
   return body;

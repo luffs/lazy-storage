@@ -133,6 +133,8 @@ test('the count survives a reopen of a SQLite file, which gains the column it is
     old.close();
 
     let sqlite = sqliteStorage(file);
+    // A file from before 1.0: its leaves are moved into records first
+    assert.deepEqual(sqlite.fromLeaves(), ['main']);
     const one = createStore({ initial: INITIAL, storage: sqlite.store('main'), migrations: [renameTitle] });
     assert.deepEqual(one.state.tasks.a, { id: 'a', name: 'Milk' });
     one.dispose();
@@ -147,6 +149,6 @@ test('the count survives a reopen of a SQLite file, which gains the column it is
     two.dispose();
     sqlite.close();
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
   }
 });

@@ -155,6 +155,8 @@ export function createStore({
   const sent = {};
   let stateJSON = null;
   let stateBytes;
+  let clocksJSON = null;
+  let clocksBytes;
   let disposed = false;
 
   function tally(type, count, bytes) {
@@ -408,7 +410,17 @@ export function createStore({
   // --- Replicas ---------------------------------------------------------------------------
 
   const keyOf = pres?.key ?? defaultPresenceKey;
-  const ownerKey = user => (user === undefined ? undefined : String(keyOf(user)));
+  let unkeyedReported = false;
+  const ownerKey = user => {
+    if (user === undefined) return undefined;
+    // The default tells a user without an `id` apart by its whole value, and anything in it that changes between
+    // sign-ins (a session token, an expiry) makes the same person another user: said once, to the app, which is the one to fix it
+    if (keyOf === defaultPresenceKey && !unkeyedReported && Utils.isPlainObject(user) && user.id == null) {
+      unkeyedReported = true;
+      onError(new TypeError('A user without an "id" is told apart by its whole value: give the user authenticate returns a stable "id", or set presence.key. Anything in it that changes between sign-ins (a session token, an expiry) makes the same person another user, whose replicas are refused with "replica-taken"'));
+    }
+    return String(keyOf(user));
+  };
   const bucketOf = (user, replicaId) => (user === undefined ? `r:${replicaId}` : `u:${ownerKey(user)}`);
 
   /** Whether `user` may speak for `replicaId`: null when it may, else the refusal */
@@ -461,6 +473,7 @@ export function createStore({
     if (applied.length) {
       version++;
       stateJSON = null;
+      clocksJSON = null;
       const entry = { v: version, ts, changes: applied };
       log.push(entry);
       if (log.length > deltaLog) log.splice(0, log.length - deltaLog);
@@ -563,6 +576,7 @@ export function createStore({
     if (!Number.isFinite(retention)) return { deletions: 0, replicas: 0 };
     const cutoff = lastCompaction - retention;
     const touched = doc.prune(cutoff);
+    if (touched.length) clocksJSON = null;
     const forgotten = [];
     for (const [id, r] of replicas) {
       if (id !== 'server' && (r.seen ?? 0) < cutoff) {
@@ -583,28 +597,55 @@ export function createStore({
 
   // --- Answers ----------------------------------------------------------------------------
 
+  /** Every record's clock as JSON, encoded once per change like the state (a snapshot carries both) */
+  function encodedClocks() {
+    if (clocksJSON === null) {
+      clocksJSON = JSON.stringify(clocksOf());
+      clocksBytes = undefined;
+    }
+    return clocksJSON;
+  }
+
   function clocksOf() {
     const out = [];
     for (const [c, id, , clockJSON] of doc.records()) out.push([c, id ?? null, clockJSON]);
     return out;
   }
 
+  /**
+   * A snapshot whose JSON is assembled around the cached encodings of the
+   * state and, for a session that asks (a client judging its pending edits,
+   * a follower), the records' clocks: sending it never encodes either
+   * again, and the object decodes them only when something reads it. A
+   * client that can fetch is pointed at the HTTP route for a large one,
+   * which carries the clocks too (snapshot.js)
+   */
   function snapshotMessage(replicaId, session, lost = []) {
     const json = encodedState();
     const seq = replicas.get(replicaId)?.seq ?? 0;
     const message = { t: 'snapshot', seq, v: version, epoch, now: time(), shape: shape.hash };
     if (lost.length) message.lost = lost;
-    if (session.clocks) return { ...message, state: JSON.parse(json), clocks: clocksOf() };
     const route = session.fetch ? session.httpSnapshot : null;
     if (route && json.length >= route.threshold) return { ...message, fetch: route.url };
     let decoded;
     Object.defineProperty(message, 'state', { enumerable: true, configurable: true, get: () => (decoded ??= JSON.parse(json)) });
+    let clocksPart = '';
+    let clocksSize = 0;
+    if (session.clocks) {
+      const cj = encodedClocks();
+      let decodedClocks;
+      Object.defineProperty(message, 'clocks', { enumerable: true, configurable: true, get: () => (decodedClocks ??= JSON.parse(cj)) });
+      clocksPart = `,"clocks":${cj}`;
+      clocksBytes ??= utf8Bytes(cj);
+      clocksSize = 10 + clocksBytes;
+    }
     Object.defineProperty(message, LAZY, { value: true });
     const head = '{"t":"snapshot","state":';
     const tail = `,"seq":${seq},"v":${version},"epoch":${JSON.stringify(epoch)},"now":${message.now},"shape":${JSON.stringify(shape.hash)}${lost.length ? `,"lost":${JSON.stringify(lost)}` : ''}}`;
     stateBytes ??= utf8Bytes(json);
-    return presetJSON(message, head + json + tail, head.length + stateBytes + utf8Bytes(tail));
+    return presetJSON(message, head + json + clocksPart + tail, head.length + stateBytes + clocksSize + utf8Bytes(tail));
   }
+
 
   /** The log after version `since`, or null when it does not reach back that far */
   function deltaSince(since) {
@@ -948,6 +989,11 @@ export function createStore({
     snapshotJSON: () => {
       commitNow();
       return encodedState();
+    },
+    /** Every record's clock as JSON, as a snapshot carries them (stored first) */
+    clocksJSON: () => {
+      commitNow();
+      return encodedClocks();
     },
     [TALLY]: tally,
     presence,

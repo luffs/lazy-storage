@@ -157,8 +157,8 @@ test('a hub refuses messages without a valid store id and answers pings', () => 
   const sent = [];
   const hub = createHub(() => null, { send: m => sent.push(m) });
   hub.receive({ t: 'ping' });
-  hub.receive({ t: 'hello', proto: PROTOCOL, replicaId: 'r' });
-  hub.receive({ t: 'hello', proto: PROTOCOL, store: 'bad id', replicaId: 'r' });
+  hub.receive({ t: 'hello', proto: PROTOCOL, replica: 'r' });
+  hub.receive({ t: 'hello', proto: PROTOCOL, store: 'bad id', replica: 'r' });
   assert.deepEqual(sent.map(m => [m.t, m.code]), [['pong', undefined], ['closed', 'invalid-store'], ['closed', 'invalid-store']]);
   assert.deepEqual(hub.stores, []);
 });
@@ -181,8 +181,8 @@ test('given a channel, a broadcast is one publish to the sockets subscribed per 
   store.session({ send: m => direct.push(m) });
   const patches = sent => sent.filter(m => m.t === 'patch').length;
 
-  hubA.receive({ t: 'hello', proto: PROTOCOL, store: 's', replicaId: 'ra', ops: [] });
-  hubB.receive({ t: 'hello', proto: PROTOCOL, store: 's', replicaId: 'rb', ops: [] });
+  hubA.receive({ t: 'hello', proto: PROTOCOL, store: 's', replica: 'ra', ops: [] });
+  hubB.receive({ t: 'hello', proto: PROTOCOL, store: 's', replica: 'rb', ops: [] });
   assert.deepEqual([...topics.get('s')], [a, b], 'each socket subscribed when it opened the store');
   assert.equal(a.filter(m => m.t === 'snapshot').length, 1, 'the snapshot went to its socket alone');
 
@@ -219,9 +219,9 @@ test('leaving and reopening a store while authorization is in flight opens one s
     user: { id: 'u' },
     authorize: () => new Promise(resolve => verdicts.push(resolve))
   });
-  hub.receive({ t: 'hello', proto: PROTOCOL, store: 'main', replicaId: 'r', ops: [] });
+  hub.receive({ t: 'hello', proto: PROTOCOL, store: 'main', replica: 'r', ops: [] });
   hub.receive({ t: 'leave', store: 'main' });
-  hub.receive({ t: 'hello', proto: PROTOCOL, store: 'main', replicaId: 'r', ops: [] });
+  hub.receive({ t: 'hello', proto: PROTOCOL, store: 'main', replica: 'r', ops: [] });
   verdicts[0](true);   // the first attempt's verdict arrives after the leave
   verdicts[1](true);
   await new Promise(resolve => setImmediate(resolve));
@@ -307,14 +307,14 @@ test('authorizeId runs before the store is loaded: a refusal loads nothing and r
     authorizeId: async (user, id) => allowed.has(id),
     authorize: (user, id, store) => store.version >= 0
   });
-  hub.receive({ t: 'hello', proto: PROTOCOL, store: 'team-2', replicaId: 'r', ops: [] });   // exists, not allowed
-  hub.receive({ t: 'hello', proto: PROTOCOL, store: 'ghost', replicaId: 'r', ops: [] });    // does not exist, not allowed
+  hub.receive({ t: 'hello', proto: PROTOCOL, store: 'team-2', replica: 'r', ops: [] });   // exists, not allowed
+  hub.receive({ t: 'hello', proto: PROTOCOL, store: 'ghost', replica: 'r', ops: [] });    // does not exist, not allowed
   await new Promise(resolve => setImmediate(resolve));
   assert.deepEqual(loaded, [], 'nothing was loaded for a refused id');
   assert.deepEqual(sent.map(m => [m.store, m.code]), [['team-2', 'forbidden'], ['ghost', 'forbidden']], 'the same answer either way');
 
   sent.length = 0;
-  hub.receive({ t: 'hello', proto: PROTOCOL, store: 'team-1', replicaId: 'r', ops: [] });
+  hub.receive({ t: 'hello', proto: PROTOCOL, store: 'team-1', replica: 'r', ops: [] });
   hub.receive({ t: 'share', store: 'team-1', data: null });   // queued while the verdicts are out
   await new Promise(resolve => setImmediate(resolve));
   assert.deepEqual(loaded, ['team-1']);
@@ -328,12 +328,12 @@ test('authorizeId runs before the store is loaded: a refusal loads nothing and r
     authorizeId: id => { throw new Error('not today'); }
   });
   sent.length = 0;
-  hub2.receive({ t: 'hello', proto: PROTOCOL, store: 'team-1', replicaId: 'r2', ops: [] });
+  hub2.receive({ t: 'hello', proto: PROTOCOL, store: 'team-1', replica: 'r2', ops: [] });
   assert.deepEqual(sent.map(m => [m.code, m.message]), [['forbidden', 'not today']]);
   let release;
   const hub3 = createHub(id => stores.get(id), { send: m => sent.push(m), authorizeId: () => new Promise(r => { release = r; }) });
   sent.length = 0;
-  hub3.receive({ t: 'hello', proto: PROTOCOL, store: 'team-1', replicaId: 'r3', ops: [] });
+  hub3.receive({ t: 'hello', proto: PROTOCOL, store: 'team-1', replica: 'r3', ops: [] });
   hub3.receive({ t: 'leave', store: 'team-1' });
   release(true);
   await new Promise(resolve => setImmediate(resolve));
@@ -348,8 +348,8 @@ test('revalidate judges the open stores again: a refusal closes that store alone
   const sent = [];
   const allowed = new Set(['a', 'b']);
   const hub = createHub(id => stores.get(id), { send: m => sent.push(m), user: { id: 'u' }, authorizeId: (user, id) => allowed.has(id) });
-  hub.receive({ t: 'hello', proto: PROTOCOL, store: 'a', replicaId: 'r', ops: [] });
-  hub.receive({ t: 'hello', proto: PROTOCOL, store: 'b', replicaId: 'r', ops: [] });
+  hub.receive({ t: 'hello', proto: PROTOCOL, store: 'a', replica: 'r', ops: [] });
+  hub.receive({ t: 'hello', proto: PROTOCOL, store: 'b', replica: 'r', ops: [] });
   assert.deepEqual(hub.stores, ['a', 'b']);
   assert.equal(await hub.revalidate(), 0, 'nothing changed, nothing closed');
   allowed.delete('b');
@@ -366,7 +366,7 @@ test('revalidate judges the open stores again: a refusal closes that store alone
   // A throw is a refusal with its message, as at open
   let gone = false;
   const thrower = createHub(id => stores.get(id), { send: m => sent.push(m), authorize: () => { if (gone) throw new Error('team deleted'); return true; } });
-  thrower.receive({ t: 'hello', proto: PROTOCOL, store: 'e', replicaId: 'r4', ops: [] });
+  thrower.receive({ t: 'hello', proto: PROTOCOL, store: 'e', replica: 'r4', ops: [] });
   gone = true;
   sent.length = 0;
   assert.equal(await thrower.revalidate(), 1);
@@ -378,7 +378,7 @@ test('revalidate judges the open stores again: a refusal closes that store alone
   const verdicts = [];
   const slow = createHub(id => stores.get(id), { send: m => sent.push(m), authorizeId: () => new Promise(resolve => verdicts.push(resolve)) });
   sent.length = 0;
-  slow.receive({ t: 'hello', proto: PROTOCOL, store: 'c', replicaId: 'r2', ops: [] });
+  slow.receive({ t: 'hello', proto: PROTOCOL, store: 'c', replica: 'r2', ops: [] });
   const revalidating = slow.revalidate();
   assert.equal(verdicts.length, 2, 'asked again');
   verdicts[0](true);
@@ -393,12 +393,12 @@ test('revalidate judges the open stores again: a refusal closes that store alone
   verdicts.length = 0;
   let gated = false;
   const hub3 = createHub(id => stores.get(id), { send: m => sent.push(m), authorizeId: () => (gated ? new Promise(resolve => verdicts.push(resolve)) : true) });
-  hub3.receive({ t: 'hello', proto: PROTOCOL, store: 'd', replicaId: 'r3', ops: [] });
+  hub3.receive({ t: 'hello', proto: PROTOCOL, store: 'd', replica: 'r3', ops: [] });
   gated = true;
   sent.length = 0;
   const judging = hub3.revalidate();
   hub3.receive({ t: 'leave', store: 'd' });
-  hub3.receive({ t: 'hello', proto: PROTOCOL, store: 'd', replicaId: 'r3', ops: [] });
+  hub3.receive({ t: 'hello', proto: PROTOCOL, store: 'd', replica: 'r3', ops: [] });
   verdicts[1](true);    // the new session's
   verdicts[0](false);   // the old one's
   assert.equal(await judging, 0);

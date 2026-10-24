@@ -184,7 +184,7 @@ test('snapshotResponse: the state with its version and epoch, brotli or gzip as 
   assert.equal(snapshotResponse(store, request({ origin: 'https://app.example' }), { origins: false }).headers.get('access-control-allow-origin'), null);
   assert.throws(() => snapshotOptions({ origins: 'https://app.example' }), TypeError, 'a bare string is neither * nor a list');
   const document = await plain.json();
-  assert.deepEqual(document, { v: store.version, epoch: store.epoch, state: store.snapshot() });
+  assert.deepEqual(document, { v: store.version, epoch: store.epoch, state: store.snapshot(), clocks: JSON.parse(store.clocksJSON()) }, 'the state and the clocks a client judges its pending edits by');
   const etag = plain.headers.get('etag');
   assert.equal(etag, `"${store.epoch}:${store.version}"`);
 
