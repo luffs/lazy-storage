@@ -332,7 +332,8 @@ export function createRelay({
     edge.fv++;
     edge.log.push({ v: edge.fv, ts, changes });
     if (edge.log.length > DELTA_LOG) edge.log.splice(0, edge.log.length - DELTA_LOG);
-    const message = { t: 'patch', changes, v: edge.fv, ts };
+    // Tagged once: every session sends the same object, encoded once, with no copy per session
+    const message = { t: 'patch', changes, v: edge.fv, ts, store: edge.id };
     for (const ss of edge.sessions) if (ss.synced) ss.send(message);
   }
 
@@ -781,7 +782,7 @@ export function createRelay({
         synced: false,
         hello: null,
         // Tagged as the hub tags: the message encoded once, however many sessions hear it, the store id spliced in
-        send: message => { if (!gone) send(tagStore(message, id)); },
+        send: message => { if (!gone) send(message.store === id ? message : tagStore(message, id)); },
         evictSocket: () => socket.evict(),
         end(code, message) {
           leave(id);
