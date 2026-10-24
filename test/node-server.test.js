@@ -8,6 +8,9 @@ import { serve, createHandlers } from '../src/server/node.js';
 import { createClient, createConnection, webSocketTransport } from '../src/index.js';
 import { probeFrames, stalledSocket } from './frames.js';
 import { randomBytes } from 'node:crypto';
+import { createRelay } from '../src/relay/index.js';
+import { credentialRequest } from '../src/server/follow.js';
+import { createNetwork } from './helpers.js';
 
 const INITIAL = { tasks: {}, filler: '' };   // filler: a leaf, so a singleton, to make a large snapshot
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -441,4 +444,82 @@ test('expiresAt closes a socket when its session runs out: a client with fresh c
   assert.deepEqual({ expired, disconnected }, { expired: 2, disconnected: 1 });
   connection.close();
   await server.shutdown();
+});
+
+test('a relay on the relay route: its clients are vouched for by their own credentials, read the store through it, and write as themselves', async () => {
+  const store = createStore({ initial: INITIAL, presence: true });
+  const authenticated = [];
+  const server = serve({
+    port: 0,
+    stores: id => (id === 't1' ? store : null),
+    authenticate: (req, context) => {
+      const user = users[new URL(req.url).searchParams.get('token')] ?? null;
+      authenticated.push({ user: user?.id ?? null, relay: context?.relay?.id ?? null, origin: req.headers.get('origin') });
+      return user;
+    },
+    authorize: (user, storeId) => user.teams.includes(storeId),
+    relays: {
+      authenticate: req => (new URL(req.url).searchParams.get('relay') === 'secret' ? { id: 'shop-relay' } : null),
+      authorize: (relay, storeId) => storeId === 't1'
+    }
+  });
+  const port = await listening(server);
+  const relay = createRelay({
+    shapeOf: () => ({ initial: INITIAL }),
+    link: webSocketTransport(`ws://localhost:${port}/ws/relay?relay=secret`),
+    reconnect: { min: 20, max: 50 },
+    keepalive: false,
+    onError: () => {}
+  });
+  const site = createNetwork(relay);
+  const bobs = connect(port, 'bob');
+  const direct = attach(bobs, 't1', 'bob-1');
+  const behind = [];
+  try {
+    // A credential as a relay hands it on: the client's own query, and a header the server must not take
+    const alice = site.client({ store: 't1', replicaId: 'alice-1', initial: INITIAL }, { user: { query: '?token=alice', headers: { origin: 'https://forged.example', authorization: 'Bearer x' } } });
+    const stranger = site.client({ store: 't1', replicaId: 'nobody-1', initial: INITIAL }, { user: { query: '?token=nope' } });
+    behind.push(alice, stranger);
+    const closed = [];
+    stranger.on('closed', info => closed.push(info.code));
+    const settled = async pred => { for (let i = 0; i < 300 && !pred(); i++) { await site.settle(); await sleep(10); } };
+    await settled(() => alice.status === 'online' && direct.status === 'online' && closed.length > 0);
+    assert.equal(alice.status, 'online', 'let in by the server, through the relay');
+    assert.deepEqual(closed, ['unauthorized'], 'a credential the server turns away is refused');
+    const vouched = authenticated.find(a => a.relay === 'shop-relay' && a.user === 'u1');
+    assert.ok(vouched, 'judged by the same authenticate, told which relay asks');
+    assert.equal(vouched.origin, null, 'and never with a header a relay could make up');
+
+    alice.state.tasks.a = { title: 'from behind the relay' };
+    await settled(() => direct.state.tasks.a !== undefined);
+    assert.equal(direct.state.tasks.a.title, 'from behind the relay');
+    direct.state.tasks.b = { title: 'from a socket of its own' };
+    await settled(() => alice.state.tasks.b !== undefined);
+    assert.equal(alice.state.tasks.b.title, 'from a socket of its own');
+    await settled(() => alice.pending === 0);
+    assert.equal(alice.pending, 0, 'acknowledged by the server');
+    await settled(() => alice.peers.length === 2);
+    assert.deepEqual(alice.peers.map(p => p.replicaId).sort(), ['alice-1', 'bob-1'], 'listed as itself');
+
+    const turned = await turnedAway(new WebSocket(`ws://localhost:${port}/ws/relay?relay=wrong`));
+    assert.equal(turned.code, 4401, 'a relay that does not authenticate is turned away');
+  } finally {
+    for (const c of behind) c.dispose();
+    relay.close();
+    bobs.close();
+    await server.shutdown();
+  }
+});
+
+test('a credential becomes the request its own socket would have made: who it is, and nothing a relay could vouch for', () => {
+  const req = credentialRequest({ headers: { authorization: 'Bearer a', Cookie: 's=1', origin: 'https://x', 'x-forwarded-for': '1.2.3.4', 'x-tenant': 't', bad: 'line\nbreak', n: 5 }, query: '?token=a' }, '/ws', ['x-tenant']);
+  assert.equal(new URL(req.url).pathname, '/ws');
+  assert.equal(new URL(req.url).search, '?token=a');
+  assert.equal(req.headers.get('authorization'), 'Bearer a');
+  assert.equal(req.headers.get('cookie'), 's=1');
+  assert.equal(req.headers.get('x-tenant'), 't', 'a header the adapter allows');
+  assert.equal(req.headers.get('origin'), null);
+  assert.equal(req.headers.get('x-forwarded-for'), null);
+  assert.equal(new URL(credentialRequest({ query: 'token=a' }, '/ws').url).search, '', 'a query is one only from its ?');
+  assert.equal(credentialRequest(null, '/ws').headers.get('authorization'), null);
 });

@@ -111,8 +111,6 @@ export function createHub(resolveStore, { send, user, authorizeId, authorize, vo
     if (!session) return;
     if (inner.t === 'vouch') return vouchFor(id, session, inner);
     session.receive(inner);
-    // A write-only session (a hello with `follow: false`, see store.js) hears none of the store's broadcasts: the socket leaves its topic
-    if (inner.t === 'hello' && session.follows === false) channel?.unsubscribe(id);
   }
 
   /**

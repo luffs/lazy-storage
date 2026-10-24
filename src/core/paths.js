@@ -9,9 +9,6 @@ export const pathKey = path => JSON.stringify(path);
 
 export const parsePathKey = key => JSON.parse(key);
 
-/** Prefix shared by the keys of every strict descendant of `path` */
-export const descendantPrefix = path => pathKey(path).slice(0, -1) + ',';
-
 /**
  * Normalize a register spec to segments: 'order', 'tasks/*\/subtaskOrder',
  * or ['tasks', '*', 'subtaskOrder']. A `*` segment matches any one segment.

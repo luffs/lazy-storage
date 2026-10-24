@@ -110,6 +110,10 @@ jobs:
         # A random seed each run; a failure prints the seed and a reproduction command
         run: node test/fuzz/run.js --runs 200 --steps 50 --clients 4
 
+      - name: Run a longer campaign behind a relay
+        # Clients behind a relay whose link drops and comes back, beside clients on the store
+        run: node test/fuzz/run.js --mode relay --runs 100 --steps 50 --clients 4
+
       - name: Run a longer hostile-client campaign
         # An attacker beside honest clients: forged ops, poisoned stamps, reserved names, churn
         run: node test/fuzz/run.js --mode hostile --runs 300 --steps 60

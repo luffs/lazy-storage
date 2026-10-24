@@ -78,3 +78,41 @@ test('a file from before 1.0 is refused until fromLeaves moves it', () => withFi
   store.dispose();
   sqlite.close();
 }));
+
+test('the SQLite adapter refuses what it cannot be given, and has nothing to move in a file of 1.0', () => withFile(file => {
+  assert.throws(() => sqliteStorage(file, { checkpoints: 'sometimes' }), /checkpoints/);
+  const sqlite = sqliteStorage(file, { checkpoints: 'inline' });
+  assert.throws(() => sqlite.store(''), /store id/);
+  assert.throws(() => sqlite.backup(':memory:'), /file path/);
+  assert.deepEqual(sqlite.fromLeaves(), [], 'no leaves table, nothing to move');
+  sqlite.close();
+}));
+
+test('a document replaced into SQLite keeps its singletons, replicas and owners, and a compaction forgets what the window no longer needs', () => withFile(file => {
+  const now = fakeTime(1_000_000_000);
+  const sqlite = sqliteStorage(file, { checkpoints: 'inline' });
+  sqlite.store('main').replace({
+    records: [
+      ['tasks', 'a', { title: 'x' }, { live: { '[]': 1, '["title"]': 1 }, gone: { '["old"]': 1 } }],
+      ['settings', null, { theme: 'dark' }, { live: { '[]': 1 }, gone: {} }]
+    ],
+    replicas: { r1: { seq: 4, seen: 1, owner: 'ann' }, r2: { seq: 1, seen: 1 } },
+    version: 7,
+    epoch: 'old',
+    schema: 0
+  });
+  let store = createStore({ ...SHAPE, now, retention: 86_400_000, storage: sqlite.store('main') });
+  assert.equal(store.state.settings.theme, 'dark');
+  assert.equal(store.version, 7);
+  assert.equal(store.stats().replicas, 0, 'replicas older than the window were forgotten on load');
+  assert.equal(store.clock('tasks', 'a').gone['["old"]'], undefined, 'and so was the deletion');
+  store.flush();
+  store.dispose();
+  store = createStore({ ...SHAPE, now, retention: 86_400_000, storage: sqlite.store('main') });
+  assert.equal(store.stats().replicas, 0, 'forgotten in the file too');
+  assert.deepEqual(sqlite.ids(), ['main']);
+  store.dispose();
+  sqlite.remove('main');
+  assert.deepEqual(sqlite.ids(), []);
+  sqlite.close();
+}));
