@@ -41,7 +41,7 @@ import { LazyWatch } from 'lazy-watch';
 import { createClock, isTimestamp, clamp } from '../core/clock.js';
 import { PROTOCOL } from '../core/protocol.js';
 import { createShape, assertChange, ModelError } from '../core/shape.js';
-import { createDoc, docFromRecords, changeFor } from '../core/doc.js';
+import { createDoc, docFromRecords, changeFor, diffOf } from '../core/doc.js';
 import { createRules, RuleError } from '../core/rules.js';
 import { memoryStorage, assertDocument } from './storage.js';
 import { toJSON, presetJSON, encodedBytes, utf8Bytes, SNAPSHOT_THRESHOLD, TALLY, LAZY } from './wire.js';
@@ -93,7 +93,11 @@ function presenceOptions(presence) {
  * @param {Object} [options.parents]
  * @param {Object} [options.rules] - per collection or singleton, `'*'` for the rest: true, false, or
  *   `(user, before, after, { c, id, state, replica, changes, store }) => boolean` (throw to say why)
- * @param {boolean} [options.readOnly=false] - refuse every client op
+ * @param {boolean|string[]} [options.readOnly=false] - refuse every client op (true), or every op that writes
+ *   one of these collections or singletons
+ * @param {(diff: Object, context: { user: any, replicaId: string, store: Object, changes: Object[] }) => boolean|void} [options.validate]
+ *   a check of the whole op, for what spans records: its changes as one diff in the tree's shape. false,
+ *   or a throw (its message the refusal's), refuses it with 'forbidden'
  * @param {number} [options.retention=30 days]
  * @param {number} [options.compactEvery=1 hour]
  * @param {number} [options.deltaLog=1000]
@@ -113,6 +117,7 @@ export function createStore({
   parents = {},
   rules = {},
   readOnly = false,
+  validate,
   retention = 30 * DAY,
   compactEvery = HOUR,
   deltaLog = 1000,
@@ -128,7 +133,11 @@ export function createStore({
   const shape = createShape({ initial, singletons, registers, parents });
   const pres = presenceOptions(presenceOption);
   if (rateLimit && !(rateLimit.burst > 0 && rateLimit.perSecond > 0)) throw new TypeError('rateLimit needs positive burst and perSecond');
-  const judgeRules = createRules(shape, rules, readOnly);
+  if (validate !== undefined && typeof validate !== 'function') throw new TypeError('validate must be a function');
+  // readOnly as a list: those collections and singletons are the server's alone
+  const locked = Array.isArray(readOnly) ? Object.fromEntries(readOnly.map(key => [key, false])) : {};
+  for (const key of Object.keys(locked)) if (!shape.has(key)) throw new TypeError(`readOnly: "${key}" is not a collection or singleton`);
+  const judgeRules = createRules(shape, { ...rules, ...locked }, readOnly === true);
   if (!Array.isArray(migrations) || migrations.some(m => typeof m !== 'function')) throw new TypeError('migrations must be an array of functions');
   const time = now ?? Date.now;
   const saved = storage.load();
@@ -481,7 +490,7 @@ export function createStore({
       broadcast({ t: 'patch', changes: applied, v: version, ts });
       for (const fn of listeners) {
         try {
-          fn(applied, { origin: replicaId === 'server' ? 'server' : 'remote', replicaId, v: version });
+          fn(diffOf(shape, applied), { origin: replicaId === 'server' ? 'server' : 'remote', replicaId, v: version, changes: applied });
         } catch (err) {
           onError(err);
         }
@@ -514,6 +523,15 @@ export function createStore({
     }
     try {
       judgeRules(doc, op.changes, speaker.user, op.replica, { store: self });
+      if (validate) {
+        let verdict;
+        try {
+          verdict = validate(diffOf(shape, op.changes), { user: speaker.user, replicaId: op.replica, store: self, changes: op.changes });
+        } catch (err) {
+          throw new RuleError(err?.message || 'Refused');
+        }
+        if (verdict === false) throw new RuleError('Refused');
+      }
     } catch (err) {
       if (err instanceof RuleError) throw new RefusedError('forbidden', err.message);
       throw err;
@@ -1001,7 +1019,10 @@ export function createStore({
     snapshot: () => structuredClone(doc.state),
     /** A record's clock: { live, gone }, timestamps by path key */
     clock: (c, id) => doc.clock(c, id),
-    /** Hear every change that lands, as `listener(changes, { origin, replicaId, v })`, before it is stored */
+    /**
+     * Hear every batch that lands, before it is stored: `listener(diff, { origin, replicaId, v, changes })`,
+     * the diff in the tree's shape (null for a deletion), the changes as they landed
+     */
     on(listener) {
       listeners.add(listener);
       return () => listeners.delete(listener);

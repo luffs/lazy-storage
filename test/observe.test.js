@@ -37,7 +37,7 @@ test('observe reports every op once stored, every refusal, and every session; a 
 test('on() hears every change as it lands, with its origin', async () => {
   const store = createStore(SHAPE);
   const heard = [];
-  store.on((changes, meta) => heard.push([meta.origin, changes.map(ch => ch.c)]));
+  store.on((diff, meta) => heard.push([meta.origin, Object.keys(diff)]));
   const net = createNetwork(store);
   const a = net.client({ replicaId: 'a', ...SHAPE });
   await net.settle();

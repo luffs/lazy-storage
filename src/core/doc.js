@@ -363,6 +363,28 @@ export function createDoc(shape, { state, clocks, track = true } = {}) {
   };
 }
 
+/**
+ * Changes as one diff in the tree's shape: { c: { id: ... } } or { c: ... }
+ * for a singleton, null for a deletion. For code that reads a batch as a
+ * lazy-watch diff (a listener, a validator spanning records)
+ */
+export function diffOf(shape, changes) {
+  const diff = {};
+  for (const change of changes) {
+    const value = change.del === true ? null : Object.hasOwn(change, 'put') ? change.put : change.set;
+    const path = shape.full(change.c, change.id, change.path ?? []);
+    let node = diff;
+    for (let i = 0; i < path.length - 1; i++) {
+      if (!isObj(node[path[i]])) node[path[i]] = {};
+      node = node[path[i]];
+    }
+    const last = path[path.length - 1];
+    if (isObj(value) && isObj(node[last])) Object.assign(node[last], structuredClone(value));
+    else node[last] = clone(value);
+  }
+  return diff;
+}
+
 /** A doc from stored records: [[c, id, data, clock], ...]; anything the shape does not know is left out */
 export function docFromRecords(shape, records = []) {
   const state = structuredClone(shape.initial);

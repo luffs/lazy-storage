@@ -272,3 +272,28 @@ test('the server\'s own patch merges, makes what is missing, and reaches clients
   await net.settle();
   assert.equal(a.state.tasks.r, undefined);
 });
+
+test('validate judges the whole op as one diff, and readOnly names what is the server\'s alone', async () => {
+  const seen = [];
+  const { net, client } = setup({
+    readOnly: ['settings'],
+    validate: (diff, { user, replicaId }) => {
+      seen.push([Object.keys(diff), replicaId]);
+      if (diff.tasks?.bad) throw new Error('No bad tasks');
+    }
+  });
+  const a = client('a');
+  await net.settle();
+  const rejected = [];
+  a.on('rejected', e => rejected.push(e.message));
+  a.state.tasks.good = { n: 1 };
+  await net.settle();
+  a.state.tasks.bad = { n: 2 };
+  await net.settle();
+  a.state.settings.theme = 'dark';
+  await net.settle();
+  assert.deepEqual(rejected, ['No bad tasks', "settings is the server's to write"]);
+  assert.deepEqual(Object.keys(a.state.tasks), ['good']);
+  assert.equal(a.state.settings.theme, 'light');
+  assert.deepEqual(seen, [[['tasks'], 'a'], [['tasks'], 'a']]);
+});
