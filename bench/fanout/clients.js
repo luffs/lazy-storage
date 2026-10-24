@@ -67,6 +67,12 @@ const numberAfter = (text, key, from = 0) => {
   while (end < text.length && '0123456789.-e'.includes(text[end])) end++;
   return Number(text.slice(at + key.length, end));
 };
+// A field of a feed record as a patch carries it: inside a record written whole (`"at":`), or as a
+// change of its own where the record was there already and the server merged the write field by field
+const fieldAfter = (text, name) => {
+  const whole = numberAfter(text, `"${name}":`);
+  return Number.isNaN(whole) ? numberAfter(text, `["${name}"],"set":`) : whole;
+};
 
 function open(c) {
   const ws = SOCKET_OPTIONS ? new WebSocket(c.url, SOCKET_OPTIONS) : new WebSocket(c.url);
@@ -92,16 +98,16 @@ function open(c) {
       const v = numberAfter(text, '"v":', text.lastIndexOf('"v":'));
       if (v !== c.v + 1) stats.gaps++;
       c.v = v;
-      const counted = window.phase !== null ? numberAfter(text, '"ph":') === window.phase : v > window.from && v <= window.to;
+      const counted = window.phase !== null ? fieldAfter(text, 'ph') === window.phase : v > window.from && v <= window.to;
       if (!counted) {
         stats.stale++;
         return;
       }
       stats.received++;
       const now = clock();
-      const at = numberAfter(text, '"at":');
+      const at = fieldAfter(text, 'at');
       if (at > 0) record(stats.histogram, now - at);
-      const sent = numberAfter(text, '"sent":');
+      const sent = fieldAfter(text, 'sent');
       if (sent > 0) record(stats.delivery, now - sent);
       return;
     }
