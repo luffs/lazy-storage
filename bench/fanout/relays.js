@@ -61,7 +61,7 @@ control({
     return {
       cpu: cpuSeconds(),
       rss: process.memoryUsage().rss,
-      links: relays.map(({ relay }) => relay.stats().link?.state),
+      links: relays.map(({ relay }) => relay.stats().link),
       modes: relays.map(({ relay }) => relay.mode),
       clients,
       states,

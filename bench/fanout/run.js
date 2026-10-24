@@ -452,7 +452,7 @@ async function topology(spec, results) {
       const rs = await Promise.all(relays.map(r => r.get('/stats')));
       // Every relay with clients has its link open, and the server holds those links (a relay nobody came to dials none)
       const used = rs.flatMap(r => r.links.map((link, j) => ({ link, clients: r.clients[j] }))).filter(r => r.clients > 0);
-      const shut = used.filter(r => r.link !== 'open').length;
+      const shut = used.filter(r => r.link !== 'online').length;
       if (shut || s.sockets.relays !== used.length) throw new Error(`${spec}: fan-out is not on (links not open: ${shut}, relays at the server ${s.sockets.relays} of ${used.length})`);
     }
     Object.assign(out, { serverSockets: s.sockets.sockets, listed: s.listed });
