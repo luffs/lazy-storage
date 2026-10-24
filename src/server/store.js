@@ -488,12 +488,20 @@ export function createStore({
       if (log.length > deltaLog) log.splice(0, log.length - deltaLog);
       commit({ ...rowsOf(applied), replica: replicaEntry ? { id: replicaId, ...replicaEntry } : undefined, log: entry, logFloor: log[0]?.v ?? version });
       broadcast({ t: 'patch', changes: applied, v: version, ts });
-      for (const fn of listeners) {
-        try {
-          fn(diffOf(shape, applied), { origin: replicaId === 'server' ? 'server' : 'remote', replicaId, v: version, changes: applied });
-        } catch (err) {
-          onError(err);
-        }
+      // Heard on the next microtask, as a batch is: a listener that writes (closes a session, patches) does so
+      // after the write that set it off has finished, not in the middle of it
+      if (listeners.size) {
+        const meta = { origin: replicaId === 'server' ? 'server' : 'remote', replicaId, v: version, changes: applied };
+        const diff = diffOf(shape, applied);
+        queueMicrotask(() => {
+          for (const fn of listeners) {
+            try {
+              fn(diff, meta);
+            } catch (err) {
+              onError(err);
+            }
+          }
+        });
       }
     } else if (replicaEntry) {
       commit({ upserts: [], deletes: [], replica: { id: replicaId, ...replicaEntry } });

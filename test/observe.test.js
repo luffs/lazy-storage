@@ -44,6 +44,8 @@ test('on() hears every change as it lands, with its origin', async () => {
   a.state.tasks.k = { n: 1 };
   await net.settle();
   store.patch({ settings: { theme: 'dark' } });
+  assert.equal(heard.length, 1, 'heard after the write, on the next microtask');
+  await Promise.resolve();
   assert.deepEqual(heard, [['remote', ['tasks']], ['server', ['settings']]]);
 });
 

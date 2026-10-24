@@ -51,6 +51,8 @@ export { memoryCopies, fileCopies } from './storage.js';
 const { Utils } = LazyWatch;
 const isObj = Utils.isPlainObject;
 const DELTA_LOG = 1000;
+/** How long a store the server would not let the relay carry is answered with the server's word before it asks again */
+const REASK = 10 * 60_000;
 const clone = value => (value === null || value === undefined || typeof value !== 'object' ? value : structuredClone(value));
 
 /**
@@ -532,6 +534,9 @@ export function createRelay({
           setTimeout(() => { if (edge.link && connection.status === 'online') upstreamHandler(edge).onOpen(edge.link); }, 250 + Math.random() * 750);
           return;
         }
+        // The server will not let the relay carry the store (or ended its session): what it said goes to every client
+        // there, and to every one that opens the store for a while; then the relay asks again
+        edge.closedWith = { code: msg.code, message: msg.message, until: now() + REASK };
         for (const ss of [...edge.sessions]) ss.end(msg.code, msg.message);
         return;
       }
@@ -713,6 +718,11 @@ export function createRelay({
         if (edge.loading) return void edge.waiting.push(() => socket.receive(msg));
         switch (msg.t) {
           case 'hello': {
+            if (edge.closedWith) {
+              if (now() < edge.closedWith.until) return ss.end(edge.closedWith.code, edge.closedWith.message);
+              edge.closedWith = null;
+              if (edge.link && connection.status === 'online') upstreamHandler(edge).onOpen(edge.link);
+            }
             if (msg.proto !== PROTOCOL) return ss.end('outdated', `This relay speaks protocol ${PROTOCOL}; the client speaks ${msg.proto ?? 'an older one'}`);
             if (typeof msg.replica !== 'string' || !msg.replica) return ss.send({ t: 'error', message: 'hello requires a replica' });
             if (ss.replica && ss.replica !== msg.replica) return ss.send({ t: 'error', code: 'forbidden', message: `This session speaks for replica "${ss.replica}"` });
