@@ -83,18 +83,21 @@ Adapters:
 
 **A file from before 1.0** keeps one row per leaf, and a store in it is
 refused with code `storage-format` rather than served empty. Move it
-once, with no store loaded, telling the adapter which top-level keys are
-singletons:
+once, with no store loaded, giving the adapter each store's shape, as
+`createStore` takes it, so its singletons are the ones the store will
+read (null for a store whose every top-level key is a collection):
 
 ```js
 const sqlite = sqliteStorage('data/app.sqlite');
-sqlite.fromLeaves(storeId => ({ singletons: ['settings'] }));   // returns the ids it moved
+sqlite.fromLeaves(storeId => shapes[storeId] ?? null);   // returns the ids it moved; nothing once moved
 ```
 
 Each leaf's time becomes its path's time in its record's clock, a
 deletion inside a living record a deleted path, and a record deleted
 whole is left out. The moved stores get a new epoch, so every client
-takes a snapshot, and their old delta log goes.
+takes a snapshot, and their old delta log goes. It is safe to call at
+every start: a file with no leaves left is not touched. Copy the file
+first (`sqlite.backup(file)` does it) if you may want to go back.
 
 One process serves a store at a time. Two processes on one SQLite file,
 a deploy whose old and new process overlap or a server started twice,

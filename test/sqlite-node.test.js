@@ -116,3 +116,30 @@ test('a document replaced into SQLite keeps its singletons, replicas and owners,
   assert.deepEqual(sqlite.ids(), []);
   sqlite.close();
 }));
+
+test('fromLeaves reads singletons from a whole shape, a key whose initial value is not an object among them', () => withFile(file => {
+  const db = new DatabaseSync(file);
+  db.exec(`CREATE TABLE leaves (store TEXT NOT NULL, path TEXT NOT NULL, value TEXT, ts_ms INTEGER NOT NULL, ts_count INTEGER NOT NULL, ts_replica TEXT NOT NULL, deleted INTEGER NOT NULL DEFAULT 0, since_ms INTEGER, since_count INTEGER, since_replica TEXT, v INTEGER, made_by TEXT, PRIMARY KEY (store, path)) WITHOUT ROWID;
+    CREATE TABLE stores (store TEXT PRIMARY KEY, version INTEGER NOT NULL DEFAULT 0, epoch TEXT, schema INTEGER, horizon INTEGER) WITHOUT ROWID;
+    INSERT INTO stores VALUES ('core', 3, 'old', NULL, 0), ('tokens', 1, 'old', NULL, 0);`);
+  const leaf = db.prepare('INSERT INTO leaves (store, path, value, ts_ms, ts_count, ts_replica, deleted) VALUES (?, ?, ?, ?, 0, ?, ?)');
+  leaf.run('core', JSON.stringify(['build']), JSON.stringify('b-42'), 100, 'server', 0);
+  leaf.run('core', JSON.stringify(['users', 'ann', 'name']), JSON.stringify('Ann'), 110, 'server', 0);
+  leaf.run('tokens', JSON.stringify(['tokens', 't1', 'device']), JSON.stringify('D1'), 120, 'server', 0);
+  db.close();
+
+  // The shape as an app declares it: `build` a singleton by its value, not by a list
+  const core = { initial: { users: {}, build: '' } };
+  const tokens = { initial: { tokens: {} } };
+  let sqlite = sqliteStorage(file, { checkpoints: 'inline' });
+  assert.deepEqual(sqlite.fromLeaves(id => (id === 'core' ? core : null)).sort(), ['core', 'tokens']);
+  sqlite.close();
+  sqlite = sqliteStorage(file, { checkpoints: 'inline' });
+  const store = createStore({ ...core, storage: sqlite.store('core') });
+  assert.deepEqual(store.snapshot(), { users: { ann: { name: 'Ann' } }, build: 'b-42' });
+  const other = createStore({ ...tokens, storage: sqlite.store('tokens') });
+  assert.deepEqual(other.snapshot(), { tokens: { t1: { device: 'D1' } } }, 'a store with no shape: every key a collection');
+  store.dispose();
+  other.dispose();
+  sqlite.close();
+}));

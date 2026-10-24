@@ -50,6 +50,7 @@
 import { hostname } from 'node:os';
 import { Worker } from 'node:worker_threads';
 import { randomId } from '../core/ids.js';
+import { createShape } from '../core/shape.js';
 import { assertDocument, newEpoch } from './storage.js';
 
 /** How far a store's log floor moves before the rows under it are deleted (see the header) */
@@ -442,13 +443,16 @@ export function sqliteStorageOn({ exec, prepare, transaction, close, db, driver 
     /**
      * Move the stores a file from before 1.0 keeps in `leaves` (one row per
      * leaf) into `records`, one transaction a store, and drop their leaf rows
-     * and their delta log (which spoke of leaves). `shapeOf(storeId)` says
-     * which top-level keys are singletons (`{ singletons }`, or the store's
-     * whole shape); every other key is a collection whose records are its
-     * keys. Each leaf's time becomes its path's time in its record's clock,
-     * a deletion inside a living record a deleted path, and a record deleted
-     * whole is left out. The stores get a new epoch, so every client takes a
-     * snapshot. Run it with no store loaded. Returns the ids it moved
+     * and their delta log (which spoke of leaves). `shapeOf(storeId)` gives the
+     * store's shape, as createStore takes it, so its singletons are the ones
+     * the store will read (a key listed in `singletons`, or one whose initial
+     * value is not an object); `{ singletons }` alone will do too, and null
+     * for a store whose every top-level key is a collection. Every other key
+     * is a collection whose records are its keys. Each leaf's time becomes
+     * its path's time in its record's clock, a deletion inside a living
+     * record a deleted path, and a record deleted whole is left out. The
+     * stores get a new epoch, so every client takes a snapshot. Run it with no
+     * store loaded. Returns the ids it moved
      */
     fromLeaves(shapeOf = () => ({})) {
       if (!hasLeaves) return [];
@@ -458,7 +462,8 @@ export function sqliteStorageOn({ exec, prepare, transaction, close, db, driver 
       const dropOldLog = prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'log'").get() ? prepare('DELETE FROM log WHERE store = ?') : null;
       const setEpoch = prepare('UPDATE stores SET epoch = ? WHERE store = ?');
       const moveOne = transaction(id => {
-        const singles = new Set(shapeOf(id)?.singletons ?? []);
+        const declared = shapeOf(id);
+        const singles = new Set(declared?.initial ? createShape(declared).singletons : (declared?.singletons ?? []));
         const records = new Map();   // [c, id] -> { rows: [[inner path, row]] }
         for (const row of rowsOf.all(id)) {
           const path = JSON.parse(row.path);
