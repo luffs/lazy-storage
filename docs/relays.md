@@ -42,7 +42,10 @@ the server knows).
   `expiresAt`, `authorizeId` and `authorize` as it would the client's own
   socket (handed `{ relay }` as their last argument, so an app can tell).
   A client let in is listed in the store's presence as itself, its replica
-  claimed as its own. The relay answers the client from its copy (a delta
+  claimed as its own. The relay itself reads nothing of a store until a
+  client of it is let in there: the server holds its answer, and every
+  change, until then, so a store no client behind it may open never
+  reaches the relay or its disk. The relay answers the client from its copy (a delta
   out of the copy's log of its last 1000 changes where that reaches back,
   else a snapshot), and passes every change on to each client.
 - **Writes, as their own.** A client's op is applied to the copy at once,
@@ -71,13 +74,14 @@ the server knows).
   that copy and the server's delta. A store with ops of the relay's own the
   server has not acknowledged waits for them; `linger: false` keeps every
   store.
-- **Credentials turned away are counted.** Every vouch costs the server an
-  `authenticate`, so a relay's socket may have only so many turned away as
-  unauthorized (`relays.rate`, default a burst of 100, then 10 a second)
-  before every vouch it sends waits: the server answers `rate-limited` with
-  `retryAfter`, and the relay asks again then, its client waiting
-  meanwhile. Vouches the server accepts cost nothing, so a relay whose
-  clients sign in is never held back.
+- **Vouches turned away are counted.** Every vouch costs the server its
+  `authenticate` and `authorize` hooks, so a relay's socket may have only
+  so many turned away, for a credential it does not take or a store the
+  client may not open (`relays.rate`, default a burst of 100, then 10 a
+  second), before every vouch it sends waits: the server answers
+  `rate-limited` with `retryAfter`, and the relay asks again then, its
+  client waiting meanwhile. Vouches the server lets in cost nothing, so a
+  relay whose clients may open what they ask for is never held back.
 
 ## Working while the server is away
 
@@ -268,9 +272,11 @@ worth:
 | Server → relay | Compress: the site's uplink is the slow part, and there are few links (the server's default, 1 KB, suits it) | Don't: loopback or the data centre. `perMessageDeflate: false` on a server that only relays connect to spares the store's core |
 | Relay → clients | Don't: the LAN has the bandwidth (the relay's default compresses only what passes 64 KB) | Compress what is big, for clients on slow links: `perMessageDeflate: { threshold: 4096 }` on the relays, paid for on their cores, not the store's |
 
-On the server, what a relay's link uses is an ordinary session that says
-`follower: true` in its hello: it is sent the records' clocks with its
-snapshots, and for each client the transport has vouched for, it holds a
+On the server, what a relay's link uses is a session that says
+`follower: true` in its hello, which only a session made with `follower:
+true` may (a hub made with `vouch` makes them so; a client's hello that
+asks is refused). It is answered once a client of it is let in, is sent
+the records' clocks with its snapshots, and for each client the transport has vouched for, it holds a
 grant (`session.grant(as, user, replica)`), so an op, a share or a leave
 that carries `as` is judged as that client's. Any transport can drive one;
 `createHub(resolve, { vouch })` does it for a socket of your own.

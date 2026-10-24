@@ -199,7 +199,8 @@ export function createDoc(shape, { state, clocks, track = true } = {}) {
         for (const k of Object.keys(value)) run(changeFor({ c, id, path: [k] }, value[k]), ts, mode, out);
         return;
       }
-      if (record === undefined || kind === 'set') {
+      // Made, written whole, or (an object on a singleton that held a plain value) replaced
+      if (record === undefined || kind === 'set' || !isObj(record)) {
         if (judging && record !== undefined && maxOf(clockOf(key)) > ts) return lose('newer');
         if (checks && record === undefined && isObj(value) && orphaned(c, value)) return lose('missing');
         if (shape.isSingleton(c)) state[c] = clone(value);

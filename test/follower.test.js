@@ -453,3 +453,70 @@ test('a copy opened again from storage passes on what the server changed meanwhi
   assert.equal(again.state.tasks.k.done, true, 'the server\'s change reaches the display');
   assert.deepEqual(LazyWatch.snapshot(again.state), store.snapshot());
 });
+
+test('a store a display may not read reaches neither the display nor the relay', async () => {
+  const { store, relay, settle, display } = setup({
+    relayOptions: { linger: false },
+    hubOptions: { authorizeId: (user, id) => user?.id !== 'stranger' }
+  });
+  store.patch({ tasks: { k: { title: 'not for strangers' } } });
+  const closed = [];
+  const stranger = display('stranger');
+  stranger.on('closed', info => closed.push(info.code));
+  await settle();
+  assert.deepEqual(closed, ['forbidden']);
+  assert.equal(relay.copy('main')?.tasks?.k, undefined, 'the relay was told nothing of the store');
+  const friend = display('friend');
+  await settle();
+  assert.equal(friend.state.tasks.k.title, 'not for strangers', 'and is once a client of it is let in');
+});
+
+test('every vouch the server turns away counts, a store the client may not open as well as a credential it does not take', async () => {
+  let now = 1_000_000;
+  const store = createStore(SHAPE);
+  const sent = [];
+  const hub = createHub(() => store, {
+    send: m => sent.push(m),
+    user: { id: 'relay' },
+    vouch: credential => ({ id: credential.id }),
+    authorizeId: (user, id) => user.id === 'relay' || user.id === 'ann',
+    vouchRate: { burst: 2, perSecond: 1 },
+    now: () => now
+  });
+  hub.receive({ t: 'hello', store: 'main', proto: PROTOCOL, replica: 'relay', ops: [], follower: true });
+  const answer = async as => {
+    for (let i = 0; i < 20 && !sent.some(m => m.as === as && (m.t === 'admitted' || m.t === 'refused')); i++) await new Promise(resolve => setImmediate(resolve));
+    return sent.find(m => m.as === as && (m.t === 'admitted' || m.t === 'refused'));
+  };
+  const ask = (as, id) => hub.receive({ t: 'vouch', store: 'main', as, credential: { id }, replica: `r-${as}` });
+  ask('b1', 'bo');
+  assert.equal((await answer('b1')).code, 'forbidden');
+  ask('b2', 'bo');
+  assert.equal((await answer('b2')).code, 'forbidden');
+  ask('a1', 'ann');
+  assert.equal((await answer('a1')).code, 'rate-limited', 'two refused spend the bucket, whatever the reason');
+  now += 1000;
+  ask('a2', 'ann');
+  assert.equal((await answer('a2')).t, 'admitted');
+  hub.close();
+});
+
+test('the relay hands storage its copy without building its records, which are built once, when storage reads them', async () => {
+  let saves = 0;
+  let last = null;
+  const storage = { loadMeta: () => null, saveMeta () {}, load: () => null, save (id, copy) { saves++; last = copy; }, flush () {} };
+  const { store, settle, display } = setup({ relayOptions: { storage } });
+  const a = display('a');
+  await settle();
+  for (let i = 0; i < 20; i++) {
+    a.state.tasks['k' + i] = { n: i };
+    await settle();
+  }
+  assert.ok(saves > 20, 'saved with every change');
+  const lazy = Object.getOwnPropertyDescriptor(last, 'records');
+  assert.equal(typeof lazy.get, 'function', 'its records a getter, not built');
+  const records = last.records;
+  assert.equal(last.records, records, 'built once');
+  assert.equal(records.filter(([c]) => c === 'tasks').length, 20);
+  assert.deepEqual(Object.fromEntries(records.filter(([c]) => c === 'tasks').map(([, id, data]) => [id, data])), store.snapshot().tasks);
+});

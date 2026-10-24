@@ -199,11 +199,27 @@ function build({
 
   const keyOf = change => shape.recordKey(change.c, change.id);
 
+  // The pending changes by record, in outbox order: built once after the outbox changed, so working records
+  // out after a patch, an ack or a delta reads each record's own changes, not the whole outbox for each
+  let pendingIndex = null;
+  const outboxChanged = () => { pendingIndex = null; };
+  function pendingFor(key) {
+    if (!pendingIndex) {
+      pendingIndex = new Map();
+      for (const op of outbox) {
+        for (const change of op.changes) {
+          const k = keyOf(change);
+          if (!pendingIndex.has(k)) pendingIndex.set(k, []);
+          pendingIndex.get(k).push([change, op.ts]);
+        }
+      }
+    }
+    return pendingIndex.get(key) ?? [];
+  }
+
   /** One record as `state` should show it: its base value, with the pending changes that touch it */
   function replayed(c, id) {
-    const key = shape.recordKey(c, id);
-    const list = [];
-    for (const op of outbox) for (const change of op.changes) if (keyOf(change) === key) list.push([change, op.ts]);
+    const list = pendingFor(shape.recordKey(c, id));
     const record = base.get(c, id);
     if (!list.length) return clone(record);
     const scratch = docFromRecords(shape, record === undefined ? [] : [[c, id ?? null, clone(record), base.clock(c, id)]]);
@@ -262,6 +278,7 @@ function build({
       removed.push(older.seq);
       return false;
     });
+    outboxChanged();
     return { changed, removed };
   }
 
@@ -287,6 +304,7 @@ function build({
     const op = { replica: replicaId, seq: ++seq, ts: clock.stamp(), changes };
     const superseded = supersede(op);
     outbox.push(op);
+    outboxChanged();
     persistence.op(op, superseded);
     if (live()) sendOp(op);
     emit('sync');
@@ -402,7 +420,10 @@ function build({
       sentAt.delete(op.seq);
       return false;
     });
-    if (outbox.length !== before) persistence.drop(upTo);
+    if (outbox.length !== before) {
+      outboxChanged();
+      persistence.drop(upTo);
+    }
     return touched;
   }
 
@@ -596,6 +617,7 @@ function build({
           const refused = outbox.find(op => op.seq === msg.seq);
           if (!refused) return;
           outbox = outbox.filter(op => op !== refused);
+          outboxChanged();
           persistence.remove(refused.seq);
           refresh(refused.changes, { origin: 'rejected' });
           emit('rejected', { seq: msg.seq, code: msg.code ?? 'invalid', message: msg.message, changes: refused.changes });

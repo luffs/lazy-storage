@@ -12,7 +12,7 @@ const SHAPE = { initial: { tasks: {}, settings: {} }, singletons: ['settings'] }
 
 function raw(store, replica = 'r1', user = { id: 'u' }, hello = {}) {
   const sent = [];
-  const session = store.session({ send: m => sent.push(m), user });
+  const session = store.session({ send: m => sent.push(m), user, follower: hello.follower === true });
   session.receive({ t: 'hello', proto: PROTOCOL, replica, ops: [], ...hello });
   const heard = () => { store.flush(); return sent; };
   const op = (seq, changes) => session.receive({ t: 'op', op: { replica, seq, ts: store.now(), changes } });
@@ -153,4 +153,21 @@ test('replicas not heard from within the retention window are forgotten, and the
   const again = raw(store, 'old');
   again.session.receive({ t: 'op', op: { replica: 'old', seq: 1, ts: now() - 11 * 86_400_000, changes: [] } });
   assert.equal(again.last().code, 'expired', 'an op it may have sent before is refused, not applied twice');
+});
+
+test('a follower\'s client held back by the rate limit is let go once its time is up, though it says no hello of its own', () => {
+  const now = fakeTime(1_000_000);
+  const store = createStore({ ...SHAPE, now, rateLimit: { burst: 1, perSecond: 1 } });
+  const follower = raw(store, 'relay', { id: 'relay' }, { follower: true });
+  assert.equal(follower.session.grant('x', { id: 'a' }, 'ra'), null);
+  const op = seq => follower.session.receive({ t: 'op', as: 'x', op: { replica: 'ra', seq, ts: now(), changes: [{ c: 'tasks', id: `k${seq}`, put: { n: seq } }] } });
+  op(1);
+  assert.equal(follower.last().t, 'ack');
+  op(2);
+  assert.equal(follower.last().code, 'rate-limited');
+  const { retryAfter } = follower.last();
+  now.advance(retryAfter);
+  op(2);
+  assert.equal(follower.last().t, 'ack', 'its wait is over');
+  assert.equal(store.state.tasks.k2.n, 2);
 });

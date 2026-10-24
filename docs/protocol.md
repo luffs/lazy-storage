@@ -122,7 +122,10 @@ hears no `closed`.
 
 A relay (see [Relays](relays.md)) dials the server's relay route as
 itself and opens each store it carries with a hello that says `follower:
-true`. On that session it speaks for clients of its own, each known by a
+true`; on any other route that hello is refused with `forbidden`. The
+server acknowledges what the hello brought but holds its answer, and
+every patch and presence, until the first of the relay's clients is let
+in there, so the relay reads nothing nobody behind it may. On that session it speaks for clients of its own, each known by a
 name the relay gives it on the store, `as`:
 
 | Message | Direction | Fields | Meaning |

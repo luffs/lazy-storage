@@ -90,8 +90,8 @@ import { snapshotOptions, snapshotId, serveSnapshot } from './snapshot.js';
  *   (default: any its clients may read; judged again by `revalidate`),
  *   `path` (default `<path>/relay`), `headers` (more names of a client's
  *   headers its credential may carry, besides authorization, cookie and
- *   user-agent), `rate` (the vouches turned away as unauthorized a relay's
- *   socket may ask for before every vouch waits: { burst, perSecond },
+ *   user-agent), `rate` (the vouches turned away (unauthorized or forbidden) a
+ *   relay's socket may ask for before every vouch waits: { burst, perSecond },
  *   default 100 and 10; false for none). A client a relay vouches for is
  *   judged by `authenticate` and `expiresAt` given `{ relay }` as their last
  *   argument.

@@ -275,16 +275,25 @@ export function createRelay({
     }
     const admitted = {};
     for (const [key, set] of edge.admitted) admitted[key] = [...set];
+    // The records are read when storage writes them, not with every change: building them is the costly part,
+    // and a storage that writes once a second (fileCopies) reads them once a second. They are the base as it is
+    // then, which may be past `v`: a delta from `v` brings it to the same place
+    const copy = {
+      v: edge.v,
+      epoch: edge.epoch,
+      fepoch: edge.fepoch,
+      fv: edge.fv,
+      own: { seq: edge.ownSeq, ops: edge.queue.filter(e => e.own).map(e => e.op) },
+      admitted
+    };
+    const base = edge.base;
+    let records = null;
+    Object.defineProperty(copy, 'records', {
+      enumerable: true,
+      get: () => (records ??= [...base.records()].map(([c, id, data, clockJSON]) => [c, id ?? null, data, clockJSON]))
+    });
     try {
-      storage.save(edge.id, {
-        records: [...edge.base.records()].map(([c, id, data, clockJSON]) => [c, id ?? null, data, clockJSON]),
-        v: edge.v,
-        epoch: edge.epoch,
-        fepoch: edge.fepoch,
-        fv: edge.fv,
-        own: { seq: edge.ownSeq, ops: edge.queue.filter(e => e.own).map(e => e.op) },
-        admitted
-      });
+      storage.save(edge.id, copy);
     } catch (err) {
       fault(err);
     }
@@ -367,8 +376,9 @@ export function createRelay({
     entry.sent = true;
   }
 
+  // Asked as soon as the link is up, before the store's answer: the server answers a follower only once a client of it is let in
   function vouch(edge, grant) {
-    if (!edge.synced || !linkUp() || local) return;
+    if (!edge.link || !linkUp() || local) return;
     grant.state = 'asked';
     edge.link.send({ t: 'vouch', as: grant.as, credential: grant.credential, replica: grant.replica });
   }
@@ -388,6 +398,7 @@ export function createRelay({
         if (edge.have && edge.epoch) Object.assign(hello, { since: edge.v, epoch: edge.epoch });
         attached.send(hello);
         for (const entry of own.length ? edge.queue.filter(e => e.own) : []) entry.sent = true;
+        for (const grant of edge.grants.values()) if (grant.state === 'pending') vouch(edge, grant);
       },
       onMessage: msg => {
         try {
@@ -631,7 +642,6 @@ export function createRelay({
   function tryHello(edge, ss) {
     const msg = ss.hello;
     if (!msg || ss.synced) return;
-    if (!edge.have) return;
     if (!local) {
       let grant = edge.grants.get(ss.as);
       if (!grant) {
@@ -640,7 +650,7 @@ export function createRelay({
       }
       if (grant.state === 'pending') vouch(edge, grant);
     }
-    if (!admitted(edge, ss)) return;
+    if (!edge.have || !admitted(edge, ss)) return;
     ss.hello = null;
     const lost = [];
     for (const op of Array.isArray(msg.ops) ? msg.ops : []) take(edge, ss, op, { answer: false });

@@ -147,3 +147,36 @@ test('createClient refuses a connection and a transport together, and a row adap
   const rows = { load: () => null, commit() {}, replace() {}, saveOp() {}, removeOp() {} };
   assert.throws(() => createClient({ store: 'main', transport: () => ({}), storage: rows }), /dropOps/);
 });
+
+test('pending edits stay shown through patches, acks, superseding and a refusal, record by record', async () => {
+  const now = fakeTime(1_000_000);
+  const store = createStore({ ...SHAPE, now, rules: { tasks: (user, before, after) => after?.title !== 'refused' } });
+  const net = createNetwork(store);
+  const db = net.client({ replicaId: 'a', ...SHAPE, now });
+  const other = net.client({ replicaId: 'b', ...SHAPE, now });
+  await net.settle();
+  db.link.goOffline();
+  await net.settle();
+  for (let i = 0; i < 30; i++) {
+    db.state.tasks['k' + i] = { title: 'mine ' + i };
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  db.state.tasks.k3.title = 'mine again';          // supersedes the older write of k3's title
+  await new Promise(resolve => setImmediate(resolve));
+  db.state.tasks.bad = { title: 'refused' };
+  await new Promise(resolve => setImmediate(resolve));
+  now.advance(1);
+  other.state.tasks.k5 = { note: 'theirs' };        // a patch for a record with an edit pending here
+  await net.settle();
+  assert.equal(db.state.tasks.k3.title, 'mine again');
+  db.link.goOnline();
+  db.connect();
+  await net.settle();
+  assert.equal(db.pending, 0);
+  assert.equal(db.state.tasks.bad, undefined, 'the refused one taken back');
+  assert.equal(db.state.tasks.k3.title, 'mine again');
+  assert.deepEqual(db.state.tasks.k5, { title: 'mine 5', note: 'theirs' });
+  for (let i = 0; i < 30; i++) assert.ok(db.state.tasks['k' + i], 'k' + i);
+  const { LazyWatch } = await import('lazy-watch');
+  assert.deepEqual(LazyWatch.snapshot(db.state), store.snapshot());
+});

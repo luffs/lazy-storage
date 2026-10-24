@@ -70,7 +70,7 @@ export interface RelaysOptions {
   path?: string;
   /** More names of a client's headers its credential may carry, besides authorization, cookie and user-agent */
   headers?: string[];
-  /** The vouches turned away as unauthorized a relay's socket may ask for before every vouch waits (default 100, then 10 a second); false for none */
+  /** The vouches turned away (unauthorized or forbidden) a relay's socket may ask for before every vouch waits (default 100, then 10 a second); false for none */
   rate?: { burst: number; perSecond: number } | false;
 }
 

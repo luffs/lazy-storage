@@ -711,9 +711,11 @@ export function createStore({
    * `broadcast`, when given, fans a patch out to every session that offered
    * one at once; `onEvict` is called after `closeSessions` closed it;
    * `httpSnapshot: { url, threshold }` points a client that can fetch at
-   * the HTTP route for a large snapshot
+   * the HTTP route for a large snapshot. `follower: true` lets the session
+   * be a follower's (a relay's link: its hub vouches); on any other a hello
+   * that asks to be one is refused
    */
-  function session({ send: transportSend, user, onEvict, broadcast: publish, httpSnapshot } = {}) {
+  function session({ send: transportSend, user, onEvict, broadcast: publish, httpSnapshot, follower: mayFollow = false } = {}) {
     alive('open a session on');
     if (typeof transportSend !== 'function') throw new TypeError('A session needs a send function');
     const deliver = message => {
@@ -741,6 +743,8 @@ export function createStore({
       const tag = as === undefined ? {} : { as };
       try {
         const replica = Utils.isPlainObject(op) ? op.replica : undefined;
+        // A session waits for its next hello; a follower's client says none of its own, and waits out its time
+        if (speaker.heldUntil !== null && speaker.kind === 'peer' && time() >= speaker.heldUntil) speaker.heldUntil = null;
         if (speaker.heldUntil !== null) {
           const wait = Math.max(1, speaker.heldUntil - time());
           throw new RefusedError('rate-limited', `Waiting for a hello after a refusal; try again in ${wait} ms`, { retryAfter: wait });
@@ -780,6 +784,7 @@ export function createStore({
       follows: true,
       listed: true,
       grants: null,
+      held: null,
       receive(msg) {
         if (!sessions.has(s)) return;
         if (!Utils.isPlainObject(msg)) return send({ t: 'error', message: 'Expected a message object' });
@@ -805,6 +810,8 @@ export function createStore({
           case 'hello': {
             if (msg.proto !== PROTOCOL) return closeWith({ t: 'closed', code: 'outdated', message: `This server speaks protocol ${PROTOCOL}; the client speaks ${msg.proto ?? 'an older one'}` });
             if (typeof msg.replica !== 'string' || !msg.replica) return send({ t: 'error', message: 'hello requires a replica' });
+            // Unlisted and told every clock: a relay's link alone, whose clients are judged one by one
+            if (msg.follower === true && !mayFollow && !s.grants) return send({ t: 'error', code: 'forbidden', message: "Only a relay's link opens a follower session" });
             const claim = claimReplica(s, user, msg.replica);
             if (claim?.code === 'replica-taken') return closeWith({ t: 'closed', code: claim.code, message: claim.message });
             if (claim) return send({ t: 'error', ...claim });
@@ -835,14 +842,24 @@ export function createStore({
               }
             }
             const lost = [];
+            const acked = [];
             for (const op of Array.isArray(msg.ops) ? msg.ops.slice(0, HELLO_OPS) : []) {
               try {
                 const result = apply(op, s);
+                acked.push(op.seq);
                 if (result.lost.length) lost.push({ seq: op.seq, lost: result.lost });
               } catch (err) {
                 if (disposed) return;
                 send(refusal(op, err, user));
               }
+            }
+            // A follower reads nothing until a client of its own is let in: what its hello brought is acknowledged,
+            // and the answer waits for the first grant (see grant), as does every broadcast
+            if (s.grants && s.grants.size === 0) {
+              s.follows = false;
+              s.held = { since: msg.since, epoch: msg.epoch, lost };
+              for (const seq of acked) send({ t: 'ack', seq, v: version, now: time() });
+              return;
             }
             send(catchUp(s, msg.since, msg.epoch, lost));
             if (joined && pres) {
@@ -894,6 +911,14 @@ export function createStore({
           s.grants.set(as, g);
           g.replicaId = replica;
           noteChange(g, 'join');
+        }
+        // The first client let in: the follower's held answer goes now, and it hears the store from here on
+        if (s.held) {
+          const { since, epoch, lost } = s.held;
+          s.held = null;
+          s.follows = true;
+          send(catchUp(s, since, epoch, lost));
+          if (pres && s.presence) send({ t: 'presence', peers: peers() });
         }
         return null;
       },

@@ -50,7 +50,7 @@ function copiesIn(adapterOf, { delay = 200, onError }) {
     if (!adapters.has(id)) adapters.set(id, adapterOf(id));
     return adapters.get(id);
   };
-  const metaOf = copy => ({ replicaId: copy.replicaId, seq: copy.own.seq, version: copy.v, epoch: copy.epoch, fepoch: copy.fepoch, fv: copy.fv, admitted: copy.admitted });
+  const metaOf = copy => ({ replicaId, seq: copy.own.seq, version: copy.v, epoch: copy.epoch, fepoch: copy.fepoch, fv: copy.fv, admitted: copy.admitted });
   const writeBase = id => {
     clearTimeout(timers.get(id));
     timers.delete(id);
@@ -90,9 +90,9 @@ function copiesIn(adapterOf, { delay = 200, onError }) {
     },
     save(id, copy) {
       const adapter = adapterFor(id);
-      const full = { ...copy, replicaId };
-      latest.set(id, full);
-      const meta = metaOf(full);
+      // Kept as given: its records are read when the base is written, not with every op
+      latest.set(id, copy);
+      const meta = metaOf(copy);
       const before = written.get(id) ?? new Set();
       const now = new Set(copy.own.ops.map(op => op.seq));
       try {

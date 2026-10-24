@@ -56,9 +56,10 @@ export function fileCopies(dir, { saveDelay = 1000, onError = err => console.err
   return {
     loadMeta: () => read(join(root, 'relay.json')),
     saveMeta: meta => write(join(root, 'relay.json'), meta),
-    load: id => pending.get(id) ?? read(fileOf(id)),
+    load: id => (pending.has(id) ? structuredClone(pending.get(id)) : read(fileOf(id))),
+    // Kept as given until it is written: a relay's copy builds its records when they are read, here once a write
     save(id, copy) {
-      pending.set(id, structuredClone(copy));
+      pending.set(id, copy);
       if (timer) return;
       timer = setTimeout(flush, saveDelay);
       if (typeof timer?.unref === 'function') timer.unref();

@@ -169,19 +169,35 @@ test('a client cannot delete a collection or a singleton, only what is in them',
   store.dispose();
 });
 
-test('a follower\'s hello earns nothing by itself: an op or a share as a client nobody vouched for is refused', () => {
-  const store = createStore({ initial: { tasks: {} } });
+test('a client cannot hello as a follower to read the store unlisted', () => {
+  const store = createStore({ initial: { tasks: { a: { title: 'secret' } } }, presence: true });
   const sent = [];
   const session = store.session({ send: m => sent.push(m), user: { id: 'mallory' } });
+  session.receive({ t: 'hello', proto: PROTOCOL, replica: 'm', ops: [], follower: true });
+  store.flush();
+  assert.deepEqual(sent.map(m => [m.t, m.code]), [['error', 'forbidden']]);
+  assert.equal(sent.some(m => m.t === 'snapshot'), false, 'it read nothing');
+  store.dispose();
+});
+
+test('a follower\'s hello earns nothing by itself: no answer before a client of it is let in, and an op or a share as a client nobody vouched for is refused', () => {
+  const store = createStore({ initial: { tasks: { a: { title: 'secret' } } } });
+  const sent = [];
+  const session = store.session({ send: m => sent.push(m), user: { id: 'mallory' }, follower: true });
   session.receive({ t: 'hello', proto: PROTOCOL, replica: 'm', ops: [], follower: true });
   session.receive({ t: 'op', as: 'ann', op: { replica: 'ann', seq: 1, ts: store.now(), changes: [{ c: 'tasks', id: 'x', put: { title: 'as ann' } }] } });
   session.receive({ t: 'share', as: 'ann', data: { cursor: 1 } });
   session.receive({ t: 'share', data: { cursor: 1 } });
+  store.patch({ tasks: { a: { title: 'still secret' } } });
   store.flush();
+  assert.equal(sent.some(m => m.t === 'snapshot' || m.t === 'delta' || m.t === 'patch'), false, 'it heard nothing of the store');
   const errors = sent.filter(m => m.t === 'error');
   assert.deepEqual(errors.map(m => m.code), ['forbidden', 'forbidden', 'forbidden']);
-  assert.deepEqual(store.state.tasks, {});
+  assert.equal(store.state.tasks.x, undefined);
   assert.deepEqual(store.peers(), [], 'and it is nobody\'s peer');
+  assert.equal(session.grant('ann', { id: 'ann' }, 'ann'), null);
+  store.flush();
+  assert.deepEqual(sent.find(m => m.t === 'snapshot')?.state.tasks.a, { title: 'still secret' }, 'answered once a client is let in');
   store.dispose();
 });
 

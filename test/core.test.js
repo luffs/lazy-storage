@@ -114,3 +114,18 @@ test('path helpers: keys parse back, a deletion leaves the ancestors, and nothin
   assert.equal(valueAt(target, ['__proto__']), undefined);
   assert.throws(() => setAt({}, ['constructor', 'x'], 1), TypeError);
 });
+
+test('an object written on a singleton that holds a plain value replaces it, as the server and as a client', () => {
+  const plainShape = createShape({ initial: { build: '', tasks: {} } });
+  const doc = createDoc(plainShape);
+  doc.apply({ c: 'build', set: 'b-1' }, 10, 'authority');
+  doc.apply({ c: 'build', put: { id: 'b-2', at: 1 } }, 20, 'authority');
+  assert.deepEqual(doc.get('build'), { id: 'b-2', at: 1 });
+  doc.apply({ c: 'build', set: 'b-3' }, 30, 'judge');
+  const judged = doc.apply({ c: 'build', put: { id: 'b-4' } }, 40, 'judge');
+  assert.deepEqual(judged.lost, []);
+  assert.deepEqual(doc.get('build'), { id: 'b-4' });
+  const older = doc.apply({ c: 'build', put: { id: 'late' } }, 35, 'judge');
+  assert.equal(older.lost[0].why, 'stale', 'an older one loses: the object was made after it');
+  assert.deepEqual(doc.get('build'), { id: 'b-4' });
+});

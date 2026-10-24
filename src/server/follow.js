@@ -53,7 +53,7 @@ export function credentialRequest(credential, path, allowed = []) {
  * @param {(relay: any, storeId: string) => boolean|Promise<boolean>} [options.authorizeRelay]
  * @param {Function} [options.authorizeId]
  * @param {Function} [options.authorize]
- * @param {{ burst: number, perSecond: number }|false} [options.rate] - the vouches turned away as unauthorized it may ask for before every vouch waits (hub.js, vouchRate)
+ * @param {{ burst: number, perSecond: number }|false} [options.rate] - the vouches turned away (unauthorized or forbidden) it may ask for before every vouch waits (hub.js, vouchRate)
  * @param {Object} [options.channel]
  * @param {(error: any) => void} [options.onError]
  */

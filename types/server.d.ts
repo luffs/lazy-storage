@@ -89,6 +89,8 @@ export interface SessionOptions {
   broadcast?(message: ServerMessage): void;
   /** Where a client that can fetch gets a large snapshot */
   httpSnapshot?: { url: string; threshold?: number };
+  /** May say follower: true in its hello: a relay's link, whose clients a hub vouches for */
+  follower?: boolean;
 }
 
 /** What a rule is handed besides the user and the record */
@@ -300,7 +302,7 @@ export interface HubOptions {
   authorize?: Authorize;
   /** A follower's client: its credential judged as its own socket would be; the user, or null to refuse */
   vouch?(credential: unknown, storeId: string): unknown | Promise<unknown>;
-  /** The vouches turned away as unauthorized this socket may ask for before every vouch is refused as rate-limited (default { burst: 100, perSecond: 10 }); false for none */
+  /** The vouches turned away (unauthorized, forbidden or refused) this socket may ask for before every vouch is refused as rate-limited (default { burst: 100, perSecond: 10 }); false for none */
   vouchRate?: { burst: number; perSecond: number } | false;
   now?: () => number;
   channel?: HubChannel;
