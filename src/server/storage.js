@@ -22,10 +22,9 @@
 //                         whole storage, under a new epoch and no log
 //
 // `null` from load means "never seen": the store starts from `initial`.
-// Document-oriented adapters (memory, JSON file) apply commits to an
-// in-memory copy and write the whole document.
-import { existsSync, readFileSync, mkdirSync, writeFileSync, renameSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+// The memory adapter keeps the document in memory, for tests and what need
+// not survive the process; a file on disk is SQLite's (sqlite-bun.js,
+// sqlite-node.js).
 import { randomId } from '../core/ids.js';
 
 /** The epoch a replaced store starts: clients that were ahead of the document get a snapshot, not a delta of another history */
@@ -47,18 +46,17 @@ export function assertDocument(doc) {
 
 const recordKey = (c, id) => JSON.stringify([c, id ?? null]);
 
-/** The in-memory document shared by the memory and JSON-file adapters */
-function document(initial = null, { keepLog = false } = {}) {
-  let records = new Map((initial?.records ?? []).map(r => [recordKey(r[0], r[1]), r]));
-  let log = keepLog && Array.isArray(initial?.log) ? structuredClone(initial.log) : [];
-  let replicas = initial ? structuredClone(initial.replicas ?? {}) : {};
-  let version = initial ? initial.version : 0;
-  let epoch = initial?.epoch ?? null;
-  let schema = Number.isInteger(initial?.schema) ? initial.schema : undefined;
-  let seen = initial !== null;
-  const extra = () => ({ ...(schema === undefined ? {} : { schema }), ...(keepLog ? { log } : {}) });
+/** Keeps the document in memory only (delta log included); the store starts fresh with the process */
+export function memoryStorage() {
+  let records = new Map();
+  let log = [];
+  let replicas = {};
+  let version = 0;
+  let epoch = null;
+  let schema;
+  let seen = false;
   return {
-    load: () => (seen ? structuredClone({ records: [...records.values()], replicas, version, epoch, ...extra() }) : null),
+    load: () => (seen ? structuredClone({ records: [...records.values()], replicas, version, epoch, ...(schema === undefined ? {} : { schema }), log }) : null),
     commit(change) {
       seen = true;
       for (const [c, id] of change.deletes ?? []) records.delete(recordKey(c, id));
@@ -71,12 +69,10 @@ function document(initial = null, { keepLog = false } = {}) {
       version = change.version;
       if (change.epoch !== undefined) epoch = change.epoch;
       if (Number.isInteger(change.schema)) schema = change.schema;
-      if (keepLog) {
-        if (change.log) log.push(structuredClone(change.log));
-        if (Number.isInteger(change.logFloor)) log = log.filter(e => e.v >= change.logFloor);
-      }
+      if (change.log) log.push(structuredClone(change.log));
+      if (Number.isInteger(change.logFloor)) log = log.filter(e => e.v >= change.logFloor);
     },
-    serialize: () => ({ records: [...records.values()], replicas, version, epoch, ...extra() }),
+    flush: () => {},
     replace(doc) {
       assertDocument(doc);
       records = new Map(doc.records.map(r => [recordKey(r[0], r[1]), structuredClone(r)]));
@@ -86,82 +82,6 @@ function document(initial = null, { keepLog = false } = {}) {
       schema = Number.isInteger(doc.schema) ? doc.schema : undefined;
       log = [];
       seen = true;
-    }
-  };
-}
-
-/** Keeps the document in memory only (delta log included); the store starts fresh with the process */
-export function memoryStorage() {
-  const doc = document(null, { keepLog: true });
-  return { load: doc.load, commit: doc.commit, flush: () => {}, replace: doc.replace };
-}
-
-/**
- * One JSON file per store, written atomically (temp file + rename) and
- * debounced so a burst of ops costs one write. Call `flush()` before exit.
- * A debounced write that fails goes to `onError`, and is tried again a
- * second later; `flush()` throws to its caller
- * @param {string} file
- * @param {{ debounce?: number, onError?: (error: any) => void }} [options]
- */
-export function jsonFileStorage(file, { debounce = 200, onError = err => console.error('lazy-storage:', err) } = {}) {
-  const path = resolve(file);
-  const saved = existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : null;
-  // A file from before 1.0 keeps rows per leaf: served as no records, its next write would erase them
-  let outdated = saved && !Array.isArray(saved.records) && Array.isArray(saved.rows);
-  const doc = document(outdated ? null : saved);
-  let dirty = false;
-  let timer = null;
-
-  const write = () => {
-    if (!dirty) return;
-    mkdirSync(dirname(path), { recursive: true });
-    const tmp = `${path}.${process.pid}.tmp`;
-    writeFileSync(tmp, JSON.stringify(doc.serialize()));
-    renameSync(tmp, path);
-    dirty = false;
-  };
-  const later = ms => {
-    clearTimeout(timer);
-    timer = setTimeout(background, ms);
-    if (typeof timer?.unref === 'function') timer.unref();
-  };
-  function background() {
-    timer = null;
-    try {
-      write();
-    } catch (err) {
-      onError(err);
-      later(Math.max(debounce, 1000));
-    }
-  }
-
-  return {
-    load() {
-      if (outdated) {
-        const err = new Error(`${path} was written by lazy-storage before 1.0, one row per leaf, which 1.0 cannot read: keep it, and start the store from a new file`);
-        err.code = 'storage-format';
-        throw err;
-      }
-      return doc.load();
-    },
-    commit(change) {
-      if (outdated) throw new Error(`${path} was written by lazy-storage before 1.0; nothing is written over it`);
-      doc.commit(change);
-      dirty = true;
-      later(debounce);
-    },
-    flush() {
-      clearTimeout(timer);
-      timer = null;
-      write();
-    },
-    // Taken whole, it may go over a file from before 1.0: that is the way to move one
-    replace(document) {
-      doc.replace(document);
-      outdated = false;
-      dirty = true;
-      this.flush();
     }
   };
 }

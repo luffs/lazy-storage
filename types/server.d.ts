@@ -62,7 +62,6 @@ export interface ServerStorage {
 }
 
 export function memoryStorage(): ServerStorage & { replace(doc: StorageDocument): void };
-export function jsonFileStorage(file: string, options?: { debounce?: number; onError?(error: unknown): void }): ServerStorage & { replace(doc: StorageDocument): void };
 export function assertDocument(doc: unknown): asserts doc is StorageDocument;
 
 // --- Stores ---------------------------------------------------------------------

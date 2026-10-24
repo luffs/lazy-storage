@@ -1,10 +1,10 @@
 // export.test.js - A store as a document: exported, taken into any adapter, backed up and served at once
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createStore, memoryStorage, jsonFileStorage } from '../src/server/index.js';
+import { createStore, memoryStorage } from '../src/server/index.js';
 import { sqliteStorage } from '../src/server/sqlite-node.js';
 import { fakeTime } from './helpers.js';
 
@@ -25,8 +25,9 @@ test('an exported store is a JSON document; any adapter that takes it serves the
   assert.equal(doc.version, 2);
   assert.deepEqual(doc.replicas.r1.seq, 2);
   const dir = mkdtempSync(join(tmpdir(), 'lazy-export-'));
+  const sqlite = sqliteStorage(join(dir, 'stores.sqlite'), { checkpoints: 'inline' });
   try {
-    for (const storage of [memoryStorage(), jsonFileStorage(join(dir, 'store.json'))]) {
+    for (const storage of [memoryStorage(), sqlite.store('copy')]) {
       storage.replace(doc);
       const copy = createStore({ ...SHAPE, now, storage });
       assert.deepEqual(copy.snapshot(), source.snapshot());
@@ -39,6 +40,7 @@ test('an exported store is a JSON document; any adapter that takes it serves the
       assert.throws(() => copy.apply({ replica: 'r1', seq: 3, ts: now(), changes: [] }, { user: { id: 'u2' } }), err => err.code === 'replica-taken');
       copy.dispose();
     }
+    sqlite.close();
   } finally {
     try { rmSync(dir, { recursive: true, force: true }); } catch { /* the OS cleans it up */ }
   }
@@ -66,24 +68,5 @@ test('SQLite takes a document in one transaction, never under a live store, and 
     backup.close();
   } finally {
     try { rmSync(dir, { recursive: true, force: true }); } catch { /* the OS cleans it up */ }
-  }
-});
-
-test('a JSON file from before 1.0 is refused rather than served empty, and nothing is written over it until replace', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'lazy-json-old-'));
-  try {
-    const file = join(dir, 'store.json');
-    const old = JSON.stringify({ rows: [['["tasks","k","title"]', { v: 'Milk', ts: 5 }]], replicas: {}, version: 7, epoch: 'e0' });
-    writeFileSync(file, old);
-    const storage = jsonFileStorage(file);
-    assert.throws(() => createStore({ ...SHAPE, storage }), err => err.code === 'storage-format');
-    assert.throws(() => storage.commit({ upserts: [], deletes: [], version: 8 }), /before 1\.0/);
-    storage.flush();
-    assert.equal(readFileSync(file, 'utf8'), old, 'the file as it was');
-    const now = fakeTime();
-    storage.replace(JSON.parse(JSON.stringify(filled(memoryStorage(), now).export())));
-    assert.equal(createStore({ ...SHAPE, storage }).state.tasks.k.title, 'Milk', 'replace moves it');
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
   }
 });

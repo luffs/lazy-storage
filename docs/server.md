@@ -76,10 +76,12 @@ Adapters:
 - `sqliteStorage(file)` from `lazy-storage/server/sqlite-node` — the same
   adapter on `node:sqlite` (Node 22.13 and later); the two read each
   other's files.
-- `jsonFileStorage(file)` — one JSON document per store, written
-  atomically and debounced, without the delta log (a restart answers the
-  first reconnects with snapshots). Fine for small single-store deployments.
 - `memoryStorage()` — nothing survives the process; for tests.
+
+A store kept on disk is SQLite's, even for a small deployment: both
+runtimes have it built in, and a file holds every store. (The JSON-file
+adapter of 0.x is gone; a store's `export()` is still a JSON document to
+save or look at.)
 
 **A file from before 1.0** keeps one row per leaf, and a store in it is
 refused with code `storage-format` rather than served empty. Move it
@@ -99,11 +101,6 @@ rows and was not deleted is written as it is seeded. The moved stores get a new 
 takes a snapshot, and their old delta log goes. It is safe to call at
 every start: a file with no leaves left is not touched. Copy the file
 first (`sqlite.backup(file)` does it) if you may want to go back.
-
-A `jsonFileStorage` file from before 1.0 (one with `rows` and no
-`records`) is refused the same way, with code `storage-format`, and
-nothing is written over it; `storage.replace(doc)` with a 1.0 document
-(a store's `export()`) is the one thing that does.
 
 One process serves a store at a time. Two processes on one SQLite file,
 a deploy whose old and new process overlap or a server started twice,
@@ -220,11 +217,11 @@ decides as the original would (a stale write, a write to a deleted
 record, another user's replica):
 
 ```js
-// From a JSON file to SQLite
-sqlite.store('team-1').replace(jsonFileStorage('data/team-1.json').load());
-
 // A live store, saved for later or to look at
 writeFileSync('team-1.json', JSON.stringify(stores.get('team-1').export()));
+
+// And taken back, into this file or another
+sqlite.store('team-1').replace(JSON.parse(readFileSync('team-1.json', 'utf8')));
 ```
 
 For a whole SQLite file, `sqlite.backup(file)` copies it with `VACUUM

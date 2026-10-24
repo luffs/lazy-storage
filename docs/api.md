@@ -40,13 +40,13 @@
 - `store.snapshotJSON()`, `store.clocksJSON()` — the state and the records' clocks as JSON, each encoded once per change; `snapshotResponse(store, request, { origins })` — the snapshot route's Response, for a server of your own
 - `store.closeSessions(predicate, message)` — evict sessions; `store.presence()` — distinct users with a live session; `store.peers()` — every live session
 - `store.compact()` → `{ deletions, replicas }` forgotten; `store.export()` → the store as a JSON document, `store.restore(doc)` puts one in its storage and ends the store (see [Backups](server.md#backups-restores-and-moving-a-store)); `store.flush()` stores what is pending now and sends what waited for it (throws `unavailable` when the commit failed), `store.dispose()`
-- `memoryStorage()`, `jsonFileStorage(path, { debounce, onError })` — `onError` hears a debounced write that failed, which is tried again a second later; `assertDocument(doc)`
+- `memoryStorage()`, `assertDocument(doc)`
 - `createStores(factory, { idle, sweepEvery, now })` → `get(id)`, `has(id)`, `ids()`, `stats()` — the live stores' stats rolled up: `{ stores, idle, sessions, replicas, records, log, sent }` — `release(id)`, `restore(id, doc)`, `sweep()`, `dispose()`; `isStoreId(id)`
 - `createHub(resolveStore, { send, user, authorizeId, authorize, vouch, vouchRate, channel, httpSnapshots, onError })` → `{ receive(message), close(), revalidate(filter), revoke(filter, code, message), stores, user }` — the server side of a multiplexed connection; `vouch(credential, storeId)` judges a follower's client and returns its user, or null; `vouchRate` (`{ burst: 100, perSecond: 10 }`, or `false`) how many it may turn away before every vouch waits; `channel` is a transport's topic fan-out, `httpSnapshots` `{ url(id), threshold }` its snapshot route
 - `toJSON(message)` — a message's JSON, encoded once however many sockets it goes to (`tagStore(message, id)` is what a hub does); `RefusedError`, `HELLO_OPS`
 
 **SQLite** (`lazy-storage/server/sqlite`, Bun): `sqliteStorage(file, { wal, lease: { ttl } | false, checkpoints: 'worker' | 'inline', onError })` →
-`store(id)` (whose load takes the store's lease, `close()` gives it up, and `replace(doc)` takes a document), `ids()`, `remove(id)`, `backup(file)`, `fromLeaves(shapeOf)` (a file from before 1.0, see [Persistence](server.md#persistence)), `db`, `close()` (gives up every lease). `memoryStorage()` and `jsonFileStorage(file)` take a document with `replace(doc)` too.
+`store(id)` (whose load takes the store's lease, `close()` gives it up, and `replace(doc)` takes a document), `ids()`, `remove(id)`, `backup(file)`, `fromLeaves(shapeOf)` (a file from before 1.0, see [Persistence](server.md#persistence)), `db`, `close()` (gives up every lease). `memoryStorage()` takes a document with `replace(doc)` too.
 
 **Bun adapter** (`lazy-storage/server/bun`): `serve({ stores, port, path, fetch, authenticate, authorizeId, authorize, expiresAt, minSession, maxPayload, perMessageDeflate, httpSnapshots, maxBuffered, relays, onError })` —
 `stores` is a registry or `id => store|null` (for one store, `() => store`); the

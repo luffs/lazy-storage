@@ -9,7 +9,7 @@ import {
 import { createClient as createClientAgain } from 'lazy-storage/client';
 import { sqliteClientStorage } from 'lazy-storage/client/sqlite';
 import {
-  createStore, createStores, createHub, memoryStorage, jsonFileStorage, isStoreId, toJSON, tagStore,
+  createStore, createStores, createHub, memoryStorage, isStoreId, toJSON, tagStore,
   type Store, type ServerStorage, type StorageCommit, type OpEvent, type StoreDocument
 } from 'lazy-storage/server';
 import { createHandlers, serve } from 'lazy-storage/server/bun';
@@ -154,7 +154,7 @@ createStore({ readOnly: 'settings' });
 const commits: StorageCommit[] = [];
 const mine: ServerStorage = { load: () => null, commit: change => { commits.push(change); }, flush: () => {} };
 createStore({ storage: mine });
-const registry = createStores(storeId => (isStoreId(storeId) ? createStore({ storage: jsonFileStorage(`${storeId}.json`) }) : null), { idle: 60_000 });
+const registry = createStores(storeId => (isStoreId(storeId) ? createStore({ storage: memoryStorage() }) : null), { idle: 60_000 });
 const hub = createHub(storeId => registry.get(storeId), { send: m => void toJSON(m), vouch: credential => credential, vouchRate: { burst: 20, perSecond: 2 } });
 void tagStore({ t: 'pong' }, 'x');
 hub.revoke(() => true);
