@@ -38,7 +38,6 @@ Run one test file with `node --test test/sync.test.js`, one test with `--test-na
 - `types/` — hand-written declarations, one file per export path; `test/types/` checks them
 - `docs/` — the reference (see above); it ships in the npm package
 - `examples/`, `bench/`, `test/` (`helpers.js` re-exports `createNetwork`/`fakeTime` and adds `seededRandom`; `test/fuzz/`: `convergence.js`, `hostile.js`, `run.js`; `test/bun/`)
-- `OMSTART.md` — the design notes 1.0 was built from (Swedish)
 
 ## Architecture
 
