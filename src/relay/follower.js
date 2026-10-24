@@ -51,6 +51,7 @@ import { fingerprintOf } from './fingerprint.js';
 import { randomId, isStoreId } from '../core/ids.js';
 import { createConnection } from '../client/connection.js';
 import { memoryCopies } from './copies.js';
+import { tagStore } from '../server/wire.js';
 
 const { Utils } = LazyWatch;
 const isObj = Utils.isPlainObject;
@@ -289,8 +290,6 @@ export function createRelay({
       edge.ownPending = own;
       emit('sync', { store: edge.id, pending: own });
     }
-    const admitted = {};
-    for (const [key, set] of edge.admitted) admitted[key] = [...set];
     // The records are read when storage writes them, not with every change: building them is the costly part,
     // and a storage that writes once a second (fileCopies) reads them once a second. They are the base as it is
     // then, which may be past `v`: a delta from `v` brings it to the same place
@@ -299,14 +298,26 @@ export function createRelay({
       epoch: edge.epoch,
       fepoch: edge.fepoch,
       fv: edge.fv,
-      own: { seq: edge.ownSeq, ops: edge.queue.filter(e => e.own).map(e => e.op) },
-      admitted
+      own: { seq: edge.ownSeq, ops: edge.queue.filter(e => e.own).map(e => e.op) }
     };
+    // The records, and who was admitted (an entry per client ever let in), are read when storage writes them too
     const base = edge.base;
+    const grants = edge.admitted;
     let records = null;
+    let admitted = null;
     Object.defineProperty(copy, 'records', {
       enumerable: true,
       get: () => (records ??= [...base.records()].map(([c, id, data, clockJSON]) => [c, id ?? null, data, clockJSON]))
+    });
+    Object.defineProperty(copy, 'admitted', {
+      enumerable: true,
+      get: () => {
+        if (!admitted) {
+          admitted = {};
+          for (const [key, set] of grants) admitted[key] = [...set];
+        }
+        return admitted;
+      }
     });
     try {
       storage.save(edge.id, copy);
@@ -769,7 +780,8 @@ export function createRelay({
         presence: true,
         synced: false,
         hello: null,
-        send: message => { if (!gone) send({ ...message, store: id }); },
+        // Tagged as the hub tags: the message encoded once, however many sessions hear it, the store id spliced in
+        send: message => { if (!gone) send(tagStore(message, id)); },
         evictSocket: () => socket.evict(),
         end(code, message) {
           leave(id);

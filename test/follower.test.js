@@ -515,6 +515,9 @@ test('the relay hands storage its copy without building its records, which are b
   assert.ok(saves > 20, 'saved with every change');
   const lazy = Object.getOwnPropertyDescriptor(last, 'records');
   assert.equal(typeof lazy.get, 'function', 'its records a getter, not built');
+  assert.equal(typeof Object.getOwnPropertyDescriptor(last, 'admitted').get, 'function', 'and who was admitted, an entry per client, built when read too');
+  assert.ok(Object.keys(last.admitted).length >= 1);
+  assert.ok(JSON.parse(JSON.stringify(last)).admitted, 'written out as plain data');
   const records = last.records;
   assert.equal(last.records, records, 'built once');
   assert.equal(records.filter(([c]) => c === 'tasks').length, 20);
@@ -695,4 +698,37 @@ test('an op a client sent up before it left goes up again when it comes back, th
   assert.equal(store.state.tasks.k?.title, 'kept');
   assert.equal(b.isPending(['tasks', 'k']), false);
   relay.close();
+});
+
+test('a patch to many displays is encoded once, tagged per display as the hub tags', async () => {
+  const { store, relay, settle } = setup();
+  const sent = [];
+  const sessions = [];
+  for (let i = 0; i < 3; i++) {
+    const session = relay.session({ send: m => sent.push(m), credential: { id: 'd' + i } });
+    session.receive({ t: 'hello', store: 'main', proto: PROTOCOL, replica: 'd' + i, ops: [] });
+    sessions.push(session);
+  }
+  await settle();
+  sent.length = 0;
+  const stringify = JSON.stringify;
+  let encoded = 0;
+  JSON.stringify = function (value, ...rest) {
+    if (value && typeof value === 'object' && value.t === 'patch') encoded++;
+    return stringify.call(this, value, ...rest);
+  };
+  try {
+    store.patch({ tasks: { k: { title: 'to everyone' } } });
+    await settle();
+    const patches = sent.filter(m => m.t === 'patch');
+    assert.equal(patches.length, 3);
+    assert.ok(patches.every(m => m.store === 'main'));
+    const { toJSON } = await import('../src/server/wire.js');
+    for (const m of patches) toJSON(m);
+    // Once the server's, to the relay; once the relay's, whose three copies are spliced from it (four and more with a stringify per display)
+    assert.equal(encoded, 2);
+  } finally {
+    JSON.stringify = stringify;
+    for (const s of sessions) s.close();
+  }
 });
