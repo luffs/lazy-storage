@@ -2,7 +2,7 @@
 //
 // `rules` names a rule per collection or singleton, and `'*'` for the
 // rest: true (anyone), false (nobody but the server), or a function
-// `(user, before, after, { c, id, state, replica, changes, store })` that
+// `(user, before, after, { c, id, state, replicaId, changes, store })` that
 // returns false or throws (its message is the refusal's) to refuse.
 // `before` is the record as it is, `after` as the op leaves it, null where
 // there is none. `after` is what the merge makes of the op, not what the
@@ -78,7 +78,7 @@ export function createRules(shape, rules = {}, readOnly = false) {
         const now = doc.get(c, id);
         let verdict;
         try {
-          verdict = rule(user, was === undefined ? null : was, now === undefined ? null : now, { c, id, state: doc.state, replica, changes, ...extra });
+          verdict = rule(user, was === undefined ? null : was, now === undefined ? null : now, { c, id, state: doc.state, replicaId: replica, changes, ...extra });
         } catch (err) {
           throw new RuleError(err?.message || `Not allowed to write ${c}`);
         }

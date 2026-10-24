@@ -135,7 +135,7 @@ createStore({
 ```
 
 - **A rule** is `true` (anyone), `false` (nobody but the server), or a
-  function `(user, before, after, { c, id, state, replica, changes, store })`
+  function `(user, before, after, { c, id, state, replicaId, changes, store })`
   that returns `false` or throws to refuse; a thrown message reaches the
   client. It is asked once per record an op touches, with the record
   before the op and after it, so "only the owner may edit, and nobody may

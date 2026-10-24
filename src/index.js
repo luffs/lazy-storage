@@ -5,7 +5,7 @@
 export { LazyWatch } from 'lazy-watch';
 export * from './core/index.js';
 export { createClient, openClient } from './client/index.js';
-export { inOrder } from './client/list.js';
+export { inOrder, listIn, listFrom } from './client/list.js';
 export { sharedConnection } from './client/shared.js';
 export { portConnection } from './client/port.js';
 export { indexedDBStorage } from './client/indexeddb.js';

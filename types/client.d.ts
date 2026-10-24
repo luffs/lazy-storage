@@ -468,3 +468,7 @@ export function openClient<S extends object = any>(options: ClientOptions<S>): P
 
 /** The records of a keyed map in list order: by position, ties by id, records without a position last */
 export function inOrder<T = any>(map: Record<string, T> | null | undefined, options?: { position?: string }): T[];
+/** A list over any state (db.list(path) is listIn(db.state, path)): a framework's writable view, a mirror's copy, a plain object patched to a store */
+export function listIn<T extends { id?: string } = any>(state: object, path: string | string[], options?: { position?: string }): List<T>;
+/** A whole list as a keyed map in the order given: each record keyed by its id (minted where it has none), with a position after the one before */
+export function listFrom<T extends { id?: string }>(records: T[], options?: { position?: string }): Record<string, T & { id: string; pos: string }>;

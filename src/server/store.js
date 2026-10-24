@@ -92,7 +92,7 @@ function presenceOptions(presence) {
  * @param {Array<string|string[]>} [options.registers]
  * @param {Object} [options.parents]
  * @param {Object} [options.rules] - per collection or singleton, `'*'` for the rest: true, false, or
- *   `(user, before, after, { c, id, state, replica, changes, store }) => boolean` (throw to say why)
+ *   `(user, before, after, { c, id, state, replicaId, changes, store }) => boolean` (throw to say why)
  * @param {boolean|string[]} [options.readOnly=false] - refuse every client op (true), or every op that writes
  *   one of these collections or singletons
  * @param {(diff: Object, context: { user: any, replicaId: string, store: Object, changes: Object[] }) => boolean|void} [options.validate]

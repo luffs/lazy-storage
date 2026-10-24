@@ -98,15 +98,16 @@ export interface SessionOptions {
 export interface RuleContext<S extends object = any> {
   c: string;
   id: string | undefined;
-  /** The store's state, for a rule that looks at other records */
+  /** The store's state as the op leaves it, for a rule that looks at other records */
   state: S;
-  replica: string;
+  /** The replica the op came from */
+  replicaId: string;
   /** The op's changes to this record */
   changes: Change[];
   store: Store<S>;
 }
 
-/** May the user write this record? `before` as it is, `after` as the op would leave it; null where there is none. false or a throw refuses */
+/** May the user write this record? `before` as it is, `after` as the merge leaves it; null where there is none. false or a throw refuses */
 export type Rule<S extends object = any> =
   | boolean
   | ((user: unknown, before: any, after: any, context: RuleContext<S>) => boolean | void)

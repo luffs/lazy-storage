@@ -14,7 +14,7 @@
 // re-slotted between them. That is what an app keeping its own array
 // (a drag-and-drop list, a Vue store) calls after a change.
 import { LazyWatch } from 'lazy-watch';
-import { keyBetween, comparePositions } from '../core/positions.js';
+import { keyBetween, keysBetween, comparePositions } from '../core/positions.js';
 import { randomId } from '../core/ids.js';
 
 const { Utils } = LazyWatch;
@@ -174,6 +174,36 @@ export function createList(state, path, { position = 'pos' } = {}) {
       return keyBetween(lower, upper);
     }
   };
+}
+
+/**
+ * A list over any state: a client's `db.state` (which `db.list(path)` is),
+ * a framework's writable view of it, a mirror's copy, or a plain object
+ * whose changes are patched to a store. Reads and writes go to `state`
+ * as it is
+ * @param {Object} state
+ * @param {string|string[]} path
+ * @param {{ position?: string }} [options]
+ */
+export function listIn(state, path, options) {
+  if (!state || typeof state !== 'object') throw new TypeError('listIn takes a state object and a path');
+  return createList(state, path, options);
+}
+
+/**
+ * A whole list as a keyed map, in the order given: each record keyed by
+ * its `id` (minted where it has none), with a position after the one
+ * before. For `initial`, a default, or a list written over at once
+ * @param {Object[]} records
+ * @param {{ position?: string }} [options]
+ */
+export function listFrom(records, { position = 'pos' } = {}) {
+  if (!Array.isArray(records) || records.some(record => !Utils.isPlainObject(record))) throw new TypeError('listFrom takes an array of records');
+  const keys = keysBetween(null, null, records.length);
+  return Object.fromEntries(records.map((record, i) => {
+    const id = record.id != null ? String(record.id) : randomId();
+    return [id, { ...record, id, [position]: keys[i] }];
+  }));
 }
 
 /** Indices of a longest strictly increasing run of keys, strings or numbers (nulls never count); patience sorting */

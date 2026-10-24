@@ -71,6 +71,20 @@ db.list(['state', 'lists', 'items']).add({ text: 'Eggs' });   // a list inside a
 inOrder(db.state.tasks);                              // the same order, from any map: a client's, a framework's mirror
 ```
 
+`db.list(path)` is `listIn(db.state, path)`, and `listIn` takes any
+state: a framework's writable view of the client, a mirror's copy, or a
+plain object whose changes go to the server with `store.patch`. A list
+that starts from an array, in `initial` or as a default, is
+`listFrom(records)`: each record keyed by its `id` (minted where it has
+none) with positions in the array's order:
+
+```js
+import { listIn, listFrom } from 'lazy-storage';
+
+createStore({ initial: { steps: listFrom([{ id: 'plan', title: 'Plan' }, { id: 'do', title: 'Do' }]) } });
+listIn(view, ['state', 'lists', 'items']).add({ text: 'Milk' });
+```
+
 An add or a move writes one field, `pos`, on one record, and nothing
 else in the list changes. So two people inserting at the same spot while
 apart both keep their records, in the same order everywhere; a move

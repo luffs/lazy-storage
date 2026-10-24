@@ -3,10 +3,10 @@
 // directive, so the declarations are tested in both directions.
 import {
   createClient, openClient, createConnection, sharedConnection, webSocketTransport, memoryOutbox, localStorageOutbox, indexedDBStorage,
-  LazyWatch, createClock, createShape, compile, docFromRecords, inOrder, keyBetween, randomId,
+  LazyWatch, createClock, createShape, compile, docFromRecords, inOrder, listIn, listFrom, keyBetween, randomId,
   type Client, type ClientError, type Change, type Lost, type ServerMessage, type RowStorage, type Op, type Peer, type RecordClock
 } from 'lazy-storage';
-import { createClient as createClientAgain } from 'lazy-storage/client';
+import { createClient as createClientAgain, inOrder as inOrderAgain } from 'lazy-storage/client';
 import { sqliteClientStorage } from 'lazy-storage/client/sqlite';
 import {
   createStore, createStores, createHub, memoryStorage, isStoreId, toJSON, tagStore,
@@ -46,7 +46,13 @@ list.add({ title: 'new', done: false }, { at: 0 });
 list.move('a', { after: 'b' });
 const inOrderToo: Task[] = inOrder(db.state.tasks);
 const nested = db.list(['settings', 'lists', 'items']);
-void [ordered, inOrderToo, nested];
+const viewList = listIn<Task>({ tasks: {} }, 'tasks');
+viewList.add({ title: 'in a view', done: false });
+const seeded = listFrom([{ id: 'x', title: 'first', done: false }]);
+const seededPos: string = seeded.x.pos;
+// @ts-expect-error listFrom takes records
+listFrom(['not a record']);
+void [ordered, inOrderToo, nested, viewList, seededPos, inOrderAgain];
 const tasks = db.collection<Task>('tasks');
 const id: string = tasks.add({ title: 'new', done: false });
 tasks.update(id, { done: true });

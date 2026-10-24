@@ -38,6 +38,9 @@ import { createConnection } from './connection.js';
 import { createPersistence, isRowAdapter } from './persistence.js';
 import { createList } from './list.js';
 
+// Lists over any state, and in order, from this entry too (`lazy-storage/client`)
+export { inOrder, listIn, listFrom } from './list.js';
+
 const { Utils } = LazyWatch;
 const isObj = Utils.isPlainObject;
 const REMOTE = { origin: 'remote' };

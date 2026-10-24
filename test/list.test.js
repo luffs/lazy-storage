@@ -133,3 +133,30 @@ test('records without a position sort last and get one when placed or reconciled
   assert.deepEqual(Object.values(store.snapshot().tasks.p.subtasks).map(s => s.title).sort(), ['first', 'zeroth']);
   assert.deepEqual(LazyWatch.snapshot(a.state), store.snapshot());
 });
+
+test('listIn writes a list in any state, and listFrom makes one from an array, in its order', async () => {
+  // A host that holds a view or a mirror rather than the client: the same list, and the same order the client keeps
+  const { listIn, listFrom, inOrder } = await import('../src/index.js');
+  const plain = { state: {} };
+  const items = listIn(plain, ['state', 'items']);
+  const first = items.add({ title: 'one' });
+  items.add({ title: 'zero' }, { before: first });
+  assert.deepEqual(inOrder(plain.state.items).map(r => r.title), ['zero', 'one']);
+  assert.equal(items.remove(first), true);
+  assert.throws(() => listIn(null, 'x'), TypeError);
+
+  const seeded = listFrom([{ id: 'b', title: 'B' }, { id: 'a', title: 'A' }, { title: 'minted' }]);
+  assert.deepEqual(inOrder(seeded).map(r => r.title), ['B', 'A', 'minted'], 'the array\'s order, not the ids\'');
+  assert.equal(Object.keys(seeded).length, 3);
+  assert.ok(Object.values(seeded).every(r => typeof r.pos === 'string' && r.id));
+  assert.throws(() => listFrom(['x']), TypeError);
+
+  // Its keys are the client's: a list seeded so takes adds between them
+  const store = createStore({ initial: { tasks: listFrom([{ id: 'p', title: 'P' }, { id: 'q', title: 'Q' }]) } });
+  const net = createNetwork(store);
+  const a = net.client({ replicaId: 'a', initial: { tasks: {} } });
+  await net.settle();
+  a.list('tasks').add({ title: 'between' }, { after: 'p' });
+  await net.settle();
+  assert.deepEqual(inOrder(store.state.tasks).map(r => r.title), ['P', 'between', 'Q']);
+});
