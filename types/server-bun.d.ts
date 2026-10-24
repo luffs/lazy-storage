@@ -68,27 +68,18 @@ export interface RelaysOptions {
   authorize?(relay: unknown, storeId: string): boolean | Promise<boolean>;
   /** The relay route (default `<path>/relay`) */
   path?: string;
-  /** How long (ms) a relay's session on a store outlives the store's last client there (default 30 000) */
-  linger?: number;
   /** More names of a client's headers its credential may carry, besides authorization, cookie and user-agent */
   headers?: string[];
-  /** Vouches turned away as unauthorized before every vouch waits (default 100 burst, 10 a second); false disables */
-  rate?: { burst: number; perSecond: number } | false;
 }
 
 /**
  * An open socket, as `sockets()` lists it. A relay's socket has `relay`
- * and `grants`, and each client it carries is listed after it with `via`
  */
 export interface SocketInfo {
   /** What `authenticate` returned for it (a relay's socket: none) */
   user?: unknown;
   /** A relay's socket: the relay */
   relay?: unknown;
-  /** A relay's socket: how many clients it carries */
-  grants?: number;
-  /** A client a relay carries: the relay */
-  via?: unknown;
   /** Store ids it has a live session on */
   stores: string[];
   /** Bytes queued for it and not yet sent: how far behind it is */

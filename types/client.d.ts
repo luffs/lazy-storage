@@ -1,7 +1,7 @@
 // Type declarations for `lazy-storage/client` (createClient, openClient)
 // and the client-side shapes the main entry builds on. Hand-written.
 import type { ChangeListener, ListenerOptions, Unsubscribe } from 'lazy-watch';
-import type { ClosedCode, Diff, ErrorCode, Op, Peer, RegisterSpec, Row, ServerMessage } from './core.js';
+import type { Change, ClosedCode, ErrorCode, Lost, Op, Peer, RecordClock, ServerMessage, Shape, ShapeOptions } from './core.js';
 
 /** The socket's: `online` once it is open */
 export type ConnectionStatus = 'offline' | 'connecting' | 'online';
@@ -75,7 +75,7 @@ export interface Connection {
   /** Close the socket for every attached client; no automatic reconnect */
   close(): void;
   /** `info` is what the attaching client declared, for a connection that builds a replica of the store elsewhere */
-  attach(storeId: string, handler: LinkHandler, info?: { initial?: object; registers?: RegisterSpec[] }): Link;
+  attach(storeId: string, handler: LinkHandler, shape?: ShapeOptions): Link;
 }
 
 /** What `sharedConnection` needs of a channel between tabs: BroadcastChannel's shape */
@@ -104,15 +104,15 @@ export interface SharedConnectionOptions {
   reconnect?: ReconnectOptions | false;
   /** Ping interval for the socket (default 30 000); false disables */
   keepalive?: number | false;
-  /** Retry the socket at once on `online` or when the page is looked at again (default true) */
-  wake?: boolean;
   /** Makes the channel between tabs (default: BroadcastChannel); null for none */
   channel?: ((name: string) => TabChannel) | null;
   /** The lock manager tabs elect a leader with (default: navigator.locks); null for none, and this tab leads on its own */
   locks?: TabLocks | null;
   tabId?: string;
-  /** How long (ms) the replica keeps a store no tab has open anymore, for a reload to come back; default 5000 */
-  linger?: number;
+  /** A store's shape, for one no tab of the leader has declared yet */
+  shapeOf?(storeId: string): ShapeOptions | null;
+  /** The browser's replica (default: kept in localStorage) */
+  replicaId?: string;
   /** How often (ms) the leader looks for tabs that closed without a word, by the lock each tab holds; default 10 000 */
   sweepEvery?: number;
 }
@@ -139,7 +139,7 @@ export interface SharedConnection extends Connection {
    * browser's replica, as this tab's are, for the stores named and no other; the other end runs
    * a client on `messagePortTransport(port)`. Returns what ends it
    */
-  follow(port: MessagePortLike, stores: Array<{ store: string; initial?: object; registers?: string[] }>): () => void;
+  follow(port: MessagePortLike, stores: Array<{ store: string } & ShapeOptions>): () => void;
   /** This tab is done: its clients disconnect and, if it led, the replica closes and another tab takes over */
   dispose(): void;
 }
@@ -179,15 +179,18 @@ export interface OutboxDocument {
   ops: Op[];
 }
 
+/** The base: the state as the server last told it, with the version and epoch it is at */
 export interface StateCache {
   state: object;
+  /** Each record's clock: [collection, id or null, clock] */
+  clocks?: Array<[string, string | null, RecordClock]>;
   version: number;
   epoch: string | null;
 }
 
 /**
  * A document adapter keeps the outbox as one document, written with every
- * op, and the state as another, written debounced.
+ * op, and the base as another, written once changes settle.
  */
 export interface DocumentStorage {
   load(): (OutboxDocument & Partial<StateCache>) | null;
@@ -197,35 +200,34 @@ export interface DocumentStorage {
   clear?(): void;
   /** Take the outbox op by op instead of whole (localStorageOutbox does): an op new or rewritten */
   saveOp?(op: Op, meta: ClientMeta): void;
-  /** An op a newer one emptied */
+  /** An op a newer one emptied, or the server refused */
   removeOp?(seq: number, meta: ClientMeta): void;
   /** The ops up to an acknowledged seq */
   dropOps?(seq: number, meta: ClientMeta): void;
 }
 
+/** A record of the base as a row adapter keeps it: [collection, id or null, data, clock] */
+export type ClientRecord = [collection: string, id: string | null, data: unknown, clock: RecordClock];
+
 export interface RowDocument extends OutboxDocument {
-  rows: Row[];
+  records: ClientRecord[];
   version?: number;
   epoch?: string | null;
 }
 
 /**
- * A row adapter keeps one row per leaf and one per pending op, so a batch
- * costs the leaves it touched. A delete removes the path and everything
- * under it. `load` may return a promise, in which case the client is
- * opened with `openClient`.
+ * A row adapter keeps one row per record of the base and one per pending
+ * op, so a patch costs the records it touched. `load` may return a
+ * promise, in which case the client is opened with `openClient`.
  */
 export interface RowStorage {
   load(): RowDocument | null | Promise<RowDocument | null>;
-  commit(change: { puts: Row[]; deletes: string[]; meta: ClientMeta }): void;
-  replace(change: { rows: Row[]; meta: ClientMeta }): void;
-  /** Write a pending op: a new one, or an older one a newer op pruned */
+  commit(change: { puts: ClientRecord[]; deletes: Array<[string, string | null]>; meta: ClientMeta }): void;
+  replace(change: { records: ClientRecord[]; meta: ClientMeta }): void;
   saveOp(op: Op, meta: ClientMeta): void;
-  /** Remove one pending op a newer op emptied */
   removeOp(seq: number, meta: ClientMeta): void;
-  /** Remove every pending op up to and including `seq`, once acknowledged */
   dropOps(seq: number, meta: ClientMeta): void;
-  /** Optional: call `listener` when what the adapter held was lost (the client then writes everything again); returns what stops it */
+  /** Optional: call `listener` when what the adapter held was lost (the client then writes everything again) */
   onReset?(listener: () => void): () => void;
 }
 
@@ -240,20 +242,11 @@ export type ClientLink =
 
 export type ClientOptions<S extends object = any> = ClientOptionsBase<S> & ClientLink;
 
-export interface ClientOptionsBase<S extends object = any> {
+export interface ClientOptionsBase<S extends object = any> extends Omit<ShapeOptions, 'initial'> {
   /** The store id */
   store: string;
-  /** State before the first snapshot (and the skeleton under a cached state) */
+  /** The store's top level, as the server declares it: collections as {}, singletons with their values */
   initial?: S;
-  /** Whole-value paths (arrays of anything as one value); must match the server's */
-  registers?: RegisterSpec[];
-  /**
-   * List paths that `state` presents as plain arrays of records in
-   * position order, while the wire keeps keyed maps with positions. With
-   * lists declared, `state` is that view and `wire` the synced state
-   * underneath; `initial` may use arrays at those paths
-   */
-  lists?: RegisterSpec[];
   /** The position field on list records (default 'pos') */
   position?: string;
   /** Defaults to the persisted one, else random */
@@ -284,7 +277,7 @@ export interface Closed {
 
 /** An error from the server carries its code; a register mismatch and a failed snapshot fetch are detected on the client */
 export interface ClientError extends Error {
-  code?: ErrorCode | 'registers-mismatch' | 'snapshot-fetch';
+  code?: ErrorCode | 'shape-mismatch' | 'snapshot-fetch';
 }
 
 /** Records keyed by id under `state[name]` */
@@ -354,18 +347,13 @@ export interface ClientEvents {
   /** Every live session on the store, with what it shares */
   peers: Peer[];
   closed: Closed;
-  /** What undo and redo can do changed: after a local batch, an undo, a redo, or clearHistory() */
+  /** What undo and redo can do changed */
   history: { canUndo: boolean; canRedo: boolean };
-  /** An op of this client's lost leaves to newer writes (or a deletion): per path, what it wrote and what won (null: nothing there) */
-  conflict: Conflict;
-  /** An op the server refused (or a batch the model refused locally, seq null): dropped, the state back in line */
+  /** Changes of an op of this client's that did not land, and why: 'newer' (a later write), 'missing' (the record or its parent was gone), 'stale' (made before the container was made again) */
+  lost: { seq: number; lost: Lost[] };
+  /** An op the server refused whole (or a batch the shape refused here, seq null): taken back */
   rejected: Rejected;
-  /**
-   * The store's storage started over (a backup restored, the store moved
-   * or wiped): the state is now the server's, and what this client held
-   * that the server does not may be gone. `previous` is what it held,
-   * read just before the server's state replaced it
-   */
+  /** The server's storage started over (a backup put back): `previous` is what this client showed */
   reset: Reset;
   /** `relayed` changed: a relay answers on its own (true), or the server does again (false) */
   relay: boolean;
@@ -376,16 +364,11 @@ export interface Reset {
   previous: { epoch: string; version: number; state: unknown };
 }
 
-export interface Conflict {
-  seq: number;
-  lost: Array<{ path: string[]; mine: unknown; theirs: unknown }>;
-}
-
 export interface Rejected {
   seq: number | null;
   code: string;
   message: string;
-  diff: Diff;
+  changes: Change[] | null;
 }
 
 /** What db.stats() reports */
@@ -396,15 +379,16 @@ export interface ClientStats {
   oldestPendingMs: number | null;
   /** The last acknowledgement's round trip: op sent to ack received */
   ackMs: number | null;
-  /** How old the last patch from another replica was when it arrived: staleness, including any time the writer spent offline, on clocks that agree to within the server's maxSkew; ackMs is the one for network latency */
-  remoteAgeMs: number | null;
 }
 
 export interface Client<S extends object = any> {
-  /** The mirrored state: read and write it like a plain object (with lists declared, the view with arrays) */
+  /** The state: the server's, with this client's pending edits on top. Read and write it like a plain object */
   readonly state: S;
-  /** The synced state underneath: keyed maps with positions; the same object as `state` without lists */
-  readonly wire: object;
+  /** The server's state as this client last heard it (plain; read only) */
+  readonly base: S;
+  /** A record's clock in the base: the times by path the server decides by */
+  clockOf(c: string, id?: string): RecordClock;
+  readonly shape: Shape;
   readonly replicaId: string;
   readonly store: string;
   readonly connection: Connection;
@@ -451,7 +435,7 @@ export interface Client<S extends object = any> {
   collection<T extends { id?: string } = any>(name: string): Collection<T>;
   /** Whether an unacknowledged edit writes at, under, or over `path` ('tasks/x/title' or segments; a list's records by id) */
   isPending(path: string | string[]): boolean;
-  /** An ordered list of records under `path` ('tasks', 'tasks/x/subtasks', or segments) */
+  /** An ordered list of records: a collection ('tasks'), or a keyed map at a path (['state', 'lists', 'items']) */
   list<T extends { id?: string } = any>(path: string | string[], options?: ListOptions): List<T>;
   /** Subscribe to state changes; `meta?.origin === 'remote'` marks the server's */
   watch(listener: ChangeListener<S>, options?: ListenerOptions): Unsubscribe;
@@ -479,3 +463,6 @@ export type FromInitial<T> = 0 extends (1 & T) ? T
 export function createClient<S extends object = any>(options: ClientOptions<S>): Client<FromInitial<S>>;
 /** createClient for an adapter whose load() returns a promise (IndexedDB) */
 export function openClient<S extends object = any>(options: ClientOptions<S>): Promise<Client<FromInitial<S>>>;
+
+/** The records of a keyed map in list order: by position, ties by id, records without a position last */
+export function inOrder<T = any>(map: Record<string, T> | null | undefined, options?: { position?: string }): T[];

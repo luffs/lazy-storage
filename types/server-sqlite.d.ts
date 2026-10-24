@@ -14,7 +14,7 @@ export interface SqliteStorage {
   };
   /** Ids of every store that has committed at least once */
   ids(): string[];
-  /** Delete a store's rows, replicas, log, version, and lease */
+  /** Delete a store's records, replicas, log, version, and lease */
   remove(id: string): void;
   /**
    * Copy the whole file to `file` (which must not exist) with VACUUM INTO:
@@ -22,6 +22,13 @@ export interface SqliteStorage {
    * of its stores a new epoch
    */
   backup(file: string): void;
+  /**
+   * Move the stores a file from before 1.0 keeps in `leaves` (a row per leaf) into records, one
+   * transaction a store: each leaf's time its path's time, a deletion inside a living record a deleted
+   * path, a record deleted whole left out. `shapeOf(storeId)` says which top-level keys are singletons.
+   * The stores get a new epoch. Run it with no store loaded; returns the ids it moved
+   */
+  fromLeaves(shapeOf?: (storeId: string) => { singletons?: string[] } | null | undefined): string[];
   /** The underlying bun:sqlite Database, for backups or ad-hoc queries */
   readonly db: any;
   /** Give up every lease this process holds and close the file */

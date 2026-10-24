@@ -1,6 +1,6 @@
 // Type declarations for `lazy-storage/testing`. Hand-written.
 import type { Client, ClientOptionsBase, Transport, TransportFactory } from './client.js';
-import type { Session, Store } from './server.js';
+import type { HubOptions, Session, Store } from './server.js';
 
 /** One client's way onto the network: a transport factory, and offline/online control */
 export interface TestLink {
@@ -45,7 +45,7 @@ export interface TestNetwork {
   client<S extends object = any>(options?: Partial<ClientOptionsBase<S>>, linkOptions?: { user?: unknown }): TestClient<S>;
 }
 
-export function createNetwork<S extends object = any>(target: Store<S>): TestNetwork;
+export function createNetwork<S extends object = any>(target: Store<S>, hubOptions?: Omit<HubOptions, 'send' | 'user'>): TestNetwork;
 export function createNetwork(target: TestSessions): TestNetwork;
 
 /** A controllable wall clock: pass it as `now` to a store and its clients */

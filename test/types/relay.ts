@@ -1,91 +1,64 @@
 // relay.ts - Exercises the relay's typings the way a hub would; `npm run test:types`
 // compiles it with check.ts (never runs it). Wrong usages carry an expect-error.
-import { createRelay, memoryCopies, fileCopies, type Relay, type RelayMode, type CopyInfo, type CopyStorage, type RelayStats } from 'lazy-storage/relay';
+import { createRelay, memoryCopies, fileCopies, type Relay, type RelayMode, type CopyStorage, type RelayStats } from 'lazy-storage/relay';
 import { createRelayHandlers, upstreamSocket } from 'lazy-storage/relay/bun';
 import { createClient, createConnection, webSocketTransport, type ServerMessage } from 'lazy-storage';
 import { createNetwork } from 'lazy-storage/testing';
 import { createStore } from 'lazy-storage/server';
-import { PROTOCOL } from 'lazy-storage/core';
+
+const SHAPE = { initial: { tasks: {} } };
 
 // --- The relay ------------------------------------------------------------------
 
 const relay: Relay = createRelay({
+  shapeOf: storeId => (storeId.startsWith('site-') ? SHAPE : null),
+  link: upstreamSocket('wss://central.example/sync/relay', { headers: { authorization: 'Bearer relay' } }),
   storage: fileCopies('./copies', { onError: err => void err }),
+  acknowledge: 'upstream',
   grace: 10_000,
-  dialTimeout: 4000,
-  probe: async () => true,
-  probeEvery: 5000,
-  keepalive: false,
-  jitter: 1000,
-  maxSkew: 300_000,
   authorizeOffline: (key, storeId) => key.length > 0 && storeId !== 'secret',
-  validate: (diff, { key, replicaId, storeId, state }) => { void [diff, key, replicaId, storeId, state]; return true; },
-  saveDelay: 1000,
-  forgetAfter: Infinity,
+  keepalive: false,
   onError: err => void err
 });
-createRelay();
-createRelay({ storage: memoryCopies(), probe: false });
-// Fan-out: a link of the relay's own, each client vouched for with its credential
-const fanning = createRelay({ link: upstreamSocket('wss://central.example/sync/relay', { headers: { authorization: 'Bearer relay' } }), linger: 20_000, writeIdle: 30_000 });
-fanning.accept({ send: () => {}, close: () => {}, key: 'k', upstream: webSocketTransport('wss://central.example/sync'), credential: { headers: { authorization: 'Bearer display' }, query: '?deviceCode=d' } });
-const linkState: 'down' | 'dialing' | 'open' | 'broken' | 'refused' | undefined = fanning.stats().link?.state;
-void linkState;
-// @ts-expect-error a credential is headers and a query
-fanning.accept({ send: () => {}, close: () => {}, upstream: webSocketTransport('wss://central.example/sync'), credential: 'Bearer display' });
-// @ts-expect-error probe is a function or false
-createRelay({ probe: true });
+createRelay({ shapeOf: () => SHAPE, link: webSocketTransport('ws://x'), storage: memoryCopies(), acknowledge: 'local' });
+// @ts-expect-error a relay needs the shapes it carries and its link
+createRelay({ storage: memoryCopies() });
+// @ts-expect-error acknowledge is 'upstream' or 'local'
+createRelay({ shapeOf: () => SHAPE, link: webSocketTransport('ws://x'), acknowledge: 'never' });
 
 const mode: RelayMode = relay.mode;
 relay.on('mode', next => { const _m: 'through' | 'local' = next; });
-relay.on('copy', storeId => { const _s: string = storeId; });
-relay.on('error', err => void err);
-// @ts-expect-error no such event
-relay.on('patch', () => {});
-const copy: CopyInfo | null = relay.copy('main');
-if (copy) {
-  const v: number = copy.v;
-  const behind: boolean = !copy.live || copy.diverged || copy.local > 0;
-  void [v, behind, copy.state, copy.epoch];
-}
+relay.on('sync', ({ store, pending }) => void [store, pending]);
+const copy = relay.copy('site-1');
+const stats: RelayStats = relay.stats();
+for (const [id, s] of Object.entries(stats.stores)) void [id, s.queue, s.synced];
+relay.patch('site-1', { tasks: { a: { title: 'from the hub' } } });
+const ownPending: number = relay.pending('site-1');
 relay.upstreamDown();
 relay.upstreamUp();
-const stats: RelayStats = relay.stats();
-const through: number = stats.sockets.through;
-const since: number | null = stats.downSince;
-for (const s of relay.sockets()) { const _state: 'dialing' | 'through' | 'local' | 'fan' | 'closed' = s.state; void s.stores; }
-relay.flush();
-relay.sweep();
-void [mode, through, since];
+void [mode, copy, ownPending];
 
-// A socket accepted by hand, as a host on another server would
-const session = relay.accept({
-  send: message => void message,
-  close: (code, reason) => void [code, reason],
-  key: 'fingerprint',
-  upstream: webSocketTransport('wss://central.example/sync', { fetch: false })
-});
-session.receive({ t: 'hello', proto: PROTOCOL, store: 'main', replicaId: 'r', ops: [] });
-const state: 'dialing' | 'through' | 'local' | 'fan' | 'closed' = session.state;
+// A socket by hand, as a host on another server would
+const session = relay.session({ send: message => void message, credential: { headers: { authorization: 'Bearer display' } }, key: 'fingerprint' });
+session.receive({ t: 'ping' });
 session.close();
-void state;
-// @ts-expect-error a socket needs its way to the server
-relay.accept({ send: () => {}, close: () => {}, key: 'k' });
 
 // A storage of one's own
 const mine: CopyStorage = {
-  load: () => ({ copies: [], known: null }),
-  write: (storeId, doc) => void [storeId, doc.state, doc.v],
-  writeKnown: doc => void doc.keys
+  loadMeta: () => null,
+  saveMeta: meta => void meta.replicaId,
+  load: () => null,
+  save: (storeId, copied) => void [storeId, copied.v, copied.own.ops],
+  flush: () => {}
 };
-createRelay({ storage: mine });
+void mine;
 
-// In tests, on the in-memory network: the server on one, the relay's clients on another
-const centralNet = createNetwork(createStore({ initial: { tasks: {} } }));
-const lan = createNetwork({
-  session: ({ send, user, onEvict }) => relay.accept({ send, close: (code, reason) => onEvict(code, reason), key: (user as { key: string }).key, upstream: centralNet.link({ user }).factory })
-});
-lan.link({ user: { id: 'u', key: 'k' } }).stall();
+// In tests: the server on one network, the relay's clients on another
+const store = createStore(SHAPE);
+const central = createNetwork(store, { vouch: credential => credential });
+const onNet = createRelay({ shapeOf: () => SHAPE, link: central.link({ user: { id: 'relay' } }).factory });
+const lan = createNetwork(onNet);
+lan.link({ user: { id: 'u' } }).stall();
 
 // --- Served by Bun --------------------------------------------------------------
 
@@ -93,29 +66,24 @@ const handlers = createRelayHandlers({
   relay,
   path: '/sync',
   key: req => req.headers.get('authorization'),
-  upstream: req => upstreamSocket(`wss://central.example/sync${new URL(req.url).search}`, {
-    headers: { authorization: req.headers.get('authorization') ?? '', 'user-agent': req.headers.get('user-agent') ?? '' }
-  }),
+  credential: req => ({ headers: { authorization: req.headers.get('authorization') ?? '' }, query: new URL(req.url).search }),
   maxPayload: 16 * 1024 * 1024,
   perMessageDeflate: { threshold: 2048 },
   maxBuffered: false
 });
 const upgraded: Promise<Response | undefined | null> = handlers.upgrade(new Request('http://hub/sync'), {});
-void upgraded;
-for (const s of handlers.sockets()) void [s.key, s.state, s.buffered, s.openMs];
-void handlers.close({ reason: 'bye' });
-upstreamSocket(() => 'wss://central.example/sync', { headers: () => ({ authorization: 'Bearer x' }) });
-// @ts-expect-error the relay's handlers need the way to the server
-createRelayHandlers({ relay });
+for (const s of handlers.sockets()) void [s.key, s.buffered, s.openMs];
+void [upgraded, handlers.close({ reason: 'bye' })];
+// @ts-expect-error a credential is headers and a query
+createRelayHandlers({ relay, credential: () => 'Bearer display' });
 
 // --- A client behind a relay ----------------------------------------------------
 
-const db = createClient({ connection: createConnection({ transport: webSocketTransport('ws://hub:36610/sync') }), store: 'main', initial: { tasks: {} } });
+const db = createClient({ connection: createConnection({ transport: webSocketTransport('ws://hub:36610/sync') }), store: 'site-1', ...SHAPE });
 const relayed: boolean = db.relayed;
-db.on('relay', isRelayed => { const _b: boolean = isRelayed; });
 // @ts-expect-error relayed is read-only
 db.relayed = true;
 const answer = null as unknown as ServerMessage;
-if (answer.t === 'snapshot' && answer.epoch === null) void 'answered by a relay';
+if (answer.t === 'snapshot' && answer.relay) void 'answered by a relay';
 if (answer.t === 'relay') { const _status: 'local' | 'through' = answer.status; }
 void relayed;

@@ -1,17 +1,14 @@
 // Type declarations for `lazy-storage/server`: stores, storage adapters,
 // the registry, and hubs. Hand-written; the runtime is plain JS.
-import type { ChangeListener, ListenerOptions, Unsubscribe } from 'lazy-watch';
-import type { ClientMessage, Diff, Op, Path, Peer, RegisterSpec, ServerMessage, Tagged, Timestamp } from './core.js';
+import type { Unsubscribe } from 'lazy-watch';
+import type { Change, ClientMessage, Lost, Op, Path, Peer, RecordClock, ServerMessage, Shape, ShapeOptions, Tagged, Timestamp } from './core.js';
 
 export type { ClientMessage, ServerMessage, Tagged } from './core.js';
 
 // --- Storage adapters ---------------------------------------------------------
 
-/** A persisted leaf: a live value with the timestamp that won it, a tombstone, or a barrier (the re-add's timestamp and version, the deletion's timestamp; `{}` at its path on load) */
-export type StoredRow =
-  | { value: unknown; ts: Timestamp; deleted?: false; made?: false }
-  | { ts: Timestamp; deleted: true }
-  | { ts: Timestamp; made: true; since: Timestamp; v: number; by: string[] };
+/** A record as stored: its collection, its id (null for a singleton), its data and its clock */
+export type StoredRecord = [collection: string, id: string | null, data: unknown, clock: RecordClock];
 
 export interface ReplicaProgress {
   seq: number;
@@ -23,118 +20,100 @@ export interface ReplicaProgress {
 
 export interface LogEntry {
   v: number;
-  diff: Diff;
+  ts: Timestamp;
+  changes: Change[];
 }
 
 export interface StorageDocument {
-  rows: Array<[key: string, row: StoredRow]>;
+  records: StoredRecord[];
   replicas: Record<string, ReplicaProgress>;
   version: number;
-  /** Minted by the store with its first commit */
+  /** A random id minted once per storage life */
   epoch: string;
-  /** How many of the store's migrations the rows have been through; absent before any were given */
+  /** How many of the store's migrations the records have been through */
   schema?: number;
-  /** The highest version among the barriers settled; an op made in sight of less is refused. Absent before any settled */
-  horizon?: number;
-  /** The persisted delta log, ascending by version, when the adapter keeps it */
+  /** The last changes, for deltas after a restart */
   log?: LogEntry[];
 }
 
-/** What `store.export()` gives: a storage document, JSON all through, that any adapter's `replace` takes */
-export interface StoreDocument extends StorageDocument {
-  format: 'lazy-storage/store';
-  schema: number;
-  horizon: number;
-}
-
 export interface StorageCommit {
-  upserts: Array<[key: string, row: StoredRow]>;
-  deletes: string[];
+  upserts: StoredRecord[];
+  deletes: Array<[collection: string, id: string | null]>;
   replica?: { id: string; seq: number; seen: number; owner?: string };
   forgetReplicas?: string[];
   version: number;
   epoch: string;
-  /** How many migrations the rows have been through, stored with them */
   schema: number;
-  /** The highest version among the barriers settled so far, stored with the rows */
-  horizon: number;
-  /** The accepted diff this op made, for adapters that keep the delta log */
   log?: LogEntry;
-  /** Entries below this version are no longer needed */
   logFloor?: number;
 }
 
 export interface ServerStorage {
-  /** null means never seen: the store starts from `initial` */
+  /** null: never seen, the store starts from `initial` */
   load(): StorageDocument | null;
   commit(change: StorageCommit): void;
-  /**
-   * Optional: several commits, in order, as one, all or none: what one turn
-   * of the event loop merged (see `groupCommit`). Without it the store
-   * commits them one by one
-   */
+  /** Several commits as one, all or none: what a turn of the event loop merged */
   commitMany?(changes: StorageCommit[]): void;
-  /** Write out anything buffered; called on dispose */
   flush(): void;
-  /** Optional: the store let go of this storage (on dispose); a SQLite adapter gives up its lease */
+  /** The store let go of it: another process may serve it now */
   close?(): void;
-  /**
-   * Optional: take a document (`store.export()`, or another adapter's
-   * `load()`) as the store's whole storage, for a restore or a move,
-   * under a new epoch (clients that were connected get a snapshot) and
-   * without a delta log. Never under a live store
-   */
+  /** Take a document as the whole storage, under a new epoch and no log; never under a live store */
   replace?(doc: StorageDocument): void;
 }
 
-/** Keeps the document in memory only (delta log included); for tests */
 export function memoryStorage(): ServerStorage & { replace(doc: StorageDocument): void };
-/** One JSON document per store, written atomically and debounced, without the delta log */
 export function jsonFileStorage(file: string, options?: { debounce?: number; onError?(error: unknown): void }): ServerStorage & { replace(doc: StorageDocument): void };
+export function assertDocument(doc: unknown): asserts doc is StorageDocument;
 
-// --- Stores -----------------------------------------------------------------------
+// --- Stores ---------------------------------------------------------------------
 
 export interface Session {
-  readonly user: unknown;
   replicaId: string | null;
+  readonly kind: 'client' | 'follower';
   receive(message: ClientMessage): void;
   close(): void;
+  /** On a follower's session: a client it vouched for, judged as itself; null, or the refusal */
+  grant(as: string, user: unknown, replica: string): null | { code: string; message: string };
+  ungrant(as: string): void;
+  /** Take back the follower's clients `filter(user)` picks; returns how many */
+  revoke(filter: (user: unknown) => boolean, code: string, message: string): number;
 }
 
 export interface SessionOptions {
   send(message: ServerMessage): void;
-  /** Whatever the transport authenticated; counted in presence and handed to `validate` */
+  /** Whatever the transport authenticated */
   user?: unknown;
-  /** Called after `closeSessions` closed this session */
+  /** Called after closeSessions or dispose closed it */
   onEvict?(): void;
-  /** A relay's own session (see createRelayLink): it hears the store, is nobody's peer, and writes nothing */
-  relay?: boolean;
-  /**
-   * A transport that reaches every session on the store at once (Bun's
-   * topic publish) hands this in: the session then hears the patch fan-out
-   * through one call of it, made for every session that offered one, so any
-   * of them must reach all of them. A session without one is sent to on its own
-   */
+  /** Fan a broadcast out to every session that offered one at once */
   broadcast?(message: ServerMessage): void;
-  /**
-   * A transport that serves snapshots over HTTP hands in where: a client
-   * whose hello says it can fetch is pointed at `url` in place of a
-   * snapshot of `threshold` bytes or more (default 64 KB)
-   */
+  /** Where a client that can fetch gets a large snapshot */
   httpSnapshot?: { url: string; threshold?: number };
 }
 
-export interface ApplyResult {
-  duplicate: boolean;
-  accepted: Diff | null;
-  rejected: Path[];
-  correction: Diff | null;
+/** What a rule is handed besides the user and the record */
+export interface RuleContext<S extends object = any> {
+  c: string;
+  id: string | undefined;
+  /** The store's state, for a rule that looks at other records */
+  state: S;
+  replica: string;
+  /** The op's changes to this record */
+  changes: Change[];
+  store: Store<S>;
 }
+
+/** May the user write this record? `before` as it is, `after` as the op would leave it; null where there is none. false or a throw refuses */
+export type Rule<S extends object = any> =
+  | boolean
+  | ((user: unknown, before: any, after: any, context: RuleContext<S>) => boolean | void)
+  | { write: false | ((user: unknown, before: any, after: any, context: RuleContext<S>) => boolean | void) };
 
 export interface ValidateContext<S extends object = any> {
   user: unknown;
   replicaId: string;
   store: Store<S>;
+  changes: Change[];
 }
 
 export interface RateLimit {
@@ -142,7 +121,6 @@ export interface RateLimit {
   perSecond: number;
 }
 
-/** What `presence.validate` sees with a share */
 export interface ShareContext<S extends object = any> {
   user: unknown;
   replicaId: string;
@@ -150,93 +128,50 @@ export interface ShareContext<S extends object = any> {
 }
 
 export interface PresenceOptions<S extends object = any> {
-  /** What presence groups users by; default `id`, else the user's JSON */
+  /** What presence groups users by (default: user.id, else the whole user) */
   key?(user: unknown): string;
-  /** What of a user its peers see, and `presence()` shows; default all of it */
+  /** How a user is shown to the others */
   user?(user: unknown): unknown;
-  /**
-   * Judges what a session shares, as `validate` judges an op: false or a
-   * throw refuses it (code `forbidden`), a value is shared instead, true
-   * or nothing lets it through. Clearing a share is never judged
-   */
+  /** Judge what a session shares: false refuses, a value replaces it */
   validate?(data: unknown, context: ShareContext<S>): boolean | unknown | void;
-  /** At most one presence message per this many milliseconds, changes within the window going out together; default 0 (one per turn of the event loop) */
+  /** Batch presence changes, at most one message per this many ms */
   every?: number;
-  /** The most a session may share, in bytes of JSON; default 4096 */
+  /** The largest share, in bytes of JSON (default 4096) */
   maxShare?: number;
 }
 
-export interface StoreOptions<S extends object = any> {
-  /** The skeleton: state when nothing is persisted, and the base rows are applied onto */
+export interface StoreOptions<S extends object = any> extends Omit<ShapeOptions, 'initial'> {
   initial?: S;
-  /** Paths whose value is one unit (arrays live only here) */
-  registers?: RegisterSpec[];
-  /** Paths clients may not write; an op touching a leaf at or under one is refused whole. `true` locks the whole store: clients only read */
-  readOnly?: RegisterSpec[] | true;
-  /**
-   * Judges every client op after the read-only check: return false or
-   * throw to refuse, a diff to accept that instead, true or nothing to
-   * accept as is. Synchronous
-   */
-  validate?(diff: Diff, context: ValidateContext<S>): boolean | Diff | void;
-  /** How far ahead of the server's clock (ms) a client op may be stamped; default 5 minutes */
-  maxSkew?: number;
-  /** How long (ms) deletions and idle replicas are remembered; default 30 days */
+  /** Per collection or singleton, '*' for the rest */
+  rules?: Record<string, Rule<S>>;
+  /** true refuses every client op; a list names the collections and singletons that are the server's alone */
+  readOnly?: boolean | string[];
+  /** A check of the whole op, its changes as one diff in the tree's shape: false or a throw refuses it */
+  validate?(diff: Record<string, any>, context: ValidateContext<S>): boolean | void;
+  /** Ops older than this (ms) are refused as expired; deletions and replicas older are forgotten (default 30 days) */
   retention?: number;
-  /** How often (ms of store time) compaction runs on its own; default one hour */
   compactEvery?: number;
-  /** Accepted diffs kept for answering reconnects with deltas; default 1000, 0 disables */
+  /** How many changes back a reconnect is answered with a delta (default 1000) */
   deltaLog?: number;
-  /** The most leaves one client op may touch; default 10 000 */
-  maxLeaves?: number;
-  /** Live ops a user may send (per replica without a user), a hello costing one; default `{ burst: 500, perSecond: 100 }`, false disables */
+  /** The most changes in one op (default 10 000) */
+  maxChanges?: number;
   rateLimit?: RateLimit | false;
   storage?: ServerStorage;
-  /**
-   * Commit what one turn of the event loop merged in one go at its end,
-   * holding back what the store sends (acks, patches, answers) until then;
-   * default true. `patch` and `apply` return before their change is stored,
-   * and a commit that fails unloads the store and reports to `onError`;
-   * `flush()` commits at once, and throws. false commits every change as it
-   * is made, and a failed commit throws from the call that made it
-   */
+  /** Commit what a turn of the event loop merged together (default true) */
   groupCommit?: boolean;
-  /**
-   * Changes to the state's shape, in order, each run once per store before
-   * it serves anyone: handed a copy of the state, it returns a diff applied
-   * as the server's own patch, or nothing. A new store starts with every
-   * one done; storage that has run more than this list holds is refused
-   * with code 'schema-ahead'
-   */
   migrations?: Array<(state: S, context: { store: Store<S> }) => object | void>;
-  /**
-   * Whether sessions learn of each other; default false (nothing broadcast,
-   * `presence()` and `peers()` empty, a share refused with `forbidden`).
-   * true turns it on with the defaults; an object sets any of its options
-   */
   presence?: boolean | PresenceOptions<S>;
-  /** Server faults that are nobody's request; default console */
   onError?(error: unknown): void;
-  /** Wall clock (injectable for tests) */
   now?: () => number;
 }
 
 export interface OpEvent {
   replicaId: string;
-  seq: number;
+  seq: number | null;
   user: unknown;
-  accepted: boolean;
-  /** Leaves the op lost */
-  rejected: number;
+  /** The changes as they landed */
+  changes: Change[];
   version: number;
-  /**
-   * What the op changed, as merged and broadcast (a register whole; `null`
-   * where it deleted), or null when nothing was accepted. Read-only: the
-   * same object the delta log keeps
-   */
-  diff: Diff | null;
-  /** Milliseconds the store spent on the op: the gates and the merge (its commit, grouped with the turn's, and its broadcast come after; see `groupCommit`) */
-  ms: number;
 }
 
 export interface RefusedEvent {
@@ -249,13 +184,9 @@ export interface RefusedEvent {
 
 export interface SessionEvent {
   event: 'open' | 'close';
-  /** 'client', 'relay' (a relay's own session) or 'peer' (a client a relay serves) */
-  kind: 'client' | 'relay' | 'peer';
-  /** A peer's relay */
-  via?: unknown;
+  kind: 'client' | 'follower';
   user: unknown;
   replicaId: string | null;
-  /** Live sessions after this one opened or closed */
   sessions: number;
 }
 
@@ -268,154 +199,94 @@ export interface StoreEvents {
 export interface StoreStats {
   version: number;
   epoch: string;
-  /** How many migrations the store has been through */
   schema: number;
-  /** The highest version among the barriers settled; an op made in sight of less is refused as expired */
-  horizon: number;
   sessions: number;
   replicas: number;
-  rows: number;
-  tombstones: number;
-  /** Lifted tombstones, each standing for a container re-added after a deletion (see core/merge.js) */
-  barriers: number;
+  records: number;
   log: number;
-  /**
-   * What the store has sent since it was loaded, by message type ('patch',
-   * 'ack', 'snapshot', 'delta', 'presence', 'http-snapshot', …):
-   * deliveries, a broadcast once per session it reached, and their UTF-8
-   * bytes of JSON before compression (an HTTP snapshot's as served,
-   * compressed). Bytes come from the encoding the transport sends; a
-   * transport that hands on objects counts messages only (bytes for
-   * broadcasts and snapshots, which the store encodes itself)
-   */
   sent: Record<string, { messages: number; bytes: number }>;
 }
 
+export interface StoreDocument extends StorageDocument {
+  schema: number;
+}
+
 export interface Store<S extends object = any> {
-  /** The live state; read freely, write through `patch` */
+  /** The state: read it, never write it (patch, del and apply write) */
   readonly state: S;
+  readonly shape: Shape;
   readonly version: number;
-  /** Identifies this life of the store's storage */
   readonly epoch: string;
   readonly sessions: number;
-  /** Replica ids the store remembers progress for */
-  readonly replicas: string[];
-  /**
-   * Merge one op; with a session it is a client's and passes the gates,
-   * without one it is trusted. Returns once merged, before it is stored
-   * (see `groupCommit`): `flush()` before telling anyone it is saved
-   */
-  apply(op: Op, session?: Session): ApplyResult;
-  /**
-   * A change from the server itself, timestamped now. The authority: a
-   * tombstone on its way is lifted, so what it writes at a deleted path
-   * re-adds it, `id` or not. Returns once merged, before it is stored (see
-   * `groupCommit`): `flush()` before telling anyone it is saved
-   */
-  patch(diff: Diff): ApplyResult;
-  /**
-   * A lazy-watch batch from state the server keeps elsewhere: array fragments are replaced with the whole arrays
-   * read from `state` (the LazyWatch the diff came from, or a plain object shaped like it), then patched as the server.
-   * `LazyWatch.on(live, diff => store.patchFrom(diff, live))` serves a LazyWatch other code already writes
-   */
-  patchFrom(diff: Diff, state: object): ApplyResult;
+  readonly disposed: boolean;
+  now(): number;
+  /** The server's own write, in the tree's shape: merged, missing containers and records made, stamped now */
+  patch(diff: Record<string, any>): Change[];
+  /** Delete a record, or a path in one, as the server */
+  del(c: string, id?: string | Path, path?: Path): Change[];
+  /** Decide a replica's op as if it came on a session of `user`; throws a RefusedError for one refused whole */
+  apply(op: Op, options?: { user?: unknown }): { lost: Lost[]; duplicate: boolean };
   session(options: SessionOptions): Session;
-  /**
-   * A client a relay serves the store to: listed in presence, its replica
-   * claimed, its share judged, sent nothing. Throws a RefusedError where a
-   * hello would be refused ('replica-taken', 'forbidden', 'rate-limited',
-   * 'unavailable')
-   */
-  peer(options: PeerOptions): PeerSession;
-  /** Evict every session the predicate selects; returns how many */
-  closeSessions(predicate: (session: Session) => boolean, message?: string): number;
+  closeSessions(predicate: (session: Session | { user: unknown; replicaId: string | null }) => boolean, message?: string): number;
   /** Distinct users with a live session */
   presence(): unknown[];
-  /** Every live session: its replica id, its user, and what it shares */
   peers(): Peer[];
   snapshot(): S;
-  /** The state as JSON, encoded once per change: what a snapshot carries, inline or over HTTP */
   snapshotJSON(): string;
-  /**
-   * Subscribe to accepted changes (a lazy-watch listener on the state):
-   * heard as they are merged, before the turn's commit stores them (see
-   * `groupCommit`). To pass on only what is stored, `observe('op')`
-   */
-  on(listener: ChangeListener<S>, options?: ListenerOptions): Unsubscribe;
-  /** Watch ops, refusals, and sessions, for logs, audits, and metrics */
+  clocksJSON(): string;
+  /** A record's clock: times by path of what lives and what was deleted inside it */
+  clock(c: string, id?: string): RecordClock;
+  /** Hear every batch that lands, as a diff in the tree's shape, on the next microtask, before it is stored */
+  on(listener: (diff: Record<string, any>, meta: { origin: 'remote' | 'server'; replicaId: string; v: number; changes: Change[] }) => void): Unsubscribe;
+  /** Watch ops (once stored), refusals and sessions */
   observe<E extends keyof StoreEvents>(event: E, fn: (payload: StoreEvents[E]) => void): Unsubscribe;
   stats(): StoreStats;
   /** Forget what the retention window no longer needs */
-  compact(): { tombstones: number; barriers: number; replicas: number };
-  /**
-   * The store as a document: every row with the timestamp that won it
-   * (tombstones included), each replica's progress and owner, the version,
-   * epoch and schema. An adapter's `replace` makes a store of it that
-   * refuses what this one would
-   */
+  compact(): { deletions: number; replicas: number };
   export(): StoreDocument;
-  /**
-   * Put `doc` in this store's storage in place of what it holds and end
-   * this store (its sessions say hello again); the next load serves the
-   * document under a new epoch. With a registry, use `stores.restore`
-   */
   restore(doc: StorageDocument): void;
-  /**
-   * Store what is pending now (see `groupCommit`) and send what waited for
-   * it, then have the adapter write out what it buffers. Throws code
-   * 'unavailable' when the commit failed: the store has unloaded
-   */
   flush(): void;
   dispose(): void;
-  /** True once dispose() ran (a registry's idle sweep does): patch, apply and session throw from then on */
-  readonly disposed: boolean;
 }
 
 export function createStore<S extends object = any>(options?: StoreOptions<S>): Store<S>;
+
+export class RefusedError extends Error {
+  code: string;
+  retryAfter?: number;
+}
+/** The most ops one hello carries */
+export const HELLO_OPS: number;
 
 // --- Many stores ---------------------------------------------------------------
 
 export interface RegistryOptions {
   /** Release a store after this many ms without a session; default never */
   idle?: number;
-  /** How often to look (ms); default one minute */
   sweepEvery?: number;
   now?: () => number;
 }
 
 export interface StoreRegistry<S extends object = any> {
-  /** The live store for `id`, created on first use; null for an invalid or refused id */
   get(id: string): Store<S> | null;
   has(id: string): boolean;
   ids(): string[];
-  /** The live stores' stats rolled up: how many are live and idle (no session), and the sums across them */
-  /** The live stores' stats summed; `sent` by message type, each store counting since it was loaded */
-  stats(): { stores: number; idle: number; sessions: number; replicas: number; rows: number; tombstones: number; barriers: number; log: number; sent: Record<string, { messages: number; bytes: number }> };
-  /**
-   * Put `doc` in the store's storage in place of what it holds, while the
-   * server runs: the store ends, its sessions say hello again, and the next
-   * get(id) serves the document under a new epoch
-   */
+  stats(): { stores: number; idle: number; sessions: number; replicas: number; records: number; log: number; sent: Record<string, { messages: number; bytes: number }> };
   restore(id: string, doc: StorageDocument): void;
-  /** Dispose a live store (its sessions close; persisted data stays) */
   release(id: string): boolean;
-  /** Release every store idle for `idle` or longer; returns their ids */
   sweep(): string[];
   dispose(): void;
 }
 
 export function createStores<S extends object = any>(factory: (id: string) => Store<S> | null, options?: RegistryOptions): StoreRegistry<S>;
-/** Store ids are restricted to a URL- and filename-safe alphabet */
 export function isStoreId(id: unknown): id is string;
 
 // --- Hubs ------------------------------------------------------------------------
 
 export type StoreResolver = (id: string) => Store | null;
-export type Authorize = (user: unknown, storeId: string, store: Store) => boolean | Promise<boolean>;
-/** Judged before the store is loaded: a refusal loads nothing and reads the same whether the store exists or not */
-export type AuthorizeId = (user: unknown, storeId: string) => boolean | Promise<boolean>;
+export type Authorize = (user: unknown, storeId: string, store: Store, context?: { relay: unknown }) => boolean | Promise<boolean>;
+export type AuthorizeId = (user: unknown, storeId: string, context?: { relay: unknown }) => boolean | Promise<boolean>;
 
-/** A transport that can fan a store's message out to every socket on it at once (Bun's topic publish) */
 export interface HubChannel {
   subscribe(storeId: string): void;
   unsubscribe(storeId: string): void;
@@ -425,55 +296,26 @@ export interface HubChannel {
 export interface HubOptions {
   send(message: Tagged<ServerMessage> | { t: 'pong' } | { t: 'error'; message: string }): void;
   user?: unknown;
-  /** Before the store is resolved; prefer it for any check that needs only the user and the id */
   authorizeId?: AuthorizeId;
-  /** Once the store is resolved, for a check that needs it */
   authorize?: Authorize;
-  /** Fan a store's patch out to every subscribed socket at once, rather than a send per socket */
+  /** A follower's client: its credential judged as its own socket would be; the user, or null to refuse */
+  vouch?(credential: unknown, storeId: string): unknown | Promise<unknown>;
   channel?: HubChannel;
-  /** Where a client that can fetch gets a snapshot of `threshold` bytes or more, when the transport serves the route */
   httpSnapshots?: { url(storeId: string): string; threshold: number };
   onError?(error: unknown): void;
 }
 
-/** The server side of a multiplexed connection: one store session per store on this socket */
 export interface Hub {
   receive(message: unknown): void;
   close(): void;
-  /** Store ids with a live session on this connection */
   readonly stores: string[];
   readonly user: unknown;
-  /**
-   * Run the authorize hooks again on the open stores `filter` picks, closing
-   * with 'forbidden' those now refused; a store still waiting for its first
-   * verdict is asked about again. Resolves to how many were closed
-   */
   revalidate(filter?: (user: unknown, storeId: string) => boolean): Promise<number>;
+  /** On a follower's socket: take back the clients `filter` picks */
+  revoke(filter: (user: unknown) => boolean, code?: string, message?: string): number;
 }
 
 export function createHub(resolveStore: StoreResolver, options: HubOptions): Hub;
-
-export interface PeerOptions {
-  user?: unknown;
-  replicaId: string;
-  /** The relay, for the 'session' observers */
-  via?: unknown;
-  /** Called after `closeSessions` or `dispose` closed it: 'evicted', 'unavailable' */
-  onEvict?(code: string): void;
-}
-
-export interface PeerSession {
-  readonly user: unknown;
-  readonly replicaId: string;
-  /** How presence shows it */
-  readonly peer: Peer;
-  /** Whether the store has presence on at all */
-  readonly presence: boolean;
-  readonly closed: boolean;
-  /** Share with the store's peers, judged as a session's share is; throws a RefusedError */
-  share(data: unknown): void;
-  close(): void;
-}
 
 /** A client's credential as a relay vouches with it: the headers and query its own socket would carry */
 export interface RelayCredential {
@@ -481,51 +323,6 @@ export interface RelayCredential {
   query?: string;
 }
 
-export interface RelayLinkOptions {
-  send(message: object): void;
-  /** The relay, as the adapter's `relays.authenticate` gave it */
-  relay: unknown;
-  /** Who a credential is, as the client's own socket would have been judged; null turns it away */
-  admit(credential: RelayCredential, relay: unknown): { user: unknown; expires: number | null } | null | Promise<{ user: unknown; expires: number | null } | null>;
-  /** Whether the relay may carry a store at all (judged again by revalidate) */
-  authorizeRelay?(relay: unknown, storeId: string): boolean | Promise<boolean>;
-  authorizeId?: AuthorizeId;
-  authorize?: Authorize;
-  channel?: HubChannel;
-  /** How long (ms) the relay's session on a store outlives its last client (default 30 000) */
-  linger?: number;
-  /** Vouches turned away as unauthorized before every vouch waits (default 100 burst, 10 a second); false disables */
-  rate?: RateLimit | false;
-  onError?(error: unknown): void;
-}
-
-/** The server side of a relay's link (see src/server/relays.js): its own sessions, and the clients it vouches for */
-export interface RelayLink {
-  receive(message: unknown): void;
-  close(): void;
-  readonly relay: unknown;
-  /** Store ids the relay has a session on */
-  readonly stores: string[];
-  /** The clients let in */
-  grants(): Array<{ user: unknown; store: string; socket: string | null; replicaId: string; openedAt: number; expiresAt: number | null }>;
-  /** Judge the clients again, and the relay on each store; resolves to how many clients were revoked */
-  revalidate(filter?: (user: unknown, storeId: string) => boolean): Promise<number>;
-  /** Revoke the clients `filter` picks ('reauthenticate'); returns how many */
-  disconnect(filter?: (user: unknown) => boolean): number;
-}
-
-export function createRelayLink(resolveStore: StoreResolver, options: RelayLinkOptions): RelayLink;
-
-/** A message's JSON, encoded once and remembered on the object, however many sockets it goes to */
 export function toJSON(message: object): string;
-/** `{ ...message, store }`, keeping the payload's remembered JSON */
 export function tagStore<M extends object>(message: M, store: string): M & { store: string };
-
-/**
- * The response to a request for a store's snapshot, for mounting the
- * route in a server of your own (the adapters serve it themselves):
- * `{ v, epoch, state }` as JSON, brotli or gzip as the request accepts
- * and kept until the state changes, with an ETag that answers 304 while
- * the store is unchanged. Authenticate and authorize the request first
- */
 export function snapshotResponse(store: Store, request: Request, options?: { origins?: '*' | false | string[] }): Response;

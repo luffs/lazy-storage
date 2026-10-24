@@ -105,6 +105,8 @@ export interface Doc {
 export function createDoc(shape: Shape, options?: { state?: Record<string, any>; clocks?: Map<string, unknown>; track?: boolean }): Doc;
 export function docFromRecords(shape: Shape, records?: Array<[string, string | null | undefined, unknown, RecordClock?]>): Doc;
 export function changeFor(base: { c: string; id?: string; path?: Path }, value: unknown): Change;
+/** Changes as one diff in the tree's shape, null for a deletion */
+export function diffOf(shape: Shape, changes: Change[]): Record<string, any>;
 export function clockToJSON(clock: unknown): RecordClock;
 export function clockFromJSON(json: RecordClock): unknown;
 
@@ -157,3 +159,12 @@ export type ServerMessage =
   | { t: 'refused' | 'revoked'; store?: string; as: string; code: string; message?: string }
   | { t: 'reset'; store?: string; previous: { epoch: string | null } }
   | { t: 'pong' };
+
+/** A message as it travels on a socket that carries many stores */
+export type Tagged<M> = M & { store: string };
+
+/** Why the server ended a store (or, without one, the socket) for a client */
+export type ClosedCode = 'evicted' | 'forbidden' | 'unknown-store' | 'invalid-store' | 'unauthorized' | 'replica-taken' | 'outdated' | 'unavailable' | 'reauthenticate';
+
+/** Why the server refused an op */
+export type ErrorCode = 'invalid' | 'forbidden' | 'expired' | 'too-large' | 'rate-limited';
