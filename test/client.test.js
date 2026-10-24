@@ -198,3 +198,30 @@ test('a client behind the server\'s shape passes over what it does not declare, 
   await net.settle();
   assert.equal(store.state.tasks.k.title, 'edited', 'and it goes on syncing');
 });
+
+test('a new op supersedes older pending writes of its own record only: not a singleton\'s for a record of that name, nor another id\'s', async () => {
+  const shape = { initial: { tasks: {}, settings: {} }, singletons: ['settings'] };
+  const store = createStore(shape);
+  const net = createNetwork(store);
+  const db = net.client({ replicaId: 'a', ...shape });
+  await net.settle();
+  db.link.goOffline();
+  await net.settle();
+  db.state.settings.title = 'singleton';
+  await new Promise(resolve => setImmediate(resolve));
+  db.state.tasks.settings = { title: 'a record named settings' };
+  await new Promise(resolve => setImmediate(resolve));
+  db.state.tasks.other = { title: 'other' };
+  await new Promise(resolve => setImmediate(resolve));
+  db.state.tasks.settings.title = 'again';          // supersedes the record's title, nothing else
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(db.pending, 4);
+  assert.ok(db.isPending(['settings', 'title']), 'the singleton\'s write still pending');
+  assert.ok(db.isPending(['tasks', 'other', 'title']));
+  db.link.goOnline();
+  db.connect();
+  await net.settle();
+  assert.equal(store.state.settings.title, 'singleton');
+  assert.equal(store.state.tasks.settings.title, 'again');
+  assert.equal(store.state.tasks.other.title, 'other');
+});

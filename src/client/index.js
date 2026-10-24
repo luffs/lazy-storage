@@ -267,13 +267,15 @@ function build({
    * decide a value again. Returns { changed, removed } for persistence
    */
   function supersede(op) {
-    const written = op.changes.filter(ch => !Object.hasOwn(ch, 'put')).map(ch => [keyOf(ch), ch.path ?? []]);
+    const written = op.changes.filter(ch => !Object.hasOwn(ch, 'put')).map(ch => [ch.c, ch.id, ch.path ?? []]);
     if (!written.length) return null;
     const changed = [];
     const removed = [];
+    // Every pending change is looked at for every new op, so the record is compared by its fields, not by a key built for each
+    const sameRecord = (ch, c, id) => ch.c === c && (ch.id === id || (ch.id == null && id == null));
     outbox = outbox.filter(older => {
       const before = older.changes.length;
-      older.changes = older.changes.filter(ch => !written.some(([key, path]) => key === keyOf(ch) && within(ch.path ?? [], path)));
+      older.changes = older.changes.filter(ch => !written.some(([c, id, path]) => sameRecord(ch, c, id) && within(ch.path ?? [], path)));
       if (older.changes.length === before) return true;
       if (older.changes.length) {
         changed.push(older);
