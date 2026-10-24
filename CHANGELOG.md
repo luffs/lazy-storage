@@ -2,7 +2,27 @@
 
 All notable changes to lazy-storage are documented here. The format follows Keep a Changelog; versions follow Semantic Versioning.
 
-## [Unreleased]
+## [1.0.0] - 2026-10-24
+
+A store is now collections of records and singletons, and every change
+is decided on its own against its record's clock: a record keeps, per
+path, when it was written and when what held it was made, so an edit of
+something deleted and made again loses, and a deletion leaves no
+tombstone behind. Lists are records with position keys, written with
+`db.list(path)` or `listIn(state, path)` and read with `inOrder`.
+`rules` say who may write which record, judged on what the merge
+leaves. A relay is a follower store: it reads each store once for its
+clients, judges offline by the same rules, and has every client vouched
+for and every op judged at the server as its own. The wire is protocol 3
+and storage keeps a row per record, so a server, its clients and its
+relays move to 1.0 together. On upgrade: run `sqlite.fromLeaves(shapeOf)`
+once on a SQLite file from 0.x before serving it (a store not moved is
+refused with `storage-format`; keep a copy first); move a
+`jsonFileStorage` deployment to `sqliteStorage`; rewrite `readOnly`
+path patterns, `validate` that returned a diff, and arrays used as lists
+as described below; give a relay's route `relays.authorize` if the relay
+writes as itself; and expect edits a browser had not sent when it
+upgraded to be lost, since a 0.x outbox cannot be replayed.
 
 ### Changed
 
