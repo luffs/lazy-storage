@@ -197,3 +197,18 @@ export function longestIncreasing(keys) {
   for (let i = tails.length ? tails[tails.length - 1] : -1; i >= 0; i = previous[i]) keep.add(i);
   return keep;
 }
+
+/**
+ * The records of a keyed map in list order (by position, ties by id,
+ * records without one last): what a view renders a list from, a framework
+ * mirror's map as well as a client's
+ * @param {Object} map
+ * @param {{ position?: string }} [options]
+ */
+export function inOrder(map, { position = 'pos' } = {}) {
+  if (!map || typeof map !== 'object') return [];
+  return Object.entries(map)
+    .filter(([, record]) => Utils.isPlainObject(record) || LazyWatch.isProxy(record))
+    .sort(([ia, a], [ib, b]) => comparePositions(a[position], ia, b[position], ib))
+    .map(([, record]) => record);
+}

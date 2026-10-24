@@ -1,0 +1,179 @@
+// vue.test.js - lazy-storage/vue: a reactive mirror that follows local and remote batches, stopping with its scope
+import './dom.js';
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { createApp, defineComponent, effectScope, h, nextTick, watchEffect } from 'vue';
+import { createStore } from '../src/server/index.js';
+import { useClient } from '../src/vue/index.js';
+import { createNetwork } from './helpers.js';
+import { inOrder } from '../src/client/list.js';
+
+const INITIAL = { tasks: {} };
+/** Lets lazy-watch close the current batch */
+const tick = () => new Promise(resolve => setImmediate(resolve));
+const plain = value => JSON.parse(JSON.stringify(value));
+
+test('useClient: a reactive mirror of the state and refs for the rest, remote batches included; the effect scope stops it', async () => {
+  const store = createStore({ initial: INITIAL, presence: true });
+  const net = createNetwork(store);
+  const a = net.client({ replicaId: 'a', initial: INITIAL }, { user: { id: 'u1', name: 'Ann' } });
+  const b = net.client({ replicaId: 'b', initial: INITIAL }, { user: { id: 'u2', name: 'Bo' } });
+  await net.settle();
+
+  const scope = effectScope();
+  const seen = [];
+  const view = scope.run(() => {
+    const view = useClient(a);
+    watchEffect(() => { seen.push(view.state.tasks.x?.title ?? null); });
+    return view;
+  });
+  assert.equal(view.status.value, 'online');
+  assert.deepEqual(view.presence.value.map(u => u.name).sort(), ['Ann', 'Bo']);
+  assert.equal(view.pending.value, 0);
+  assert.equal(view.canUndo.value, false);
+  assert.equal(view.restored, false);
+
+  a.state.tasks.x = { id: 'x', title: 'mine', done: false };
+  assert.equal(view.state.tasks.x, undefined, 'the mirror follows once the batch closes');
+  await tick();
+  assert.deepEqual(plain(view.state), { tasks: { x: { id: 'x', title: 'mine', done: false } } });
+  assert.equal(view.pending.value, 1);
+  assert.equal(view.canUndo.value, true);
+  await net.settle();
+  assert.equal(view.pending.value, 0);
+
+  b.state.tasks.x.title = 'theirs';
+  await net.settle();
+  assert.equal(view.state.tasks.x.title, 'theirs', 'a remote batch reaches the mirror');
+  await nextTick();
+  assert.deepEqual(seen, [null, 'mine', 'theirs'], 'and Vue tracked every step');
+
+  a.state.tasks.x.done = true;
+  await tick();
+  a.undo();
+  await tick();
+  assert.equal(view.state.tasks.x.done, false, 'undo reaches the mirror');
+  assert.equal(view.canRedo.value, true);
+
+  a.link.goOffline();
+  await net.settle();
+  assert.equal(view.status.value, 'offline');
+  assert.deepEqual(view.presence.value, []);
+
+  scope.stop();
+  a.link.goOnline();
+  a.connect();
+  await net.settle();
+  assert.equal(a.status, 'online');
+  assert.equal(view.status.value, 'offline', 'stopped with the scope: no longer following');
+  b.state.tasks.x.title = 'later';
+  await net.settle();
+  assert.equal(a.state.tasks.x.title, 'later');
+  assert.equal(view.state.tasks.x.title, 'theirs');
+});
+
+let captured = null;
+const components = {
+  'Options API': defineComponent({
+    props: { db: { type: Object, required: true } },
+    data() {
+      captured = useClient(this.db);
+      return { ...captured, title: '' };
+    },
+    render() {
+      return h('ul', inOrder(this.state.tasks).map(task => h('li', { key: task.id }, `${task.title}${task.done ? '!' : ''}`)));
+    }
+  }),
+  'Composition API': defineComponent({
+    props: { db: { type: Object, required: true } },
+    setup(props) {
+      captured = useClient(props.db);
+      const { state } = captured;
+      return () => h('ul', inOrder(state.tasks).map(task => h('li', { key: task.id }, `${task.title}${task.done ? '!' : ''}`)));
+    }
+  })
+};
+
+for (const [api, List] of Object.entries(components)) {
+  test(`${api}: a component renders the mirror of a list, for its own edits and a teammate's, and stops following when unmounted`, async () => {
+    const store = createStore({ initial: INITIAL });
+    const net = createNetwork(store);
+    const a = net.client({ replicaId: 'a', initial: { tasks: {} } });
+    const b = net.client({ replicaId: 'b', initial: { tasks: {} } });
+    await net.settle();
+
+    const el = document.createElement('div');
+    const app = createApp(List, { db: a });
+    app.mount(el);
+    assert.equal(el.innerHTML, '<ul></ul>');
+
+    a.list('tasks').add({ title: 'one', done: false });
+    await net.settle();
+    await nextTick();
+    assert.equal(el.innerHTML, '<ul><li>one</li></ul>');
+    assert.equal(typeof a.list('tasks').all()[0].id, 'string', 'the list minted an id');
+
+    b.list('tasks').add({ title: 'two', done: false });
+    await net.settle();
+    await nextTick();
+    assert.equal(el.innerHTML, '<ul><li>one</li><li>two</li></ul>');
+
+    b.list('tasks').move(b.list('tasks').ids()[1], { at: 0 });
+    await net.settle();
+    await nextTick();
+    assert.equal(el.innerHTML, '<ul><li>two</li><li>one</li></ul>', 'a remote reorder');
+
+    a.list('tasks').all()[1].done = true;
+    await net.settle();
+    await nextTick();
+    assert.equal(el.innerHTML, '<ul><li>two</li><li>one!</li></ul>');
+
+    app.unmount();
+    b.list('tasks').add({ title: 'three', done: false });
+    await net.settle();
+    await nextTick();
+    assert.equal(Object.keys(a.state.tasks).length, 3);
+    assert.equal(Object.keys(captured.state.tasks).length, 2, 'unmounted: the mirror no longer follows');
+  });
+}
+
+test('useClient shares one read-only mirror per client among its callers, and stops following with the last', async () => {
+  const store = createStore({ initial: INITIAL });
+  const net = createNetwork(store);
+  const a = net.client({ replicaId: 'a', initial: INITIAL });
+  await net.settle();
+  let watchers = 0;
+  const watch = a.watch;
+  a.watch = fn => { watchers++; const off = watch(fn); return () => { watchers--; off(); }; };
+
+  const one = effectScope();
+  const two = effectScope();
+  const first = one.run(() => useClient(a));
+  const second = two.run(() => useClient(a));
+  assert.equal(first.state, second.state, 'one mirror for both');
+  assert.equal(first.status, second.status, 'and one set of refs');
+  assert.equal(watchers, 1, 'following the client once');
+
+  const warn = console.warn;
+  console.warn = () => {};
+  try {
+    first.state.tasks.y = { id: 'y' };   // a write to the mirror goes nowhere
+  } finally {
+    console.warn = warn;
+  }
+  assert.equal(first.state.tasks.y, undefined, 'the mirror is read-only');
+
+  one.stop();
+  a.state.tasks.x = { id: 'x', title: 'after one stopped' };
+  await tick();
+  assert.equal(second.state.tasks.x.title, 'after one stopped', 'the other caller still follows');
+  assert.equal(watchers, 1);
+  two.stop();
+  assert.equal(watchers, 0, 'the last caller stopping stops following');
+  const third = useClient(a);
+  assert.notEqual(third.state, second.state, 'a later call starts a fresh mirror');
+  assert.equal(third.state.tasks.x.title, 'after one stopped');
+  third.stop();
+  third.stop();   // idempotent
+  assert.equal(watchers, 0);
+});
