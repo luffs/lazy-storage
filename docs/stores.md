@@ -46,51 +46,50 @@ its own socket, its own outbox, its own entry in presence. `sharedConnection`
 makes a browser one replica however many tabs it has:
 
 ```js
-import { createClient, sharedConnection, webSocketTransport, localStorageOutbox } from 'lazy-storage';
+import { createClient, sharedConnection, webSocketTransport, indexedDBStorage } from 'lazy-storage';
 
 const connection = sharedConnection({
   name: 'app',                                            // one per app: names the channel and the lock
   transport: webSocketTransport(() => `${url}?token=${token()}`),
-  storage: store => localStorageOutbox(`app:${store}`)   // the browser's replica, per store
+  storage: store => indexedDBStorage(`app:${store}`)     // the browser's replica, per store
 });
-const db = createClient({ connection, store: 'team-1', initial, lists });   // in every tab, as ever
+const db = createClient({ connection, store: 'team-1', ...shape });   // in every tab, as ever
 ```
 
 The tabs elect a leader with the Web Locks API, and the leader runs the
-browser's replica: a hidden client per store on the real socket, persisted
-through `storage`, which may be any adapter, `indexedDBStorage` included
+browser's replica: a relay (see [Relays](relays.md)) in `local` mode on
+the real socket, its copy of each store and its outbox persisted through
+`storage`, which may be any client adapter, `indexedDBStorage` included
 (the tabs' messages wait while it opens). The app's own clients, in every
-tab including the leader's, follow it over a BroadcastChannel (in the
-leader's tab directly): a follower's edits are applied to the replica at
-once, socket or no socket, so they sit in the browser's persisted outbox
-and go upstream under the browser's replica id, every batch the replica
-sees comes back to every tab as a patch, and presence and peers are
-passed along (the replica hears presence only while one of its followers
-on the store wants it), so the server sees one session per browser. An edit made
-offline in one tab is thus in the others a moment later and survives
-that tab closing, which a tab with a replica of its own could not offer.
-Each tab keeps its own undo history. A tab's `db.status` and `db.pending`
-are the browser's: the socket's status, and the replica's unsent ops
-(`connection.upstream` and `connection.pending(store)` say the same).
-`online` means what it does for a plain client, that the state is
-current: with the socket up, the replica answers a tab's hello once it
-has the store from the server itself, so a store the browser has not
-opened before stays `connecting` until the server's answer is in; with
-the socket down, it answers at once from what it has, and the tab says
-`offline`.
+tab including the leader's, are ordinary clients of that relay, over a
+BroadcastChannel (in the leader's tab directly). A tab's op is
+acknowledged once it is in the browser's outbox, socket or no socket, and
+goes upstream under the browser's replica id; every change comes back to
+every tab as a patch; and presence and peers are passed along, so the
+server sees one session per browser. An edit made offline in one tab is
+thus in the others a moment later and survives that tab closing, which a
+tab with a replica of its own could not offer. Each tab keeps its own
+undo history. A tab's `db.status` and `db.pending` are the browser's: the
+socket's status, and the replica's unsent ops (`connection.upstream` and
+`connection.pending(store)` say the same). `online` means what it does
+for a plain client, that the state is current: with the socket up, the
+replica answers a tab's hello once it has the store from the server
+itself, so a store the browser has not opened before stays `connecting`
+until the server's answer is in; with the socket down, it answers at once
+from what it has, and the tab says `offline`.
+
 When the leader tab closes, the next tab acquires the lock, loads the
-replica's outbox and state from `storage`, reconnects, and the other tabs
-follow it, resending whatever the old leader had not acknowledged. A
-store no tab has open anymore is let go after `linger` (default five
-seconds, so a reload comes back to it): its client is disposed and its
-session on the server ends, while its persisted outbox and cache stay for
-the next tab to open it. A tab that closes without a word is found by the
+replica's copies and outbox from `storage`, reconnects, and the other
+tabs say hello to it again, with whatever the old leader had not
+acknowledged. The leader keeps following a store once a tab has opened
+it, until it hands over. A tab that closes without a word is found by the
 lock it held, which the leader checks every `sweepEvery` (default ten
 seconds). Leave the clients' own `storage` at its default: the replica is
-what persists.
+what persists. A leader that has to open a store no tab has declared yet
+(a follower in a frame, below) takes its shape from `shapeOf(storeId)`.
 
 A page the tab holds in a frame, or a worker, can follow the replica too,
-over a MessagePort: `connection.follow(port, [{ store, initial, registers }])`
+over a MessagePort: `connection.follow(port, [{ store, ...shape }])`
 lets the other end have clients on the stores named and no other, under
 the tab's rights, in a session that lives as long as the tab's and that
 follows a change of leader; the other end runs an ordinary client on
@@ -103,12 +102,12 @@ own, whose `db.status` and `db.pending` are the browser's, as a tab's are
 ```js
 // The host tab
 const { port1, port2 } = new MessageChannel();
-const stop = connection.follow(port1, [{ store: 'team-1', initial, registers }]);
+const stop = connection.follow(port1, [{ store: 'team-1', ...shape }]);
 frame.contentWindow.postMessage({ hello: true }, '*', [port2]);
 
 // The page in the frame
 const port = (await new Promise(resolve => addEventListener('message', e => resolve(e.ports[0]), { once: true })));
-const db = createClient({ connection: portConnection(port), store: 'team-1', initial, registers });
+const db = createClient({ connection: portConnection(port), store: 'team-1', ...shape });
 db.connect();
 ```
 `connection.leader` says whether this tab leads, `dispose()` hands

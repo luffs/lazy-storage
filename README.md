@@ -1,10 +1,11 @@
 # lazy-storage
 
 Realtime shared state for web apps that keeps working offline, on a
-server you run yourself. Clients read and write the state like a plain
-JavaScript object; every change reaches everyone else as a small JSON
-diff, edits made offline are kept and sent later, and everything converges
-when the connection is back.
+server you run yourself. The state is collections of records, of any
+depth; clients read and write it like a plain JavaScript object, every
+change reaches everyone else as the few fields it touched, edits made
+offline are kept and sent later, and everything converges when the
+connection is back.
 
 It is the "database + sync" half of a Firebase-style backend as a
 library: one dependency ([lazy-watch](https://github.com/luffs/lazy-watch)),
@@ -19,22 +20,28 @@ npm install lazy-storage
 In the browser, a client is a live mirror of a store:
 
 ```js
-import { createClient, webSocketTransport, localStorageOutbox } from 'lazy-storage';
+import { createClient, webSocketTransport, localStorageOutbox, inOrder } from 'lazy-storage';
 
+const shape = {
+  initial: { tasks: {}, settings: { theme: 'light' } },   // a collection of records, and a singleton
+  singletons: ['settings']
+};
 const db = createClient({
   transport: webSocketTransport('wss://example.com/ws?token=...'),
   store: 'todo',
-  initial: { tasks: [] },
-  lists: ['tasks'],                       // an ordered list of records, seen as an array
+  ...shape,
   storage: localStorageOutbox('todo')
 });
 db.connect();
 
-db.state.tasks.push({ title: 'Ship it', done: false }); // synced, offline or not
-db.state.tasks[0].done = true;
-db.state.tasks.sort((a, b) => a.title.localeCompare(b.title));
+const tasks = db.list('tasks');                       // the collection as an ordered list
+const id = tasks.add({ title: 'Ship it', done: false }); // synced, offline or not
+db.state.tasks[id].done = true;                       // one field, merged on its own
+db.state.settings.theme = 'dark';
+tasks.move(id, { at: 0 });
 
-db.watch((diff, inverse, meta) => render(db.state, meta?.origin === 'remote'));
+db.watch(() => render(inOrder(db.state.tasks)));
+db.on('lost', ({ lost }) => console.log('a newer edit won', lost));
 db.undo();
 ```
 
@@ -46,11 +53,12 @@ import { createStore, createStores } from 'lazy-storage/server';
 import { sqliteStorage } from 'lazy-storage/server/sqlite';
 import { serve } from 'lazy-storage/server/bun';
 
-// Any number of stores in one SQLite file, one row per leaf. The server
-// knows nothing of arrays: a list is a keyed map with a position per record
+// Any number of stores in one SQLite file, one row per record. The shape is
+// the clients': the server checks theirs against it
 const sqlite = sqliteStorage('data/app.sqlite');
 const stores = createStores(id => createStore({
-  initial: { tasks: {} },
+  ...shape,
+  rules: { settings: user => user.role === 'admin' },   // who may write what; the rest is anyone's
   storage: sqlite.store(id)
 }));
 serve({
@@ -79,34 +87,39 @@ bun examples/basic/server.js
 ## What you get
 
 - **State you just edit.** No queries, mutators or document types to
-  define: assign to `db.state` and it syncs. A list of records is an
-  ordinary array to your code (push, splice, sort) and a keyed map on the
-  wire, so two people adding or reordering never collide.
-  ([The model](docs/model.md))
+  define: declare the collections, assign to `db.state`, and it syncs.
+  Records may nest as deep as they like, and each path merges on its
+  own; a list is a collection whose records carry a position, so two
+  people adding or reordering never collide. ([The model](docs/model.md))
 - **Offline by default.** Edits made without a connection go to an outbox
   that survives reloads, and are sent in order when the server is back.
   ([Offline](docs/offline.md))
-- **Conflicts you can reason about.** The server merges field by field:
-  edits to different fields of one record both land, and on the same field
-  the later one wins everywhere. A client whose edit lost is told what it
-  lost. ([How conflicts resolve](docs/model.md#how-conflicts-resolve))
+- **Conflicts you can reason about.** The server decides path by path:
+  edits to different fields of one record both land, on the same field
+  the later one wins everywhere, a deletion made offline does not take
+  away what someone edited after it, and a child never outlives its
+  parent. A client whose edit lost is told what and why.
+  ([How conflicts resolve](docs/model.md#how-conflicts-resolve))
 - **Undo and redo** that only ever touch your own edits, not a
   teammate's. ([Undo](docs/model.md#undo))
 - **React and Vue bindings**, `lazy-storage/react` and `lazy-storage/vue`,
   and a pattern of a few lines for anything else.
   ([With a UI framework](docs/model.md#with-a-ui-framework))
-- **Storage that looks after itself.** SQLite with a row per field, on Bun
-  or Node: versioned migrations, and backups and restores while serving.
+- **Storage that looks after itself.** SQLite with a row per record, on
+  Bun or Node: versioned migrations, and backups and restores while serving.
   ([Persistence](docs/server.md#persistence))
 - **Your own users.** Two hooks say who a request is and which stores
-  they may open; presence shows who is here and what they share.
+  they may open, rules per collection what they may write; presence
+  shows who is here and what they share.
   ([Authentication, presence, and eviction](docs/auth.md))
 - **One socket for everything.** Any number of stores over one
   connection, and one connection per browser however many tabs it has
   open. ([Multiple stores](docs/stores.md))
-- **Relays.** A relay on a shop's or an office's network keeps its
-  clients working while the server is away; relays in front of the
-  server take the writing to clients off its one core.
+- **Relays.** A relay is a store that follows the server: on a shop's or
+  an office's network it keeps its clients working together while the
+  server is away, and in front of the server it reads each store once
+  for all its clients, taking the writing to them off the server's one
+  core.
   ([Relays](docs/relays.md))
 - **Built for the open internet.** Size and rate limits are on by default,
   and the test suite includes a fuzzer that plays a signed-in attacker
@@ -117,8 +130,9 @@ bun examples/basic/server.js
 
 ## How fast
 
-Measured with the repository's own benchmarks, on a 4-core Linux server
-with the load coming from another machine:
+Measured with the repository's own benchmarks before 1.0, on a 4-core
+Linux server with the load coming from another machine (1.0's relays fan
+out the same way, and are yet to be measured again):
 
 - One store on SQLite took **15 000 writes a second** behind ten relays,
   each write reaching every client at a p99 of some 50 ms.
@@ -134,7 +148,7 @@ your own ([Examples, benchmarks, and tests](docs/development.md)).
 ## When to use something else
 
 - **Collaborative text, or merging two edits of the same value.** This is
-  last-writer-wins per field, not a text CRDT: on the same field, the
+  last-writer-wins per path, not a text CRDT: on the same field, the
   later edit replaces the earlier. For a shared document, embed a library
   made for it (Yjs, Automerge) and keep the state around it here.
 - **Data too large to hand a client whole.** A client that opens a store
@@ -150,12 +164,12 @@ your own ([Examples, benchmarks, and tests](docs/development.md)).
 
 | | |
 |---|---|
-| [The model](docs/model.md) | State, lists, plain arrays, UI frameworks, how conflicts resolve, undo, scope |
+| [The model](docs/model.md) | Collections, records and singletons, lists, how conflicts resolve, undo, UI frameworks, scope |
 | [Offline](docs/offline.md) | The outbox, storage adapters, what a reconnect does |
 | [Multiple stores](docs/stores.md) | Many stores over one socket, one socket per browser |
 | [The server](docs/server.md) | Persistence, migrations, backups, state the server owns, embedding, Node |
-| [Authentication, presence, and eviction](docs/auth.md) | Who may open what, who is here, ending sessions |
-| [Relays](docs/relays.md) | Working while the server is away, fan-out, spreading the load, compression |
+| [Authentication, presence, and eviction](docs/auth.md) | Who may open and write what, who is here, ending sessions |
+| [Relays](docs/relays.md) | A store that follows the server: working while it is away, spreading the load, compression |
 | [Limits, memory, and observability](docs/limits.md) | The ceilings a public server needs, and what to watch |
 | [API](docs/api.md) | Every export, in brief |
 | [Wire protocol](docs/protocol.md) | The messages, refusal and close codes, a relay's link |
@@ -165,7 +179,8 @@ your own ([Examples, benchmarks, and tests](docs/development.md)).
 in plain JavaScript, Vue and React, the same served by Node, a
 server-side client, and the podman-caddy deployment. See
 [examples/README.md](examples/README.md). Changes are in
-[CHANGELOG.md](CHANGELOG.md).
+[CHANGELOG.md](CHANGELOG.md), and what 1.0 asks of an app on 0.x under
+its heading.
 
 ## License
 

@@ -122,7 +122,7 @@ export function createHandlers({
     if (typeof drop.unref === 'function') drop.unref();
   };
   const hubs = new Map();
-  const links = new Map();   // relay sockets -> their link (see relays.js)
+  const links = new Map();   // relay sockets -> their link (see follow.js)
   const heard = new Map();   // socket -> when it last sent something, for idleTimeout
   const opened = new Map();  // socket -> when it opened
   const expiring = new Map(); // socket -> { at, cancel }: when its session runs out, and the timer for it

@@ -13,7 +13,7 @@
 // its open stores again.
 //
 // Relays: with `relays`, a relay on a LAN that carries many clients (see
-// src/relay and relays.js) connects at `<path>/relay`, authenticated as
+// src/relay and follow.js) connects at `<path>/relay`, authenticated as
 // itself by `relays.authenticate(req)`, and reads each store once for all
 // its clients, each of whom the server judges by the same hooks as its own
 // socket. `disconnect`, `revalidate` and expiry reach those clients too.
@@ -83,17 +83,14 @@ import { snapshotOptions, snapshotId, serveSnapshot } from './snapshot.js';
  *   browser withholds cookies under '*'), an array of origins to echo and
  *   no other, or false for no CORS header at all. false turns the route
  *   off; every client then gets its snapshot inline
- * @param {Object} [options.relays] - let relays carry clients (see relays.js):
+ * @param {Object} [options.relays] - let relays carry clients (see follow.js):
  *   `authenticate(req)` the relay a request is (null turns it away, as for
  *   a client), `expiresAt(relay, req)` when that runs out (as `expiresAt`),
  *   `authorize(relay, storeId)` whether it may carry a store at all
  *   (default: any its clients may read; judged again by `revalidate`),
- *   `path` (default `<path>/relay`), `linger` (ms its session on a store
- *   outlives the store's last client there, default 30000), `headers` (more
+ *   `path` (default `<path>/relay`), `headers` (more
  *   names of a client's headers its credential may carry, besides
- *   authorization, cookie and user-agent), `rate` (vouches turned away as
- *   unauthorized before every vouch waits: { burst, perSecond }, default
- *   100 and 10). A client a relay vouches for is judged by `authenticate`
+ *   authorization, cookie and user-agent). A client a relay vouches for is judged by `authenticate`
  *   and `expiresAt` given `{ relay }` as their last argument.
  *   `disconnect(filter)` cuts off a relay the filter picks (it is handed the
  *   relay as the user) with its clients
@@ -188,7 +185,7 @@ export function createHandlers({
     }
   };
   const hubs = new Map();
-  const links = new Map();  // relay sockets -> their link (see relays.js)
+  const links = new Map();  // relay sockets -> their link (see follow.js)
   const seen = new Map();   // socket -> { opened, heard, expires, cancel }: when it opened, last sent something, runs out; the expiry's timer
   let closing = false;
   let cutOff = 0;           // sockets closed for falling behind
@@ -248,7 +245,7 @@ export function createHandlers({
   /**
    * Who a client a relay vouches for is, as its own socket would have been
    * judged: `authenticate` and `expiresAt` over the request it would have
-   * made (see credentialRequest in relays.js), told which relay asks
+   * made (see credentialRequest in follow.js), told which relay asks
    * (`{ relay }`, their last argument); null when turned away
    */
   async function admit(credential, relay) {

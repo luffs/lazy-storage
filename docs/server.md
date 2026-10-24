@@ -5,21 +5,16 @@ server itself owns; and running lazy-storage inside a server of your own.
 
 ## Persistence
 
-A store persists as **rows, one per leaf path**: a live row holds the
-value and the timestamp that won it, a tombstone the timestamp only, and
-a barrier (a lifted tombstone, see [How conflicts are decided](model.md#how-conflicts-are-decided))
-two timestamps, the deletion's and the re-add's, and the store version
-the re-add became, standing for `{}` at its path.
-Every accepted op writes exactly the rows it won and the entries it
-dropped, so the write cost of an edit is a few rows rather than the
-state, and what one turn of the event loop accepted is committed in one
-transaction (below). On load the state is `initial` with the rows
-applied on top: `initial` is the skeleton an app expects to exist (its
-top-level containers), the rows carry the data, and a container added to
-`initial` later simply appears. A client may empty one of those
-containers but not delete it (refused with `forbidden`), since its
-tombstone would refuse every write under it for the retention window;
-the server's own `patch` may.
+A store persists as **rows, one per record**: a collection's record is
+keyed by its collection and id, a singleton by its name, and each row
+holds the record's data and its clock (see [How conflicts
+resolve](model.md#how-conflicts-resolve)). Every accepted op writes the
+records it changed and drops the ones it deleted, so the write cost of an
+edit is a row or two rather than the state, and what one turn of the
+event loop accepted is committed in one transaction (below). On load the
+state is `initial` with the rows on top: `initial` declares the
+collections and singletons, the rows carry the data, and a collection or
+singleton added to `initial` later simply appears.
 
 **Group commit.** A store commits what one turn of the event loop merged
 together, at the end of the turn: the ops every socket brought in that
@@ -57,23 +52,24 @@ What that asks of code on the server:
   reports it to `onError` and unloads itself (its clients say hello
   again, with every edit they had not had acknowledged); `flush()` is
   where a failure reaches the code that wrote.
-- **`store.on(listener)` hears a change as it is merged, before it is
-  stored.** A listener that passes changes on (a webhook, an audit log, a
-  search index) can pass on one whose commit then fails. `store.observe('op',
-  fn)` is told of an op once it is stored, as its author is, with what
-  it changed (`diff`, as merged and broadcast): the one to forward from.
+- **`store.on(listener)` hears a batch on the next microtask, before it
+  is stored,** as a diff in the tree's shape with `{ origin, replicaId,
+  v, changes }`. A listener that passes changes on (a webhook, an audit
+  log, a search index) can pass on one whose commit then fails.
+  `store.observe('op', fn)` is told of an op once it is stored, as its
+  author is, with the changes as they landed: the one to forward from.
 
 Adapters:
 
 - `sqliteStorage(file)` (`lazy-storage/server/sqlite`, Bun) — one file for
-  any number of stores, keyed by `(store, path)`, WAL mode, the delta log
-  kept alongside. `sqlite.store(id)` gives a store its adapter;
+  any number of stores, keyed by `(store, collection, id)`, WAL mode, the
+  delta log kept alongside. `sqlite.store(id)` gives a store its adapter;
   `sqlite.ids()`, `sqlite.remove(id)`, and the raw `sqlite.db` are there
   for administration. The write-ahead log is copied back into the file
   (checkpointed) on a worker thread with a connection of its own, so the
   thread that commits, the server's event loop, never waits on the disk
   for it; `checkpoints: 'inline'` leaves that to SQLite on the committing
-  thread, as it was. A worker that cannot start (a bundle that left
+  thread. A worker that cannot start (a bundle that left
   `sqlite-checkpoint.js` out, say) or fails is reported to `onError`
   (default console) with code `checkpoint-worker`, and SQLite checkpoints
   on the committing thread again.
@@ -85,23 +81,38 @@ Adapters:
   first reconnects with snapshots). Fine for small single-store deployments.
 - `memoryStorage()` — nothing survives the process; for tests.
 
+**A file from before 1.0** keeps one row per leaf, and a store in it is
+refused with code `storage-format` rather than served empty. Move it
+once, with no store loaded, telling the adapter which top-level keys are
+singletons:
+
+```js
+const sqlite = sqliteStorage('data/app.sqlite');
+sqlite.fromLeaves(storeId => ({ singletons: ['settings'] }));   // returns the ids it moved
+```
+
+Each leaf's time becomes its path's time in its record's clock, a
+deletion inside a living record a deleted path, and a record deleted
+whole is left out. The moved stores get a new epoch, so every client
+takes a snapshot, and their old delta log goes.
+
 One process serves a store at a time. Two processes on one SQLite file,
 a deploy whose old and new process overlap or a server started twice,
 would each load the same store, commit versions that collide, and keep
 their clients in states that never meet again. So the SQLite adapters
 take a **lease** on a store when it loads: a row in the file, renewed on
 a timer (a commit checks it still holds it, and renews it only when it
-runs low), given up when the store is disposed
-(a registry's release, a graceful shutdown) or the file is closed. A
-process that finds a store leased elsewhere cannot load it (code
-`store-locked`); a hub tells the client `unavailable`, and the client
-says hello again a moment later, so during a deploy's overlap clients
-land on whichever process holds the store. A commit that finds its lease
-gone is refused, so a process that stalled cannot write over the one
-that took over. A crashed process's lease runs out after `lease.ttl`
-(default 30 s), or at once when that process was on the same machine.
-Stores are leased one by one: processes may share a file on purpose by
-serving different stores. `lease: false` turns it off.
+runs low), given up when the store is disposed (a registry's release, a
+graceful shutdown) or the file is closed. A process that finds a store
+leased elsewhere cannot load it (code `store-locked`); a hub tells the
+client `unavailable`, and the client says hello again a moment later, so
+during a deploy's overlap clients land on whichever process holds the
+store. A commit that finds its lease gone is refused, so a process that
+stalled cannot write over the one that took over. A crashed process's
+lease runs out after `lease.ttl` (default 30 s), or at once when that
+process was on the same machine. Stores are leased one by one: processes
+may share a file on purpose by serving different stores. `lease: false`
+turns it off.
 
 A deploy that starts a new container is another machine as far as the
 lease can tell: whether the old process still runs cannot be checked from
@@ -116,47 +127,47 @@ so give whatever it waits for there a time limit.
 A custom adapter implements `load()`, `commit(change)`, and `flush()`,
 and optionally `commitMany(changes)` (a turn's changes in one
 transaction, all or none; without it the store commits them one by one),
-`close()` (the store let go of it) and `replace(doc)`; `change` carries
-the rows an op won and dropped, the replica's progress, the version and
-epoch, and optionally the accepted diff as a `log` entry with the
-`logFloor` below which the store no longer needs entries. See the header
-of `src/server/storage.js` for the exact shapes. A commit that throws
-unloads the store (the error goes to `onError`): memory would otherwise
-be ahead of disk. Nothing it held was sent: its sessions are told
-`unavailable` and say hello again with their unacknowledged ops, and a
-registry loads the store afresh from what is on disk. The SQLite
-adapters wait up to five seconds for another connection's lock before a
-commit fails.
+`close()` (the store let go of it) and `replace(doc)`. `load()` returns
+`{ records, replicas, version, epoch, schema, log }` or null, a record
+being `[collection, id or null, data, clock]`; `change` carries the
+records to write (`upserts`) and to drop (`deletes`), the replica's
+progress, the version and epoch, and optionally the accepted changes as
+a `log` entry with the `logFloor` below which the store no longer needs
+entries. See the header of `src/server/storage.js` for the exact shapes.
+A commit that throws unloads the store (the error goes to `onError`):
+memory would otherwise be ahead of disk. Nothing it held was sent: its
+sessions are told `unavailable` and say hello again with their
+unacknowledged ops, and a registry loads the store afresh from what is on
+disk. The SQLite adapters wait up to five seconds for another
+connection's lock before a commit fails.
 
-Two things would otherwise grow without bound: tombstones, with the
-barriers that lifted ones leave (a barrier that old settles into the row
-of a container written empty), and the progress kept per replica (every
-browser tab that ever connected). A store keeps both for its **retention window** (`retention`, default 30 days) and
-forgets what is older, on load and then once an hour as ops arrive
-(`store.compact()` does it on demand and reports what it removed). To make
-that safe, an op stamped before the window is refused with code `expired`:
-it might be a write to a record whose deletion has since been forgotten,
-and would resurrect it. So is an op made in sight of a store version
-below the **horizon**, the highest version among the barriers settled so
-far (`store.stats().horizon`, kept with the rows): a settled barrier no
-longer tells an edit of the deleted container from one of the re-added,
-and the op's timestamp never could, so a replica whose view is older than
-the window loses the edits it makes until it has synced. The client drops such an op and resyncs, and the
-app can listen for the error to tell the user that a change made more than
-a month ago offline could not be kept. `retention: Infinity` keeps
-everything and accepts ops of any age.
+Two things would otherwise grow without bound: the times of paths deleted
+inside living records, and the progress kept per replica (every browser
+tab that ever connected). A store keeps both for its **retention window**
+(`retention`, default 30 days) and forgets what is older, on load and
+then once an hour as ops arrive (`store.compact()` does it on demand and
+reports what it removed). A deleted record keeps nothing to forget. To
+make forgetting safe, an op stamped before the window is refused whole
+with code `expired`: it might bring back a path whose deletion has since
+been forgotten, or be one the store applied and no longer remembers. That
+is enough because the store clamps every timestamp to its own time, so
+nothing it applied is stamped later than it arrived. The client drops
+such an op and takes its edit back, and the app hears `rejected` with
+code `expired`, to tell the user that a change made more than a month ago
+offline could not be kept. `retention: Infinity` keeps everything and
+accepts ops of any age.
 
 An adapter records a replica's progress as `{ seq, seen }`, where `seen`
 is the store's clock when its last op arrived, and the store's `epoch`, a
-random id minted once per life of the storage (it is how a client's cached
+random id minted once per life of the storage (it is how a client's
 version is told apart from one that belongs to storage since wiped).
 
 ### Migrations
 
-`initial` covers a container added to the state; a change to data that is
-already stored (a field renamed, a default filled in, records moved) is a
-**migration**. A store runs the ones its rows have not been through, in
-order, when it loads and before it serves anyone:
+`initial` covers a collection or singleton added to the store; a change
+to data that is already stored (a field renamed, a default filled in,
+records moved) is a **migration**. A store runs the ones its rows have
+not been through, in order, when it loads and before it serves anyone:
 
 ```js
 createStore({
@@ -186,18 +197,18 @@ newer version migrated it, is refused with code `schema-ahead` rather
 than served and written in the older shape. Stores migrate as they are
 first opened; to migrate every one at once, open each (`sqlite.ids()`,
 then `stores.get(id)`). Edits a client made offline in the old shape are
-applied as written when it returns, so a migration that renames is best
-paired with a `validate` that translates or refuses the old name for a
-while.
+decided as written when it returns, so a migration that renames is best
+paired with a rule that refuses the old name for a while (see [Who may
+write what](auth.md#who-may-write-what)).
 
 ### Backups, restores, and moving a store
 
-`store.export()` gives a store as a JSON document: every row with the
-timestamp that won it (tombstones included), each replica's progress and
-owner, and the version, schema and horizon. Every adapter takes one with
-`replace(doc)` as a store's whole storage, as it does another adapter's
-`load()`. A store loaded from it refuses what the original would (a stale
-write, a write under a tombstone, another user's replica):
+`store.export()` gives a store as a JSON document: every record with its
+clock, each replica's progress and owner, the version, the schema and the
+delta log. Every adapter takes one with `replace(doc)` as a store's whole
+storage, as it does another adapter's `load()`. A store loaded from it
+decides as the original would (a stale write, a write to a deleted
+record, another user's replica):
 
 ```js
 // From a JSON file to SQLite
@@ -241,10 +252,10 @@ and hears `reset` with the state it showed before (see [What happened to
 my edit](model.md#what-happened-to-my-edit)), so the app can tell its user that
 recent changes may be gone. Edits acknowledged after the copy was made
 are lost with it; edits still in a client's outbox are sent again and
-applied. One made offline to a record created after the copy brings
-that record back with only the fields it wrote: a `validate` that
-refuses a record without its `id` keeps such fragments out. Moving a
-store with `replace` costs one snapshot per client, and a reset.
+decided against the copy. An edit to a record made after the copy finds
+no record and is lost as `missing`, so a restore never brings back a
+fragment of a record. Moving a store with `replace` costs one snapshot
+per client, and a reset.
 
 ## Serving state the server owns
 
@@ -261,39 +272,39 @@ enforce them: a store per team, per owner, per job. A view whose readers
 are a subset of another's is a separate store, not a filtered one.
 
 **Clients only read.** `readOnly: true` refuses every client op (the
-client drops it and resyncs, so a stray local edit falls back in line),
-and on the client `mirror: true` turns off what a follower never uses:
-the undo manager, the state cache, presence.
+client drops it and takes it back, so a stray local edit falls back in
+line); `readOnly: ['procs']` does it for the collections and singletons
+named, and leaves the rest to the clients. On the client `mirror: true`
+turns off what a follower never uses: the undo manager, the state cache,
+presence.
 
-**The server's patch is the authority.** `store.patch` lifts any tombstone
-on its way (into a barrier, as a replica's re-add does) and is held back
-by no barrier, so a record the server recreates under a key it had
-deleted (a process that came back, a container after a redeploy) lands,
-`id` or not; a replica's op is still judged by the rules under [How conflicts
-resolve](model.md#how-conflicts-resolve). Retention, rate limits and the outbox
-are idle machinery here: harmless, and the defaults are fine.
-
-**Publishing a LazyWatch the server already writes.** When the state
-lives in a lazy-watch proxy that other code mutates, forward its batches:
+**The server's patch is the authority.** `store.patch(diff)` takes a diff
+in the tree's shape (a record by id, `null` to delete), stamps it with the
+server's time and applies it without any check: a missing record or
+nested object is made, and a deleted record takes its children with it.
+`store.del(c, id, path)` deletes, and `store.apply(op, { user })` decides
+a replica's op as if it came on that user's session. Retention, rate
+limits and the outbox are idle machinery here: harmless, and the
+defaults are fine.
 
 ```js
-const live = new LazyWatch({ procs: {}, order: [] });
-const store = createStore({ initial: { procs: {}, order: [] }, registers: ['order'], readOnly: true });
-LazyWatch.on(live, diff => store.patchFrom(diff, live));
-live.procs.web = { state: 'online', pid: 41 };   // reaches every session as a patch
+const store = createStore({ initial: { procs: {}, order: [] }, singletons: ['order'], readOnly: true });
+store.patch({ procs: { web: { state: 'online', pid: 41 } } });   // reaches every session as a patch
+store.patch({ order: ['web'] });                                  // an array is a value, written whole
+store.patch({ procs: { web: null } });
 ```
 
-`patchFrom` replaces the array fragments lazy-watch emits (`{ 2: 'c',
-$length: 3 }`, a `$splice`) with the whole arrays read from `live`, since
-arrays travel as whole values, then patches as the server. Arrays of
-records still need declaring as registers, on both sides.
+A server that keeps its state in a lazy-watch proxy of its own forwards
+its batches to `patch` with the arrays read whole from the proxy, since
+lazy-watch emits fragments of the arrays it changed (`{ 2: 'c', $length:
+3 }`) and a store takes an array as one value.
 
 **Nulls are deletions.** State that uses `null` for "unknown" comes out as
 an absent key on the mirror; read it with `?.`.
 
 **A store that lives as long as something runs** (a job's log) is created
 when the job starts, written with `patch`, and ended with
-`closeSessions(() => true, 'finished')` then `dispose()`: every follower
+`closeSessions(() => true, 'finished')` then `dispose()`: every client
 hears `evicted` and knows to look elsewhere for the final record.
 
 **Registries and `idle`.** A registry's idle sweep counts sessions, and

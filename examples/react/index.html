@@ -41,7 +41,7 @@
   const name = new URLSearchParams(location.search).get('name') || localStorage.getItem('example:name') || prompt('Your name?') || 'anonymous';
   localStorage.setItem('example:name', name);
 
-  // The same `shared` store as the other example pages, seen as an array
+  // The same `shared` store as the other example pages, its tasks read in order
   // One socket per browser, shared with the other example pages' tabs (see basic/index.html)
   const connection = sharedConnection({
     name: 'example',

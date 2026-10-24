@@ -34,10 +34,9 @@ A public server needs a few ceilings, all on by default:
   30 µs more to deflate 4 KB, so a patch to 4000 sockets is some 50–80 ms
   of the loop. Patches published in one turn go out together, a write a
   socket (see `npm run bench:fanout`), and a relay in front of each group
-  of clients takes the writes off the server (see [One read for many
-  clients](relays.md#one-read-for-many-clients-fan-out)). The Node adapter sends per socket. Either way, egress still
+  of clients takes the writes off the server (see [Relays](relays.md#spreading-the-load)). The Node adapter sends per socket. Either way, egress still
   grows with the listeners, so a big write to a big audience is bandwidth
-  the uplink has to carry; splitting a large value into records, so a
+  the uplink has to carry; splitting a large value into records and fields, so a
   patch carries only what changed, is what keeps it small.
 - **Slow sockets.** A patch to a store is queued for every socket on it,
   and a client that stops reading (a phone gone underground, a stalled
@@ -76,9 +75,9 @@ A public server needs a few ceilings, all on by default:
   or `fetch: false` on the transport, keeps every snapshot on the socket;
   `snapshotResponse(store, request)` serves the route from a server of
   your own.
-- **Op size.** `maxLeaves` on the store (default 10 000) is the most leaves
-  one op may touch; a larger one is refused with code `too-large`, and
-  the client drops it and resyncs.
+- **Op size.** `maxChanges` on the store (default 10 000) is the most
+  changes one op may carry; a larger one is refused with code
+  `too-large`, and the client drops it and takes its edit back.
 - **Op rate.** `rateLimit` on the store is a token bucket per user (by
   presence's `key`, so minting replica ids does not refill it; per
   replica for a session without a user), `{ burst: 500, perSecond: 100 }`
@@ -111,15 +110,13 @@ each write (which also resets its idle clock), or keep the stores a
 server writes out of the registry.
 
 **Watching a store.** `store.observe('op' | 'refused' | 'session', fn)`
-reports every merged op once it is stored (`{ replicaId, seq, user,
-accepted, rejected, version, diff, ms }`, `diff` what the op changed as
-merged and broadcast, read-only, `ms` the time the store spent on it:
-the gates and the merge; its commit, grouped with the turn's, and its
-broadcast come after),
+reports every op once it is stored (`{ replicaId, seq, user, changes,
+version }`, `changes` what landed, as broadcast; the server's own writes
+come with `replicaId` 'server' and `seq` null),
 every client op turned away (`{ replicaId, seq, user, code,
 message }`), and sessions opening and closing, for logs, audits, and
-metrics; `store.stats()` counts version, sessions, replicas, rows,
-tombstones, and the delta log, plus `sent`, what the store has sent by
+metrics; `store.stats()` counts version, epoch, schema, sessions,
+replicas, records, and the delta log, plus `sent`, what the store has sent by
 message type (`patch`, `ack`, `snapshot`, `delta`, `presence`,
 `http-snapshot`, …) as `{ messages, bytes }`: deliveries, a broadcast
 once per session it reached, and their size in UTF-8 bytes of JSON,
@@ -156,8 +153,8 @@ the server already runs; with `prom-client`, say:
 
 ```js
 import client from 'prom-client';
-const opMs = new client.Histogram({ name: 'lazystorage_op_ms', help: 'op merge time (ms)', buckets: [1, 5, 20, 100, 500] });
-store.observe('op', ({ ms }) => opMs.observe(ms));
+const changes = new client.Counter({ name: 'lazystorage_changes', help: 'changes stored' });
+store.observe('op', e => changes.inc(e.changes.length));
 new client.Gauge({ name: 'lazystorage_patch_bytes', help: 'patch bytes sent', collect() { this.set(store.stats().sent.patch?.bytes ?? 0); } });
 new client.Gauge({ name: 'lazystorage_buffered_bytes', help: 'largest unsent socket buffer', collect() { this.set(server.socketStats().largest); } });
 ```

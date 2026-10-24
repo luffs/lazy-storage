@@ -10,9 +10,9 @@ const here = dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/,
 const root = join(here, '..', '..');
 const sqlite = sqliteStorage(join(here, 'state.sqlite'));
 
-// Every store starts as a keyed map of tasks; each record carries a
-// position, and the page sees the map as an array. `shared` is the one
-// the page uses
+// Every store is a collection of tasks; each record carries a position,
+// and the page reads them in order with inOrder. `shared` is the one the
+// page uses
 const stores = createStores(id => createStore({
   initial: { tasks: {} },
   storage: sqlite.store(id),

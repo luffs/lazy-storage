@@ -18,8 +18,8 @@
 // The write phases have `--writers` of the clients (spread over the client
 // processes, and so over the relays) write the store between them at each
 // rate, as live ops on their own sockets: straight to the server, or
-// through their relay, which sends each writer's ops up a write-only socket
-// of the writer's own. Every op is a patch every client hears, as the
+// through their relay, which sends each writer's ops up its link as the
+// writer's own, judged and acknowledged as the writer's. Every op is a patch every client hears, as the
 // server's are, and its author times its ack besides. The server's CPU per
 // op is what one store costs its process for each write, fan-out included;
 // to see the write path alone, run it with few readers (`--n 200 --writers

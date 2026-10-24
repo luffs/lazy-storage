@@ -1,13 +1,17 @@
 # Offline
 
-Local edits go into an **outbox** first, persisted through a storage
-adapter (`localStorageOutbox` in browsers, `memoryOutbox` for tests or
-throwaway sessions), and are sent when online. The same adapter caches
-the **last state** next to the outbox, so a client restarted while offline,
-or before its first snapshot has landed, starts from what it last saw with
-its pending edits already applied (`db.restored` says so) rather than from
-`initial`; the snapshot on reconnect then brings it up to date. Pass
-`cache: false` to keep only the outbox.
+A client keeps two things: its **outbox**, the ops the server has not
+acknowledged, and its **base**, the state as the server last told it,
+with each record's clock and the version it is at. What the app sees,
+`db.state`, is the base with the outbox replayed on top (see [The client:
+base and pending](model.md#the-client-base-and-pending)), so a reload
+builds it again the same way. Both go through a storage adapter
+(`localStorageOutbox` in browsers, `memoryOutbox` for tests or throwaway
+sessions), and a client restarted while offline, or before its first
+snapshot has landed, starts from what it last saw with its pending edits
+already on top (`db.restored` says so) rather than from `initial`; the
+answer to its hello then brings it up to date. Pass `cache: false` to keep
+only the outbox.
 
 An outbox is one replica's, and a replica is one tab: two tabs loading
 the same outbox would number their ops alike, and the server would drop
@@ -22,15 +26,15 @@ has, use `sharedConnection` (see
 There are two kinds of storage adapter. A **document** adapter
 (`localStorageOutbox`, `memoryOutbox`) keeps the outbox, written with
 every op (`localStorageOutbox` keeps it op by op, so an op writes itself
-and not every op pending), and the state as one document. The state
-costs a serialization of everything, so it is written once changes have
-settled for `cacheDelay` (default a second), at least every ten of those
-under traffic that never settles, and at once when the page is hidden or
-goes away. It may lag safely: it is saved with the store version it
-reflects, a restore replays the outbox over it, and the reconnect asks
-for what came since. Fine for states up to a megabyte or so. A **row** adapter
-keeps one row per leaf and one per pending op, so a batch costs the
-leaves it touched and only a snapshot touches everything:
+and not every op pending), and the base as one document. The base costs a
+serialization of everything, so it is written once changes have settled
+for `cacheDelay` (default a second), at least every ten of those under
+traffic that never settles, and at once when the page is hidden or goes
+away. It may lag safely: it is saved with the version it reflects, a
+restore replays the outbox over it, and the reconnect asks for what came
+since. Fine for states up to a megabyte or so. A **row** adapter keeps
+one row per record and one per pending op, so a patch costs the records
+it touched and only a snapshot touches everything:
 `indexedDBStorage(name)` for browsers (a far larger quota than
 localStorage and no serialization on the main thread; it loads
 asynchronously, so open the client with `await openClient({ ... })`), and
@@ -43,7 +47,7 @@ a global `WebSocket` (or one passed in), and ids come from `crypto`.
 
 **Nothing an adapter holds is deleted on its own.** A store the server
 closed for us (`unknown-store` after it was deleted, `forbidden` after
-we left the team) leaves its outbox and cache where they are, and so does
+we left the team) leaves its outbox and base where they are, and so does
 a replica retired by `sharedConnection`; the same codes can come from a
 misconfigured server or a lapsed token, and pending edits are worth more
 than the kilobytes. Forgetting a store is the app's call: when the user
@@ -56,41 +60,39 @@ replica.
 
 The outbox holds one op per batch, minus what later batches made moot: a
 new op takes over from whatever older pending ops wrote at or under the
-paths it writes, since under last-writer-wins those older writes could
-never decide a value again. Typing into one field keeps one op pending
-rather than one per keystroke, and deleting a record drops its pending
-edits. Nothing is re-stamped, so an older write to another field keeps
-its own time and the merge decides exactly as if every op had been sent.
+paths it writes, since those older writes could never decide a value
+again. Typing into one field keeps one op pending rather than one per
+keystroke, and deleting a record drops its pending edits. Nothing is
+re-stamped, so an older write to another field keeps its own time and
+the server decides exactly as if every op had been sent.
 
-On (re)connect the client sends the whole outbox in one `hello`, together
-with the store version it last saw (`db.version`). The server merges the
-ops and answers with a **delta**: the accepted diffs since that version,
-in order, followed by corrections for whatever the hello's own ops lost.
-A reconnect after a network blip therefore costs a few small messages,
-and a reconnect that missed nothing costs one empty one. The server keeps
-the last `deltaLog` accepted diffs (default 1000) for this, persisted by
+On (re)connect the client sends the outbox in one `hello` (up to a
+thousand ops, the rest once it is answered), together with the version
+and epoch it last saw (`db.version`). The server decides the ops and
+answers with a **delta**: the changes accepted since that version, in
+order, each with its timestamp, and what the hello's own ops lost. A
+reconnect after a network blip therefore costs a few small messages, and
+a reconnect that missed nothing costs one empty one. The server keeps the
+last `deltaLog` accepted changes (default 1000) for this, persisted by
 the SQLite and memory adapters so a restart or a deploy still answers
-with deltas, and falls back to a full snapshot when the log does not
-reach back far enough, when the client's cached version belongs to
-another life of the storage (storage wiped and re-seeded), or when one
-of the hello's ops was refused. A snapshot is encoded straight from the
-state and the encoding kept until the next accepted op, so a burst of
-first connections pays for one encoding, not one per client. Edits made while the hello was
-in flight are re-applied on top and sent. Nothing is lost on a reload
-while offline: the replica id, sequence numbers, pending ops, and the
-version are restored with the outbox, and the server ignores an op it
-has already seen.
+with deltas, and falls back to a full **snapshot**, the state and every
+record's clock, when the log does not reach back far enough or when the
+client's version belongs to another life of the storage (storage wiped
+and re-seeded, a backup put back). A snapshot is encoded straight from
+the state and the encoding kept until the next accepted op, so a burst of
+first connections pays for one encoding, not one per client. Edits made
+while the hello was in flight stay in the outbox and are sent after it.
+Nothing is lost on a reload while offline: the replica id, sequence
+numbers, pending ops, and the version are restored with the outbox, and
+the server ignores an op it has already seen.
 
 A replica away for longer than the server's **retention window** (30 days
-by default) is out of the game until it has synced: the ops it made before
-the window are refused as `expired`, since the deletions they might
-resurrect have been forgotten, and so are the ops it makes after, whatever
-they touch, until a snapshot has brought it up to date. The server keeps
-a **horizon**, the highest version among the barriers (re-added
-containers) it has settled, and an op made in sight of a lower version
-could be an edit of a container deleted and re-added since, which nothing
-tells apart any more. The client drops each refused op and resyncs, and
-the app hears `error` with code `expired` for each (see [What happened to
-my edit](model.md#what-happened-to-my-edit)); a replica that was online
-within the window is never caught by this, since its version is past any
-barrier that old.
+by default) gets its old ops refused: an op stamped before the window is
+refused whole as `expired`, since the deletions it might bring back and
+the replica's own progress have been forgotten, and nothing can tell
+whether it was already applied. The client drops each refused op, takes
+its edit back from `db.state`, and the app hears `rejected` with code
+`expired` for each (see [What happened to my
+edit](model.md#what-happened-to-my-edit)). What the client writes after
+it is back is stamped then and lands as any other edit; a replica that
+was online within the window is never caught by this.

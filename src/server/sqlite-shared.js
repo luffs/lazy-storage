@@ -11,7 +11,7 @@
 // A file written by lazy-storage before 1.0 keeps its rows in `leaves`, one
 // per leaf, which this adapter does not read: a store found there and not
 // in `records` is refused with code 'storage-format', so that it is
-// migrated (`fromLeaves`, sqlite-migrate.js) rather than served empty.
+// migrated (`fromLeaves`, below) rather than served empty.
 //
 // SQLite writes whole pages, 4 KB each, whatever part of them changed, so
 // what a commit costs the disk is the pages it touches, not the size of the

@@ -113,24 +113,53 @@ signs in with the last user's storage, so key the storage by user
 the app decides what becomes of the pending edits and opens the store
 with storage of its own. Sessions without a user own nothing.
 
-Opening a store is not the same as writing to it, so the store itself
-decides what a client may write:
+## Who may write what
 
-- `readOnly: true` locks the whole store: clients only read, and every op
-  they send is refused with code `forbidden`.
-- `readOnly: ['team', 'tasks/*/createdAt']` names paths clients may not
-  touch (same syntax as registers). An op with a leaf at or under one is
-  refused whole, with code `forbidden`; the client drops it and resyncs,
-  so the local state falls back in line. The server's own `store.patch` is
-  the way to write there. Deleting a record whose *field* is read-only is
-  allowed: the pattern protects the field, not the record.
-- `validate(diff, { user, replicaId, store })` judges every client op that
-  passed the read-only check. Return `false` or throw to refuse it (the
-  error's message reaches the client), return a diff to accept *that*
-  instead (a validator that strips fields the user may not set, say; the
-  client is corrected on what was stripped, silently), or return `true` or
-  nothing to let it through. It is synchronous and never sees the server's
-  own writes.
+Opening a store is not the same as writing to it, so the store itself
+decides what a client may write, record by record. `rules` names a rule
+per collection or singleton, and `'*'` for the rest:
+
+```js
+createStore({
+  initial: { tasks: {}, members: {}, settings: {} },
+  singletons: ['settings'],
+  rules: {
+    // before: the record as it is; after: as the op would leave it; null where there is none
+    tasks: (user, before, after) => (before ?? after).owner === user.id && (!after || after.owner === user.id),
+    members: (user, before, after, { state }) => state.members[user.id]?.role === 'admin',
+    settings: false,              // the server's alone
+    '*': true
+  },
+  validate: (diff, { user }) => !diff.tasks || Object.keys(diff.tasks).length <= 100
+});
+```
+
+- **A rule** is `true` (anyone), `false` (nobody but the server), or a
+  function `(user, before, after, { c, id, state, replica, changes, store })`
+  that returns `false` or throws to refuse; a thrown message reaches the
+  client. It is asked once per record an op touches, with the record
+  before the op and after it as it would be if every change landed, so
+  "only the owner may edit, and nobody may give a task away" is one line.
+  `state` is the whole store, for a rule that looks at other records (a
+  member's role); `changes` are the op's changes to this record.
+- **`readOnly: true`** locks the whole store: clients only read.
+  **`readOnly: ['settings']`** names the collections and singletons that
+  are the server's alone, the same as `false` rules for them.
+- **`validate(diff, { user, replicaId, store, changes })`** judges the
+  whole op after the rules, its changes as one diff in the tree's shape,
+  for what spans records (a limit per op, a pair of records that must
+  change together). Return `false` or throw to refuse.
+
+A refusal refuses the op whole, with code `forbidden`: the client drops
+it, takes its edit back from `db.state`, and hears `rejected`. The
+server's own `store.patch` is never judged, and is the way to write what
+clients may not. Every check is synchronous and never sees the server's
+own writes. A relay that carries the store judges with the same rules
+when they are part of the shape it is given (see
+[Relays](relays.md#working-while-the-server-is-away)), so a site refuses
+while the server is away what the server would.
+
+## Presence, peers, and eviction
 
 The user rides on the session (`store.session({ send, user })` if you drive
 sessions yourself), which powers two more features:
@@ -167,7 +196,7 @@ sessions yourself), which powers two more features:
   instead). It must be JSON
   within `presence.maxShare` bytes (default 4096), and
   `presence.validate(data, { user, replicaId, store })` judges it the
-  way `validate` judges an op: return `false` or throw to refuse it
+  way a store's `validate` judges an op: return `false` or throw to refuse it
   (the client hears an `error` with code `forbidden`), return a value to
   share that instead (strip a field, stamp in the user's id so a peer
   cannot claim to be someone else), return `true` or nothing to let it

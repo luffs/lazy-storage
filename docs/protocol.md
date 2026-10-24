@@ -4,41 +4,41 @@ Messages are JSON objects named by a `t` field. Any number of stores
 travel over one socket, so every message except `ping` and `pong` also
 carries `store`, the store id; `leave` closes one store's session and
 keeps the socket for the others. The shapes are declared as
-`ClientMessage` and `ServerMessage` in the typings.
+`ClientMessage` and `ServerMessage` in the typings. This is protocol 3
+(`PROTOCOL` in `lazy-storage/core`), the one 1.0 speaks.
 
 An **op** is one client batch:
 
 ```
-{ replicaId, seq, ts, v, epoch, diff, made? }
+{ replica, seq, ts, changes }
 ```
 
 `seq` counts the replica's ops from 1, and the server ignores one it has
-already merged, so a resend is safe. `ts` is a hybrid-logical-clock
-timestamp `[ms, count, replicaId]`. `diff` is a plain lazy-watch diff:
-nested objects, `null` for a deletion, and arrays as whole values (of
-primitives anywhere, of anything at a register path). `made`, when
-present, lists the paths (arrays of keys) of containers the batch made,
-the replica having had nothing at them before: the server re-adds what
-was deleted there rather than refusing the write as a stale edit (see
-[How conflicts are decided](model.md#how-conflicts-are-decided)). `v` is
-the store version the replica had applied when it made the batch, the
-`v` of the last snapshot, delta, patch or ack it took: what the batch was
-made in sight of, and `epoch` the storage life it counts in (null: a
-relay's own counting, see [Server to client](#server-to-client)). Beneath a re-added container
-(a barrier), a plain write or deletion lands only from a replica that had
-applied the re-add; an op without `v`, or whose `epoch` is not the
-server's, is judged as having applied nothing.
+already seen, so a resend is safe. `ts` is a timestamp in milliseconds
+(see [Time](model.md#time)). `changes` are the batch's changes, each one
+record's:
+
+```
+{ c, id?, path?, put | set | del }
+```
+
+`c` names a collection or singleton, `id` the record (absent for a
+singleton), and `path` the place inside it (absent or `[]` for the record
+itself). `put: object` makes or merges an object there, path by path;
+`set: value` writes a leaf (an array, a register, a scalar); `del: true`
+deletes. Each change is decided on its own (see [How conflicts
+resolve](model.md#how-conflicts-resolve)).
 
 ## A session, in order
 
-1. The client opens a store with `hello`: its whole outbox, and where its
-   knowledge of the store ends.
-2. The server merges those ops, then answers with a `snapshot` or a
+1. The client opens a store with `hello`: its outbox (the first 1000
+   ops), and where its knowledge of the store ends.
+2. The server decides those ops, then answers with a `snapshot` or a
    `delta` (chosen as described under [Offline](offline.md)). Either one
-   acknowledges the hello's ops through `seq`.
+   acknowledges the hello's ops through `seq`, and says what of them lost.
 3. From then on each client batch goes out as an `op`. The server answers
-   every op with an `ack` or an `error`, and broadcasts every accepted
-   diff as a `patch` to every session on the store, the sender included.
+   every op with an `ack` or an `error`, and broadcasts what landed as a
+   `patch` to every session on the store, the sender included.
 4. `presence` arrives whenever a session says hello, ends, or shares
    something new, and a `closed` message ends the store for this client. A `closed` without
    a `store` ends the socket itself: the request did not authenticate.
@@ -47,90 +47,92 @@ server's, is judged as having applied nothing.
 
 | Message | Fields | Meaning |
 |---|---|---|
-| `hello` | `proto`, `replicaId`, `ops`, `since?`, `epoch?`, `share?`, `presence?`, `fetch?`, `follow?` | Connect or reconnect. `proto` is the protocol version the client speaks (`PROTOCOL` in `lazy-storage/core`); a server that speaks another answers `closed` with code `outdated`. `ops` is the outbox (its first 1000 ops); `since` is the store version the client has seen everything up to and `epoch` the storage life it belongs to, asking for a delta; `share` is what this client shares with its peers, restored on reconnect; `presence: false` asks not to be sent presence, and every hello says it again either way (a later hello without it turns presence back on, and brings the whole list); `fetch: true` says the client can fetch a large snapshot over HTTP; `follow: false` (a relay's, for a client it fans out to) makes a write-only session |
-| `op` | `op` | One batch, live |
-| `leave` | | Close this store's session; the socket stays up |
-| `share` | `data` | What this session shares with every peer, a JSON value within `presence.maxShare` that `presence.validate` lets through; `null` clears it. Presence goes out again if it changed; refused with `forbidden` while the store's presence is off |
+| `hello` | `proto`, `replica`, `ops`, `since?`, `epoch?`, `clocks?`, `share?`, `presence?`, `fetch?`, `follower?` | Connect or reconnect. `proto` is the protocol the client speaks; a server that speaks another answers `closed` with code `outdated`. `since` is the store version the client has everything up to and `epoch` the storage life it belongs to, asking for a delta; `clocks: true` asks for the records' clocks with a snapshot (a client judging its own pending edits does); `share` is what this client shares with its peers, restored on reconnect; `presence: false` asks not to be sent presence, and every hello says it again either way; `fetch: true` says the client can fetch a large snapshot over HTTP; `follower: true` is a relay's own session (below) |
+| `op` | `op`, `as?` | One batch, live |
+| `leave` | `as?` | Close this store's session; the socket stays up |
+| `share` | `data`, `as?` | What this session shares with every peer, a JSON value within `presence.maxShare` that `presence.validate` lets through; `null` clears it. Refused with `forbidden` while the store's presence is off |
+| `vouch` | `as`, `credential`, `replica` | A follower's: may this client open the store? (below) |
 | `ping` | | Keepalive; answered with `pong` |
 
 ## Server to client
 
 | Message | Fields | Meaning |
 |---|---|---|
-| `snapshot` | `state` or `fetch`, `ts`, `seq`, `registers`, `v`, `epoch`, `lost?` | The whole state, to overwrite with. For a client that can fetch, when the state is `httpSnapshots.threshold` bytes or more: `fetch` names the route to fetch `{ v, epoch, state }` from instead, and `v` is only where the store stood at the hello; the fetched document says where it is |
-| `delta` | `patches`, `ts`, `seq`, `registers`, `v`, `epoch`, `lost?` | The accepted diffs since the client's `since`, in order, followed by corrections for what the hello's own ops lost; applied as patches. On either answer, `lost` is `[{ seq, paths }]`: which leaves of which of the hello's ops lost |
-| `patch` | `diff`, `ts`, `v` | An accepted diff from any replica, and the version it made |
-| `ack` | `seq`, `ts`, `correction`, `lost?`, `v` | The op was merged; `correction` is a diff with the server's values at the leaves it lost, or null, and `lost` the paths of those leaves; `v` the store's version with the op in it |
-| `error` | `seq?`, `code?`, `message`, `now?`, `ts?`, `retryAfter?` | With `seq`: that op was refused, for the reason in `code` (below). Without: the message itself was bad (not JSON, an unknown type, a hello without a replica id) |
-| `presence` | `peers`, or `left?`, `joined?`, `shared?` | With `peers`: every session as `{ replicaId, user, key, data }`, `key` being what presence groups users by and `data` what the session shares; sent right after the hello is answered, the first one or a later one that turns presence on. Otherwise a delta, applied in the order `left` (replica ids), `joined` (peers), `shared` (`{ replicaId, data }`), batched per `presence.every`. Only with the store's presence on, and never to a session whose last hello opted out |
-| `closed` | `code`, `message` | Final for this store on this socket; the client goes offline for it and does not reconnect on its own. Without a `store`: final for the socket, which the server then closes with code 4401; the connection stops reconnecting and every client on it reports the reason |
-| `relay` | `status` | From a relay, never a server: `'local'` after each answer it makes from its own copy while the server is away, `'through'` (from a browser's shared connection) once its replica is answered by the server again. The client keeps it as `db.relayed`; a client that predates it ignores it, as it does any message it does not know |
+| `snapshot` | `state` or `fetch`, `clocks?`, `seq`, `v`, `epoch`, `now`, `shape`, `lost?`, `relay?` | The whole state, to start from. `clocks` lists `[c, id, clock]` per record when the hello asked. For a client that can fetch, when the state is `httpSnapshots.threshold` bytes or more, `fetch` names the route to fetch `{ v, epoch, state, clocks }` from instead |
+| `delta` | `ops`, `seq`, `v`, `epoch`, `now`, `shape`, `lost?`, `relay?` | The changes accepted since the client's `since`, as `[{ v, ts, changes }]`, in order |
+| `patch` | `changes`, `ts`, `v` | What landed of an op from any replica, or a server write, with its timestamp and the version it made |
+| `ack` | `seq`, `v`, `now`, `lost?`, `as?`, `replica?` | The op was decided; `lost` lists what of it lost as `[{ c, id, path, why }]`, `why` being `missing`, `newer` or `stale`; `v` the store's version with the op in it |
+| `error` | `seq?`, `code?`, `message`, `retryAfter?`, `as?`, `replica?` | With `seq`: that op was refused whole, for the reason in `code` (below). Without: the message itself was bad (not JSON, an unknown type, a hello without a replica id) |
+| `presence` | `peers`, or `left?`, `joined?`, `shared?` | With `peers`: every session as `{ replicaId, user, key, data }`, sent right after the hello is answered. Otherwise a delta, applied in the order `left` (replica ids), `joined` (peers), `shared` (`{ replicaId, data }`), batched per `presence.every`. Only with the store's presence on, and never to a session whose last hello opted out |
+| `closed` | `code`, `message` | Final for this store on this socket; the client goes offline for it and does not reconnect on its own. Without a `store`: final for the socket, which the server then closes with code 4401 |
+| `relay` | `status` | From a relay, never a server: `'local'` while it answers from its own copy with the server away, `'through'` once the server answers again. The client keeps it as `db.relayed` |
+| `lost`, `rejected`, `reset` | as the client events | From a browser's shared connection: what the server said of an op the browser's replica sent for this tab |
 | `pong` | | |
 
-Across these: `ts` is the server's clock on `snapshot`, `delta`, and
-`ack`, and the op's own timestamp on `patch`; `seq` on `snapshot` and
-`delta` is the last op of this replica the server holds, so the client
-can drop acknowledged outbox entries; `registers` are the server's
-register patterns, for the client to check against its own; `v` is the
-store version the message brings the client up to, and `epoch` the life
-of the storage it counts in. An answer a relay makes from its own copy
-(a browser's shared connection, or a relay (`lazy-storage/relay`) once its copy holds
-offline edits) carries `epoch: null` and versions of the relay's own, and
-`seq` 0: it acknowledges nothing, and the next hello the server itself
-answers is answered with a snapshot.
+Across these: `now` is the server's time, which the client adopts as the
+offset of its clock; `seq` on `snapshot` and `delta` is the last op of
+this replica the server holds, so the client can drop acknowledged ops;
+`shape` is a hash of the server's declaration (`initial`, `singletons`,
+`registers`, `parents`), and a client whose own differs reports an
+`error` with code `shape-mismatch`; `v` is the store version the message
+brings the client up to, and `epoch` the life of the storage it counts
+in. An answer a relay makes from its own copy says `relay: true` and
+counts in the relay's own versions and epoch, so the next hello the
+server itself answers is answered with a snapshot, and no `reset` is
+heard.
 
 ## Refusal codes
 
 An `error` with a `seq` names one of these, and the client acts on it
-without help from the app, which only hears an `error` event:
+without help from the app: it drops the op, takes its edit back from
+`db.state`, and emits `rejected` with the code.
 
-| Code | Why | What the client does |
-|---|---|---|
-| `invalid` | The op breaks the model: an array of objects outside a register, an array fragment, a malformed op | Drops the op and resyncs from a snapshot |
-| `forbidden` | A leaf under a read-only path, `validate` refused, or a deletion of a top-level container of `initial` | Same |
-| `expired` | Stamped before the retention window, or made in sight of a store version below the horizon (the barriers settled since; see [Persistence](server.md#persistence)) | Same |
-| `too-large` | More leaves than `maxLeaves` | Same |
-| `rate-limited` | Beyond the user's token bucket, or after such a refusal and before the next hello; `retryAfter` says how long in ms | Keeps the op, sends nothing more live, and resends its outbox in a hello after `retryAfter` |
-| `clock-skew` | Stamped more than `maxSkew` ahead of the server's clock; `now` is the server's time, `ts` the refused stamp | Adopts the server's time, re-stamps the pending ops, sends them again; no error reaches the app |
+| Code | Why |
+|---|---|
+| `invalid` | The op breaks the shape: a collection or singleton the store does not have, a change that is not one of put, set or del, a record of the wrong kind, a forbidden key |
+| `forbidden` | A rule, `readOnly` or `validate` refused it |
+| `expired` | Stamped before the retention window (see [Persistence](server.md#persistence)) |
+| `too-large` | More changes than `maxChanges` |
+| `rate-limited` | Beyond the user's token bucket, or after such a refusal and before the next hello; `retryAfter` says how long in ms. The client keeps the op, sends nothing more live, and resends its outbox in a hello after `retryAfter`; no `rejected` |
 
 ## Closed codes
 
 `evicted` (`closeSessions` on the server), `forbidden` (`authorizeId`
-or `authorize` refused the store, when it was opened or on `revalidate()`), `unknown-store` (the resolver returned null, or the
+or `authorize` refused the store, when it was opened or on
+`revalidate()`), `unknown-store` (the resolver returned null, or the
 store factory threw), and `invalid-store` (an id outside the allowed
 alphabet, or a message without one) each end one store. `unauthorized`
 (`authenticate` returned nothing) ends the socket: it arrives without a
 `store`, and the close that follows carries code 4401 in case the message
 did not make it. A socket closed with code 4001 was disconnected by the
-app (`disconnect()`) or its session ran out (`expiresAt`), which is not final: the client reconnects, and
-`authenticate` decides again. `replica-taken` ends one store: the hello named a
-replica another user owns (see [Authentication](auth.md)). `outdated` ends
-one store: the hello's `proto` is not the protocol the server speaks (a
-page left open across a deploy), and the app's answer is to reload.
-`unavailable` is the one that is not final: the store was
+app (`disconnect()`) or its session ran out (`expiresAt`), which is not
+final: the client reconnects, and `authenticate` decides again.
+`replica-taken` ends one store: the hello named a replica another user
+owns (see [Authentication](auth.md)). `outdated` ends one store: the
+hello's `proto` is not the protocol the server speaks (a page left open
+across a deploy, or a client from before 1.0), and the app's answer is to
+reload. `unavailable` is the one that is not final: the store was
 disposed under an open session (a registry released it), or another
 process serves it for now (see the lease under
-[Persistence](server.md#persistence)), and the client says hello again after a
-moment, which loads it afresh; nothing pending is lost and the app hears
-no `closed`.
+[Persistence](server.md#persistence)), and the client says hello again
+after a moment, which loads it afresh; nothing pending is lost and the app
+hears no `closed`.
 
 ## A relay's link
 
-A relay that fans out (see [One read for many clients](relays.md#one-read-for-many-clients-fan-out))
-speaks the store-tagged messages above on its link for its own session on
-each store (`hello`, `leave`, and what the store sends it), and these:
+A relay (see [Relays](relays.md)) dials the server's relay route as
+itself and opens each store it carries with a hello that says `follower:
+true`. On that session it speaks for clients of its own, each known by a
+name the relay gives it on the store, `as`:
 
 | Message | Direction | Fields | Meaning |
 |---|---|---|---|
-| `vouch` | relay → server | `grant`, `socket?`, `store`, `replicaId`, `credential` | May this client read this store? `grant` is the relay's name for the client on the store, `socket` for its socket; `credential` is `{ headers?, query? }` |
-| `unvouch` | relay → server | `grant` | The client left |
-| `share` | relay → server | `grant`, `data` | What the client shares, judged as its own |
-| `admitted` | server → relay | `grant`, `store`, `peer`, `presence`, `until` | Yes: how presence shows it, whether the store has presence at all (the relay's own session hears it only while a client behind it wants it, and its hellos say so either way), and when its session runs out (or null) |
-| `refused` | server → relay | `grant`, `store`, `code`, `message`, `retryAfter?` | No: the code its own socket would have heard (`unauthorized`, `forbidden`, `unknown-store`, `replica-taken`), or `rate-limited` / `unavailable`, which are not final |
-| `revoked` | server → relay | `grants`, `code`, `message` | Access taken away: `reauthenticate` (the client's socket is closed with 4001), `forbidden`, `evicted`, `unavailable` (the store unloaded: say hello again) |
-| `error` | server → relay | `grant`, `store`, `code`, `message` | A client's share refused |
+| `vouch` | relay → server | `as`, `credential`, `replica` | May this client open the store? `credential` is `{ headers?, query? }`, what its own socket would have carried |
+| `admitted` | server → relay | `as` | Yes: the session holds a grant for the client, and lists it in presence |
+| `refused` | server → relay | `as`, `code`, `message` | No: the code its own socket would have heard (`unauthorized`, `forbidden`, `replica-taken`) |
+| `revoked` | server → relay | `as`, `code`, `message` | Access taken away (`evicted`, `forbidden`, a disconnect) |
+| `op`, `share`, `leave` | relay → server | `as` | As the client's own, judged as its user's |
+| `ack`, `error` | server → relay | `as`, `replica` | For the client's op, routed back to it by `as`, or by `replica` once it has gone |
 
-The relay's own session on a store is closed `unused` when no client
-behind it is let in to the store (not final: it says hello again once one
-is), and `forbidden` when the relay may not carry the store (its clients
-there are then passed through on their own sockets, see above).
+What a follower's own session is sent besides is the store's patches and
+presence, as any session is, and the records' clocks with every snapshot.

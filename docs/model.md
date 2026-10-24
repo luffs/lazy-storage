@@ -1,311 +1,224 @@
 # The model
 
-State is a tree of plain objects and JSON leaves, and **lists are objects
-keyed by id**. That single rule is what makes offline edits mergeable: a
-change addresses a record by identity, so two people adding, editing, or
-removing different records never collide, and an edit made on a stale
-replica still lands on the record it meant.
+A store is **collections of records**, and **singletons**. A collection
+is records keyed by id; a singleton is one record without an id; and a
+record is a JSON object of any depth. The server and every client
+declare this top level alike, in `initial`:
 
-Arrays are **whole values**. An array of primitives (a set of tags, a list
-of ids, a pair of coordinates) may live anywhere; it is written and merged
-as one leaf, so the newer array wins as a unit. An array holding objects
-is refused, on the client (reverted and reported through the `error`
-event) and on the server, because a list of records with unit semantics
-would lose one person's add whenever another person reordered. A list of
-records is a keyed map with a position on each record, below. The
-`registers` option remains for storing an array of anything as one value
-on purpose: a `*` segment matches any one segment, so `tasks/*/subtaskOrder`
-declares one register per task, and a client whose declaration differs
-from the server's is told so.
+```js
+const shape = {
+  initial: { tasks: {}, subtasks: {}, settings: { theme: 'light' } },
+  singletons: ['settings'],                 // one record, not a collection
+  parents: { subtasks: { taskId: 'tasks' } } // a subtask names its task
+};
+const store = createStore({ ...shape, storage });       // the server
+const db = createClient({ ...shape, store: 'team-1', transport });   // every client
+```
+
+A key of `initial` is a collection when it is `{}` (or holds records),
+and a singleton when `singletons` names it or its value is not an
+object (`build: ''`). A client cannot delete a collection or a
+singleton, only what is in it. A client whose declaration differs from
+the server's hears an `error` with code `shape-mismatch`.
+
+## Records, paths and what merges
+
+Every path inside a record merges on its own. Two people who change
+`tasks.k.meta.color` and `tasks.k.meta.size` at once both keep their
+change; two who change the same path keep the later one. So nest what
+belongs to the record, at any depth, and it merges as finely as it is
+written.
+
+Three things refine that:
+
+- **An array is a leaf.** It is written and merged whole (`tags`, a pair
+  of coordinates, a list of ids) and may hold anything. A list that
+  several people add to at once belongs in a keyed map with positions
+  (below), where each add is a record of its own.
+- **A register is a leaf.** A path declared in `registers`, with `*` for
+  any one segment, is written and merged whole even when its value is an
+  object: `tasks/*/geometry` keeps a window's x and y together, and
+  `events/*` makes each record of `events` a value of its own. Assigning
+  a whole object outside a register replaces it too (the keys it lacks
+  are deleted), but each of its paths then merges with what others
+  write meanwhile.
+- **What has a life of its own is a collection.** Records of a
+  collection are added, moved and deleted on their own. A child names
+  its parent in a field, and `parents` declares it: `subtasks` whose
+  `taskId` names a task are that task's children. The server never lets
+  a child in while its parent is missing, and deletes the children with
+  the parent.
 
 ## Lists
 
 An ordered list of records is a keyed map whose records each carry a
-**position key**, and `db.list(path)` is its ordered view:
+**position key**, `pos`; its order is the keys' string order, ties by
+id. `db.list(path)` reads and writes one, a collection or a map at a
+path inside a record, and `inOrder(map)` gives a map's records in order,
+for rendering:
 
 ```js
-const tasks = db.list('tasks');                    // state.tasks, an object keyed by id
-tasks.all()                                        // records sorted by position, ties by id
-const id = tasks.add({ title: 'Milk' });           // at the end; or { before: id }, { after: id }, { at: index }
+const tasks = db.list('tasks');                       // a collection
+tasks.all();                                          // the records in order
+const id = tasks.add({ title: 'Milk' });              // at the end; or { before: id }, { after: id }, { at: index }
 tasks.move(id, { at: 0 });
 tasks.remove(id);
-db.list(['tasks', id, 'subtasks']).add({ title: 'Skimmed' });   // nested lists are just paths
+db.list(['state', 'lists', 'items']).add({ text: 'Eggs' });   // a list inside a singleton
+inOrder(db.state.tasks);                              // the same order, from any map: a client's, a framework's mirror
 ```
 
-An add or a move writes one field, `pos`, on one record, and nothing else
-in the list changes. So two people inserting at the same spot while apart
-both keep their records, in the same order everywhere (ties fall to the
-id); a move never loses to an unrelated edit; and a deletion is just the
-record's deletion. The server needs no declaration and holds no order
-register. Keys are short strings that sort as strings: appending counts
-up (`a0`, `a1`, ... `az`, `b00`), and only inserting between two existing
-keys lengthens one, by a character every few inserts at the very same
-spot.
+An add or a move writes one field, `pos`, on one record, and nothing
+else in the list changes. So two people inserting at the same spot while
+apart both keep their records, in the same order everywhere; a move
+never loses to an unrelated edit; and a deletion is the record's
+deletion. Keys are short strings: appending counts up (`a0`, `a1`, ...
+`az`, `b00`), and only inserting between two keys lengthens one, by a
+character every few inserts at the very same spot. An app that keeps an
+array of its own (a drag-and-drop list) hands the order back with
+`tasks.reconcile(ids)`, which writes the fewest positions that make the
+sort agree.
 
-An app that keeps its own array (a drag-and-drop list, a Vue store) hands
-the order back with `tasks.reconcile(ids)`, which writes the fewest
-positions that make the sort agree: the longest run of records already in
-order keeps its keys. Records without a position sort last until placed.
+## How conflicts resolve
 
-### Plain arrays
+Every op carries a timestamp: milliseconds, stamped by its client so
+that an edit made after seeing something is always newer than it, and
+clamped by the server to its own time, so a clock that runs fast wins
+nothing (see [Time](#time)). Each record has a **clock**: for every path
+inside it, when it was written, when the container there was made (its
+**birth**), and, for a path deleted inside a living record, when it was
+deleted. The server decides each change of an op on its own, against
+that clock:
 
-Declare the list paths and the client presents them as arrays:
+- A **write** lands when its record and its parent are there, and
+  nothing at its path is newer. One that replaces a container also needs
+  nothing beneath it to be newer.
+- A **deletion** lands when nothing at or beneath its path is newer; for
+  a record, its children in other collections count as beneath it. So a
+  deletion made offline at nine does not take away what someone edited
+  at ten.
+- A container that was not there before (a new record, a new nested
+  object) is **made**, with what it holds, unless something deleted at
+  its path is newer.
+- Every change also needs to be no older than the birth of the
+  containers above it: an edit made before a record was made again is an
+  edit of the record that was deleted, and is not taken.
+
+A deleted record leaves nothing behind: its row and its clock go. A
+write to it finds no parent, and a record made again under the same id
+has a new birth that older edits lose to. Only a deleted path inside a
+living record keeps its time, in the record's clock, until it is older
+than the retention window.
+
+What lost is reported, with why: `missing` (the record, the parent, or a
+child's parent record was not there), `newer` (a later write), or
+`stale` (made before the container was made again). One gap remains,
+and it is narrow: an edit made offline, after a record was deleted and
+made again under the same id, by someone who never saw either, lands on
+the new record. Time cannot tell what the writer had seen. With random
+ids it cannot happen, and for an undone deletion it is what one wants.
+
+### What happened to my edit
+
+`db.state` always shows what won, so an app that only renders needs
+nothing more. One that wants to tell its user hears it:
 
 ```js
-const db = createClient({ connection, store: 'team-1', initial: { tasks: [] }, lists: ['tasks', 'tasks/*/subtasks'] });
-db.state.tasks.push({ title: 'Milk' });             // an id is minted and written back
-db.state.tasks.splice(1, 0, { title: 'Eggs' });
-db.state.tasks[0].done = true;
-db.state.tasks[0].subtasks = [{ title: 'Skimmed' }];
-db.state.tasks = db.state.tasks.filter(t => !t.done); // or sort, reverse, reorder
+db.on('lost', ({ seq, lost }) => {
+  // lost: [{ c: 'tasks', id: 'x', path: ['title'], why: 'newer' }]
+});
+db.on('rejected', ({ seq, code, message, changes }) => {
+  // the server refused the op whole (forbidden, expired, invalid, too-large), or
+  // the shape refused the batch here (seq null): taken back
+});
+db.on('reset', ({ epoch, previous }) => {
+  // the server's storage started over (a backup put back): previous.state is what this client showed
+});
+db.isPending('tasks/x/title');   // an edit not yet acknowledged writes at, beneath, or above the path
 ```
 
-`db.state` is then a view: the same tree with every list as a real array
-in position order, records carrying their `id` and no position. The synced
-state underneath, `db.wire`, keeps the keyed maps with positions, and
-everything else (persistence, deltas, undo, `db.list`) works on it as
-before. The client keeps the two in step: an edit inside a record maps its
-index to the record's id; a splice, a reorder, or a replaced array resyncs
-that list by id, deleting what left, adding what appeared, and writing the
-fewest positions that make the wire order match. Changes from others
-arrive as splices at their sorted place, moves, and field patches, tagged
-`origin: 'remote'` for the app's listeners. A record pushed without an id
-gets one in the next batch; read it back from the array rather than from
-the object you pushed. A record read from the array (`const task =
-db.state.tasks[i]`) stays that record wherever a sort, a splice, or
-another client's move takes it, and so does a listener on it
-(`LazyWatch.on(task, …)`); `splice` hands back the records it removed,
-so the usual move (`tasks.splice(j, 0, ...tasks.splice(i, 1))`) keeps
-them. A list path cannot also be a register.
+### The client: base and pending
 
-### With a UI framework
+A client keeps the server's state apart from its own edits. Its
+**base** is the state as the server last told it, with each record's
+clock; its **outbox** holds the ops the server has not acknowledged.
+`db.state` is the base with the outbox replayed on top, judged as the
+server will judge it, so an edit of one's own that loses to a newer one
+already falls away when the newer one arrives, and an edit to a record
+someone deleted goes with the record. When a patch arrives, the records
+it touched are worked out again and written into `db.state`, so the app
+sees only what changed; when an ack arrives, its op leaves the outbox
+and its records are worked out again. `db.base` and `db.clockOf(c, id)`
+show what the client is working from.
+
+### Time
+
+A timestamp is a whole number of milliseconds. A client stamps with
+`max(wall clock + offset, highest seen + 1)`: `offset` comes from the
+server's `now` in every snapshot, delta and ack, so a clock that runs
+slow is corrected, and `highest seen` is the largest timestamp it has
+received, so its edits sort after everything it has seen. The server
+clamps a timestamp ahead of its own time to its own time and stamps its
+own writes with its own time. Nothing is ever re-stamped.
+
+## Undo
+
+Each client has a lazy-watch undo manager with a `record` filter that
+declines remote batches, so undo and redo only touch this replica's own
+edits, and they sync like any other edit. An undone deletion makes the
+record again. An undone write writes the old value with a new time, and
+so overwrites a teammate's later write of the same path.
+
+## With a UI framework
 
 Two entries wrap the client for Vue and React; the pattern behind each
 is a few lines for any other framework.
 
 `lazy-storage/vue` keeps a reactive mirror. Vue cannot track `db.state`
-(a remote patch lands underneath any proxy Vue wraps around it, and
-nothing re-renders), so `useClient(db)` returns a plain copy kept
-reactive and patched in place on every batch, local or remote, together
-with refs for the client's status, presence, outbox size, closed reason,
-and undo state:
+(a remote patch lands underneath any proxy Vue wraps around it), so
+`useClient(db)` returns a plain copy kept reactive and patched in place
+on every batch, together with refs for the client's status, presence,
+outbox size, closed reason, and undo state:
 
 ```js
 import { useClient } from 'lazy-storage/vue';
+import { inOrder } from 'lazy-storage';
 
 const { state, status, presence, canUndo } = useClient(db);   // in setup()
-db.state.tasks.push({ title: 'Ship it' });                    // writes go to the client; the mirror follows
+// <li v-for="task in inOrder(state.tasks)" :key="task.id">
 ```
 
-In the Options API the same call fills `data()`
-(`data() { return { ...useClient(this.db), title: '' } }`). There is one
-mirror per client, however many components call `useClient`: the first
-makes it, the rest share it (a list of two hundred rows holds one copy
-of the state and patches it once per batch), and it stops following the
-client when the last of them unmounts. The mirror is read-only; writes
-go to `db.state`.
-
-A component that edits what it shows asks for a writable state instead,
-and binds it like any data:
-
-```js
-const { state } = useClient(db, { writable: true });   // or in data()
-state.title = 'Renamed';                                // goes to the client
-state.tasks.push({ title: 'Ship it' });                 // a list's methods run on the client's array
-```
-
-```html
-<input v-model="state.title">
-```
-
-That state is a view, not a copy. Reads come from `db.state`, so a write
-is read back at once, before its batch has closed; each read also
-touches the same path in the shared mirror, which is what Vue tracks, so
-the component renders again when a batch lands, its own, a teammate's,
-or an undo. A view or a Vue object assigned into it is copied in as plain
-data. The views are one per path and client, so the same path is the
-same object (`indexOf` finds it), and Vue leaves them as they are in
-`data()` and `reactive()`. Two things to know: a `computed` over the view
-catches up when the batch lands (in the same tick), while a direct read
-is current at once; and every read goes through two proxies, so a list of
-many thousands of rows renders faster from the read-only mirror. Writing
-to a path that has been deleted throws.
+There is one mirror per client, however many components call
+`useClient`, and it stops following the client when the last of them
+unmounts. A component that edits what it shows asks for a writable state
+instead (`useClient(db, { writable: true })`): reads come from
+`db.state`, so a write is read back at once, and each read touches the
+same path in the shared mirror, which is what Vue tracks.
 
 `lazy-storage/react` needs no mirror: `useClient(db)` subscribes through
 `useSyncExternalStore`, so a component reads `db.state` directly and
-re-renders on every batch, outbox change, and event, with one
-subscription per client however many components use it:
+re-renders on every batch, outbox change and event.
+`useClientSelector(db, select, isEqual)` re-renders a component only
+when what it selects changes:
 
 ```jsx
-import { useClient } from 'lazy-storage/react';
-
-function List({ db }) {
-  const { state, status } = useClient(db);
-  return <ul>{state.tasks.map(task => <li key={task.id}>{task.title}</li>)}</ul>;
-}
-```
-
-A component that reads a little of the state (a row of a long list, a
-badge) picks it with `useClientSelector(db, select, isEqual)` and
-re-renders only when that changes, not on every batch, share, or status
-event. The selection comes out as plain data (the state's own records
-keep their identity as they change, so they could never compare
-unequal), compared deeply unless `isEqual` says otherwise, and stays the
-same object until it changes, so it is safe in a dependency list:
-
-```jsx
-import { useClientSelector } from 'lazy-storage/react';
-
 function Row({ db, id }) {
-  const task = useClientSelector(db, state => state.tasks.find(t => t.id === id));
+  const task = useClientSelector(db, state => state.tasks[id]);
   return <li>{task?.title}</li>;
 }
-const status = useClientSelector(db, (state, db) => db.status);
 ```
 
-Five hundred rows on `useClient` all re-render for an edit to one of
-them, or a peer moving a cursor; on `useClientSelector` one row does,
-and none for the cursor (`npm run bench:client`).
-
-A view that keeps rows of its own (a data table, a search index, a
-cache keyed by id) follows a collection record by record instead:
-`db.collection('screens').watch(changes => ...)` hears, once per batch,
-every record under `state.screens` the batch changed, as `{ type:
-'insert', id, record }`, `{ type: 'update', id, record, previous }` or
-`{ type: 'remove', id, previous }`. `record` and `previous` are plain
-copies, new objects each time, so a view that compares rows by identity
-sees the changed one, and `previous` is the record as it was before the
-batch, for a filtered list that wants to know whether a row just started
-or stopped matching. The batch's `meta` comes second, `origin: 'remote'`
-for the server's:
-
-```js
-const stop = db.collection('screens').watch((changes, meta) => {
-  for (const change of changes) table.apply(change);   // insert, update, remove by id
-});
-```
-
-An app that keeps its own arrays instead, as a Vue store or a
-drag-and-drop list does, overwrites the view's arrays with them after a
-change (`LazyWatch.overwrite(db.state.tasks, plainTasks)`) and copies them
-back on remote, undo, and redo batches; lazy-storage diffs the arrays by
-id and writes only what changed. The todo app at
-github.com/luffs/kimi-wa-best-todo is that shape in full.
-
-## How conflicts resolve
-
-Every op carries a hybrid-logical-clock timestamp. The server keeps the
-timestamp of the last accepted write per leaf path and decides per leaf:
-
-- A **write** wins if nothing at that path is newer. Two people editing
-  different fields of the same record both land; editing the same field,
-  the later timestamp wins everywhere, regardless of who reconnects first.
-- A **deletion** wins if nothing at or below the path is newer. It leaves a
-  tombstone, so an older edit that arrives later cannot resurrect a
-  partial record. A newer edit of a single field of a deleted record is
-  also refused (a deleted record does not come back as one field); a
-  newer *record* write, an object with an `id`, re-adds it, and so does a
-  container its writer **made**: a client whose state had nothing at the
-  path, having seen the deletion or never had the container, names the
-  path in its op (`made`), since what it writes there is new, not a stale
-  edit of what was deleted. A client that still holds the old container
-  (offline when it was deleted) is not making it, and its edits stay
-  refused. Either way the lifted tombstone becomes a **barrier** that
-  remembers the deletion, the write that re-added the container, and the
-  store version that write became, and which replicas re-added it.
-  Whether an edit beneath it is stale is not a matter of time but of what
-  its writer had seen: every op carries the store version its replica had
-  applied when the batch was made (`v`), and a plain write or deletion
-  under a barrier lands only from a replica that had applied the re-add,
-  or that re-added the container itself (it has what it wrote, whatever
-  it has heard back since: the record it creates and fills in offline,
-  batch after batch, lands whole). So an edit of the deleted
-  container is refused however late it was made (a clock that runs ahead
-  cannot smuggle one in), what was re-added holds only what was written in
-  sight of it, and an edit made in sight of it is judged by timestamp as
-  anywhere. Another replica re-adding the same container after the
-  deletion lands too, whichever arrives first. A barrier says the
-  container is there: an empty object written at its path leaves it
-  standing, and on load it is `{}` at that path. A deletion refused under
-  a barrier of something no longer there is moot: refused by nothing,
-  reported to no one. Nothing is lifted beneath a tombstone that stays,
-  nor beneath a barrier the writer may not write under. Once a barrier is
-  older than the retention window it settles into a plain container, and
-  the store's **horizon** moves up to its version: an op made in sight of
-  less is refused as expired (see [Persistence](server.md#persistence)).
-  The server's
-  own `store.patch` is never held back this way: it is the authority, not
-  a replica that may be stale, and whatever it writes at a deleted path
-  re-adds it, `id` or not, so a record the server recreates under a key it
-  had deleted (a process that came back, an entry rebuilt from another
-  source) needs no ceremony. `store.apply`, a replica's op taken on trust,
-  is judged like any other.
-- An **array** is one leaf, whether an array of primitives anywhere or a
-  declared register: the newest whole value wins. A list of records is
-  not an array on the wire (see [Lists](#lists)), so its records merge
-  one by one.
-
-A client whose op lost receives a correction with the server's values and
-falls back in line. The server is the only merge point, which is what
-keeps this small: clients never merge with each other, and old tombstones
-can be forgotten on a schedule (see [Persistence](server.md#persistence)).
-
-### What happened to my edit
-
-The state always shows what won, so an app that only renders needs
-nothing more. One that wants to tell its user hears it:
-
-```js
-db.on('conflict', ({ seq, lost }) => {
-  // lost: [{ path: ['tasks', 'x', 'title'], mine: 'Buy milk', theirs: 'Buy oat milk' }]
-  // theirs is null where the record was deleted under the edit
-});
-db.on('rejected', ({ seq, code, message, diff }) => {
-  // the server refused the op (forbidden, expired, invalid, too-large), or
-  // the model refused the batch locally (seq null): dropped, the state back in line
-});
-db.on('reset', ({ previous }) => {
-  // the server's storage started over (a backup put back): the state is
-  // now the server's, and previous.state is what this client showed
-});
-db.isPending('tasks/x/title');   // an edit not yet acknowledged writes at, under, or over the path
-```
-
-A conflict is reported when the op's acknowledgement arrives, or, for an
-op made offline, when the reconnect is answered. Paths are the synced
-state's: under a list declared as an array, a record is addressed by its
-id (`['tasks', id, 'title']`). `isPending` changes when the outbox does,
-which the `sync` event announces (and `useClientSelector` follows). Under
-a `sharedConnection`, a tab's own edits are acknowledged once the
-browser's replica holds them, and every tab hears the replica's
-conflicts, refusals, and resets.
-
-Clocks are hybrid logical clocks, so a replica whose wall clock runs slow
-is pulled forward by whatever it receives. A clock that runs *fast* would
-win every conflict and drag the server's clock with it, so the server
-refuses any op stamped more than `maxSkew` (default five minutes) ahead of
-its own time, telling the client the server's time. The client adopts it
-as an offset, re-stamps its pending ops, and sends them again; nothing is
-lost, and the app hears nothing about it.
-
-## Undo
-
-Each client has a lazy-watch undo manager attached with a `record` filter
-that declines remote batches, so undo and redo only ever touch this
-replica's own edits, and they sync like any other edit. Because records
-are keyed, a teammate's insert does not invalidate your history; only a
-change of shape under a path you edited (an array replaced whole, a record
-replaced by a leaf) drops the affected steps. With lists declared, undo
-runs on the synced state and shows in the array view like any other change.
+A view that keeps rows of its own follows a collection record by
+record: `db.collection('tasks').watch(changes => ...)` hears, once per
+batch, every record of `tasks` the batch changed, as `{ type: 'insert',
+id, record }`, `{ type: 'update', id, record, previous }` or `{ type:
+'remove', id, previous }`, plain copies each time.
 
 ## Scope
 
-This is last-writer-wins per field with a single merge point. It gives
-records identity and makes offline editing safe; it does not merge
-concurrent edits to the *same* field (the later one wins) and it is not a
-text CRDT. For collaborative documents, embed a purpose-built library for
-the document and keep the surrounding state here.
-
-Authentication is a hook, not a system: lazy-storage asks you who a request
-is and whether they may open a store, and stores the answer on the session.
-Users, tokens, and memberships stay in your application.
+This is a merge per path with a single merge point. It gives records
+identity and makes offline editing safe; it does not merge two edits of
+the same value (the later one wins), and it is not a text CRDT. For a
+collaborative document, embed a library made for it and keep the state
+around it here. Authentication is a hook, not a system: lazy-storage
+asks who a request is and whether they may open a store, and what they
+may write, record by record (see [Who may write what](auth.md#who-may-write-what)).
