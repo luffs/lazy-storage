@@ -152,8 +152,11 @@ createStore({
 - **`validate(diff, { user, replicaId, store, changes })`** judges the
   whole op before it is applied (after what `false` rules and `readOnly`
   refuse outright, before the rule functions), its changes as one diff in
-  the tree's shape, for what spans records (a limit per op, a pair of
-  records that must change together). Return `false` or throw to refuse,
+  the tree's shape, for what spans records: a limit per op, or an op that
+  must bring two records together. It sees what the op asks, not what
+  lands: each change is still decided on its own, so one of the two may
+  lose to a newer write while the other lands, and the client hears
+  `lost` for it. Return `false` or throw to refuse,
   `true` or nothing to let it through. Anything else refuses it too: a
   diff returned to accept in the op's place, which 0.x took, would
   otherwise let through whole what a validator meant to strip.

@@ -471,4 +471,4 @@ export function inOrder<T = any>(map: Record<string, T> | null | undefined, opti
 /** A list over any state (db.list(path) is listIn(db.state, path)): a framework's writable view, a mirror's copy, a plain object patched to a store */
 export function listIn<T extends { id?: string } = any>(state: object, path: string | string[], options?: { position?: string }): List<T>;
 /** A whole list as a keyed map in the order given: each record keyed by its id (minted where it has none), with a position after the one before */
-export function listFrom<T extends { id?: string }>(records: T[], options?: { position?: string }): Record<string, T & { id: string; pos: string }>;
+export function listFrom<T extends { id?: string }, P extends string = 'pos'>(records: T[], options?: { position?: P }): Record<string, T & { id: string } & { [K in P]: string }>;
