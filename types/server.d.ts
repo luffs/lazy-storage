@@ -175,6 +175,8 @@ export interface OpEvent {
   user: unknown;
   /** The changes as they landed */
   changes: Change[];
+  /** The changes that lost, with why (an op whose every change lost is told too, with none landed) */
+  lost: Lost[];
   version: number;
 }
 

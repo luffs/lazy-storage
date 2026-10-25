@@ -2,6 +2,12 @@
 
 All notable changes to lazy-storage are documented here. The format follows Keep a Changelog; versions follow Semantic Versioning.
 
+## [Unreleased]
+
+### Added
+
+- **An op's `lost` in `store.observe('op')`.** The event carries the changes that lost, with why, beside those that landed, and an op whose every change lost is told too, so a server can count what the merge decides against (how often `stale` and `newer` happen in use), not only what it refuses
+
 ## [1.0.0] - 2026-10-24
 
 A store is now collections of records and singletons, and every change

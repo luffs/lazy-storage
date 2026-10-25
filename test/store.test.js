@@ -218,3 +218,22 @@ test('a seed record deleted stays deleted: a new store writes its seeds, and a l
   const snapshot = heard().find(m => m.t === 'snapshot');
   assert.deepEqual(Object.keys(snapshot.state.tasks), ['tips']);
 });
+
+test('observe(\'op\') tells what landed and what lost, an op that lost whole included', () => {
+  const now = fakeTime(1_000_000);
+  const store = createStore({ ...SHAPE, now });
+  const heard = [];
+  store.observe('op', e => heard.push({ seq: e.seq, landed: e.changes.length, lost: e.lost.map(l => l.why) }));
+  const { op, session } = raw(store);
+  op(1, [{ c: 'tasks', id: 'a', put: { title: 'x' } }]);
+  now.advance(10);
+  store.patch({ tasks: { a: { title: 'server' } } });
+  // Stamped before the server's write: the title loses to it, the note lands
+  session.receive({ t: 'op', op: { replica: 'r1', seq: 2, ts: now() - 5, changes: [{ c: 'tasks', id: 'a', path: ['title'], set: 'mine' }, { c: 'tasks', id: 'a', path: ['note'], set: 'n' }] } });
+  store.flush();
+  assert.deepEqual(heard, [
+    { seq: 1, landed: 1, lost: [] },
+    { seq: null, landed: 1, lost: [] },
+    { seq: 2, landed: 1, lost: ['newer'] }
+  ]);
+});

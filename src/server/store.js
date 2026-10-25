@@ -478,7 +478,7 @@ export function createStore({
   }
 
   /** Changes that landed: into the log, to storage, to every session, to listeners */
-  function landed(applied, ts, replicaId, replicaEntry, user, seq) {
+  function landed(applied, ts, replicaId, replicaEntry, user, seq, lost = []) {
     if (applied.length) {
       version++;
       stateJSON = null;
@@ -506,7 +506,8 @@ export function createStore({
     } else if (replicaEntry) {
       commit({ upserts: [], deletes: [], replica: { id: replicaId, ...replicaEntry } });
     }
-    if (observers.op.size) { const v = version; later(() => notify('op', { replicaId, seq, user, changes: applied, version: v })); }
+    // Told of the op once it is stored, what landed and what lost (an op that lost whole included): what to count or forward
+    if (observers.op.size) { const v = version; later(() => notify('op', { replicaId, seq, user, changes: applied, lost, version: v })); }
   }
 
   /**
@@ -589,7 +590,7 @@ export function createStore({
     const entry = { seq: op.seq, seen: wall, ...(known?.owner !== undefined ? { owner: known.owner } : {}) };
     if (known?.owner === undefined && ownerKey(speaker.user) !== undefined) entry.owner = ownerKey(speaker.user);
     replicas.set(op.replica, entry);
-    landed(applied, ts, op.replica, entry, speaker.user, op.seq);
+    landed(applied, ts, op.replica, entry, speaker.user, op.seq, lost);
     maybeCompact();
     return { lost, duplicate: false };
   }

@@ -57,7 +57,9 @@ What that asks of code on the server:
   v, changes }`. A listener that passes changes on (a webhook, an audit
   log, a search index) can pass on one whose commit then fails.
   `store.observe('op', fn)` is told of an op once it is stored, as its
-  author is, with the changes as they landed: the one to forward from.
+  author is, with the changes as they landed and those that lost, with
+  why (`missing`, `newer` or `stale`): the one to forward from, and to
+  count what the merge decides against.
 
 Adapters:
 
