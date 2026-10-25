@@ -56,6 +56,8 @@ const sync = Bun.serve({
 });
 
 let published = 0;
+let largest = 0;
+setInterval(() => { largest = Math.max(largest, handlers.socketStats().largest); }, 1000).unref();
 let run = null;   // the paced run: { count, done, lagMax, started, finished }
 let skew = 0;     // how far this machine's clock is ahead of run.js's (see /skew)
 const publishOne = (i, at, pad) => {
@@ -102,7 +104,9 @@ control({
     sockets: handlers.socketStats(),
     run
   }),
-  '/run': () => ({ v: store.version, finished: !run || run.finished !== null, largest: handlers.socketStats().largest }),
+  // Polled four times a second while a phase runs: what it answers must cost nothing per socket (socketStats
+  // walks every socket), so the unsent peak is sampled once a second instead (largest below)
+  '/run': () => ({ v: store.version, finished: !run || run.finished !== null, largest }),
   '/publish': url => {
     if (run && run.finished === null) return { refused: 'a paced run is still going' };
     const q = name => Number(url.searchParams.get(name));

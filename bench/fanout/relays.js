@@ -46,7 +46,7 @@ for (let j = 0; j < COUNT; j++) {
 let peakBuffered = 0;
 setInterval(() => {
   for (const { handlers } of relays) for (const s of handlers.sockets()) if (s.buffered > peakBuffered) peakBuffered = s.buffered;
-}, 250);
+}, 1000);   // once a second: sockets() walks every socket
 
 control({
   '/stats': () => {

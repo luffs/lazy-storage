@@ -252,10 +252,16 @@ What a relay with many clients spends its time on is writing to their
 sockets: a socket costs a write (a system call, and a TLS record) per send
 however little it carries, and a change goes to every client. So the Bun
 handlers write what goes to a socket in one turn of the event loop as one
-write (`ws.cork`). What helps besides is sending fewer messages: when a
-store's clients all come back at once, every one of them joining is a
-presence change to every other, and `presence.every` on the store (say
-250 ms) makes that a few messages to each rather than one a turn.
+write (`ws.cork`). Measured, that is as far as it goes: a relay with 4000
+displays spends the same time on a change whether a turn's patches go as
+one message or several, and holding them for 50 ms to write them
+together saves it a tenth, for that much more latency. The cost per
+socket and change is the runtime's, so a relay with thousands of
+displays saturates at a couple of hundred changes a second, and more
+displays want more relays. What helps besides is sending fewer messages:
+when a store's clients all come back at once, every one of them joining
+is a presence change to every other, and `presence.every` on the store
+(say 250 ms) makes that a few messages to each rather than one a turn.
 
 Where the relays go is the host's affair: one on each network of clients
 (a shop's), or a pool in front of the server that clients are spread over

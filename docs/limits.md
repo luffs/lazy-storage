@@ -33,8 +33,13 @@ A public server needs a few ceilings, all on by default:
   one Windows machine some 12–20 µs a socket for a small patch, and some
   30 µs more to deflate 4 KB, so a patch to 4000 sockets is some 50–80 ms
   of the loop. Patches published in one turn go out together, a write a
-  socket (see `npm run bench:fanout`), and a relay in front of each group
-  of clients takes the writes off the server (see [Relays](relays.md#spreading-the-load)). The Node adapter sends per socket. Either way, egress still
+  socket. That write is the runtime's, and measured (`npm run
+  bench:fanout`, 4000 sockets, 200 changes a second) it costs the same
+  whether a turn's patches go as one message or several, and whether they
+  are written at once or held for 50 ms and written together: what a
+  socket costs per change is not the server's to cut. A relay in front
+  of each group of clients, on a core or a machine of its own, is what
+  takes the writes off the server (see [Relays](relays.md#spreading-the-load)). The Node adapter sends per socket. Either way, egress still
   grows with the listeners, so a big write to a big audience is bandwidth
   the uplink has to carry; splitting a large value into records and fields, so a
   patch carries only what changed, is what keeps it small.
