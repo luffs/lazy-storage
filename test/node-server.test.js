@@ -281,6 +281,19 @@ test('a large snapshot is fetched over HTTP: the route on the http server serves
     await until(() => client.state.tasks.f, 'a patch after the fetch arrives on the socket');
     client.dispose();
     connection.close();
+
+    // A client that asks for no clocks fetches the state-only document, the socket's token after the route's own query
+    const fetchedBare = [];
+    const bareTransport = webSocketTransport(`ws://localhost:${port}/ws?token=alice`, { fetch: (target, init) => { fetchedBare.push(String(target)); return fetch(target, init); } });
+    const bareConnection = createConnection({ transport: bareTransport, reconnect: { min: 20, max: 50 }, keepalive: false });
+    const bare = createClient({ connection: bareConnection, store: 't1', initial: INITIAL, replicaId: 'bare', clocks: false });
+    bare.connect();
+    await until(() => bare.status === 'online', 'synced through the fetch, without the clocks');
+    assert.deepEqual(fetchedBare, [`http://localhost:${port}/ws/snapshot/t1?clocks=0&token=alice`]);
+    assert.equal(bare.state.filler.length, 3000);
+    assert.deepEqual(bare.clockOf('tasks', 'f'), { live: {}, gone: {} }, 'no clock came with the snapshot');
+    bare.dispose();
+    bareConnection.close();
   } finally {
     await server.shutdown();
   }

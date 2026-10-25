@@ -675,7 +675,7 @@ export function createStore({
    * a follower), the records' clocks: sending it never encodes either
    * again, and the object decodes them only when something reads it. A
    * client that can fetch is pointed at the HTTP route for a large one,
-   * which carries the clocks too (snapshot.js)
+   * at its state-only document when it asked for no clocks (snapshot.js)
    */
   function snapshotMessage(replicaId, session, lost = []) {
     const json = encodedState();
@@ -683,7 +683,7 @@ export function createStore({
     const message = { t: 'snapshot', seq, v: version, epoch, now: time(), shape: shape.hash };
     if (lost.length) message.lost = lost;
     const route = session.fetch ? session.httpSnapshot : null;
-    if (route && json.length >= route.threshold) return { ...message, fetch: route.url };
+    if (route && json.length >= route.threshold) return { ...message, fetch: session.clocks ? route.url : `${route.url}${route.url.includes('?') ? '&' : '?'}clocks=0` };
     let decoded;
     Object.defineProperty(message, 'state', { enumerable: true, configurable: true, get: () => (decoded ??= JSON.parse(json)) });
     let clocksPart = '';

@@ -9,6 +9,10 @@ test('clients converge on the store through edits made offline', async () => {
   await runFuzz({ seed: 7, runs: 60, steps: 60, clients: 4 });
 });
 
+test('clients that take their snapshots without the records\' clocks converge with those that do', async () => {
+  await runFuzz({ seed: 7, runs: 40, steps: 60, clients: 4, clocks: 'mixed' });
+});
+
 test('clients behind a relay converge through outages of its link', async () => {
   await runRelayFuzz({ seed: 7, runs: 60, steps: 60, clients: 4 });
 });

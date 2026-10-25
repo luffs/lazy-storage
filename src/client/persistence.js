@@ -27,6 +27,7 @@
 // promise (IndexedDB does), which is what openClient() is for.
 
 export const isRowAdapter = storage => typeof storage?.commit === 'function';
+const emptyClock = clock => clock.at === undefined && !Object.keys(clock.live).length && !Object.keys(clock.gone).length;
 
 /**
  * @param {Object} deps
@@ -102,7 +103,10 @@ export function createPersistence({ storage, cache, shape, base, meta, ops, onEr
     if (!cache) return;
     const { version, epoch } = meta();
     const doc = base();
-    storage.saveState({ state: structuredClone(doc.state), clocks: [...doc.records()].map(([c, id, , clock]) => [c, id ?? null, clock]), version, epoch });
+    // A record whose clock says nothing (every one of a client under `clocks: false`, but for what patches stamped) is left out: a load reads the same
+    const clocks = [];
+    for (const [c, id, , clock] of doc.records()) if (!emptyClock(clock)) clocks.push([c, id ?? null, clock]);
+    storage.saveState({ state: structuredClone(doc.state), clocks, version, epoch });
   });
   function soon() {
     if (!cache) return;

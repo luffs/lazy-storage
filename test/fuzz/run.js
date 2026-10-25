@@ -1,5 +1,5 @@
 // run.js - CLI for the fuzzers
-//   node test/fuzz/run.js [--mode convergence|relay|hostile] [--seed N] [--runs N] [--steps N] [--clients N]
+//   node test/fuzz/run.js [--mode convergence|relay|hostile] [--seed N] [--runs N] [--steps N] [--clients N] [--clocks all|none|mixed]
 import { runFuzz, runRelayFuzz } from './convergence.js';
 import { runHostile } from './hostile.js';
 
@@ -7,7 +7,7 @@ const argv = process.argv.slice(2);
 const args = Object.fromEntries(argv.map((a, i) => (a.startsWith('--') ? [a.slice(2), argv[i + 1]] : null)).filter(Boolean));
 const number = (value, fallback) => (value === undefined ? fallback : Number(value));
 const mode = args.mode ?? 'convergence';
-const options = { seed: number(args.seed, Date.now() % 100000), runs: number(args.runs, 100), steps: number(args.steps, 40), clients: number(args.clients, 3), only: args.run === undefined ? undefined : Number(args.run), trace: argv.includes('--trace') };
+const options = { seed: number(args.seed, Date.now() % 100000), runs: number(args.runs, 100), steps: number(args.steps, 40), clients: number(args.clients, 3), clocks: args.clocks ?? 'all', only: args.run === undefined ? undefined : Number(args.run), trace: argv.includes('--trace') };
 const started = Date.now();
 try {
   const run = { convergence: runFuzz, relay: runRelayFuzz, hostile: runHostile }[mode];

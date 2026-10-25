@@ -2,6 +2,12 @@
 
 All notable changes to lazy-storage are documented here. The format follows Keep a Changelog; versions follow Semantic Versioning.
 
+## [Unreleased]
+
+### Added
+
+- **A client can take its snapshots without the records' clocks.** `createClient({ clocks: false })` leaves them out of the hello, so a snapshot is the state alone, on the socket and over HTTP (`?clocks=0` on the route, cached and tagged on its own): for ten thousand records of a few short fields, 0.8 MB of JSON instead of 1.4, and 28 KB of brotli over the route instead of 40. What it trades: the client judges a pending edit by what patches have stamped since the snapshot, and shows the rest as landed until the ack says it lost, instead of as the server will decide it from the start; `db.clockOf` knows only what patches said. A relay asks the server for the clocks whatever its clients ask, since it decides for them
+
 ## [1.0.0] - 2026-10-24
 
 A store is now collections of records and singletons, and every change

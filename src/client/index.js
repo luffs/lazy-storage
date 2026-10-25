@@ -6,6 +6,12 @@
 // `state`, what the app reads and writes, is a LazyWatch proxy holding the
 // base with the outbox replayed on top, optimistically: a pending change
 // shows where its record and parent are there, as the server would take it.
+// The base carries each record's clock, asked for with every snapshot, so
+// the replay judges a pending change as the server will: one older than
+// what the server holds already falls away. `clocks: false` leaves them
+// out of the snapshot (two fifths of its JSON, for records of a few short
+// fields) and judges by what the client has heard since: a pending change
+// then shows as landed until the ack says it lost.
 //
 // A local batch on `state` becomes an op ({ replica, seq, ts, changes },
 // core/compile.js), goes in the outbox and to the server. A patch from the
@@ -70,6 +76,7 @@ const plain = value => (value === null || typeof value !== 'object' ? value : La
  * @param {number} [options.undoLimit=100]
  * @param {{min: number, max: number}|false} [options.reconnect]
  * @param {boolean} [options.presence=true]
+ * @param {boolean} [options.clocks=true] - ask for the records' clocks with every snapshot, to show a pending edit as the server will decide it; false takes smaller snapshots, and shows an edit as landed until the ack says it lost
  * @param {() => number} [options.now]
  */
 export function createClient(options = {}) {
@@ -105,6 +112,7 @@ function build({
   undoLimit = 100,
   reconnect = { min: 500, max: 10_000 },
   presence: wantsPresence = !mirror,
+  clocks: wantsClocks = true,
   now
 }, saved) {
   if (typeof storeId !== 'string' || !storeId) throw new TypeError('createClient requires a store id');
@@ -128,7 +136,10 @@ function build({
   const restored = cache && continuing && (rows ? Array.isArray(saved.records) : isObj(saved.state));
 
   // The base: the server's state as last told, with each record's clock, so
-  // pending changes are judged over it as the server will judge them
+  // pending changes are judged over it as the server will judge them. A
+  // snapshot without clocks (`clocks: false`, or a relay's, which judges for
+  // its clients) leaves every record's empty: nothing in it is newer than a
+  // pending change, until a patch stamps what it wrote
   function baseFromState(snapshotState, clocks) {
     const byKey = new Map((Array.isArray(clocks) ? clocks : []).map(([c, id, clockJSON]) => [shape.recordKey(c, id ?? undefined), clockJSON]));
     const records = [];
@@ -404,7 +415,8 @@ function build({
 
   function hello() {
     const ops = outbox.slice(0, HELLO_LIMIT);
-    const message = { t: 'hello', proto: PROTOCOL, replica: replicaId, ops, clocks: true };
+    const message = { t: 'hello', proto: PROTOCOL, replica: replicaId, ops };
+    if (wantsClocks) message.clocks = true;
     const at = performance.now();
     for (const op of ops) sentAt.set(op.seq, at);
     answered = ops.length ? ops[ops.length - 1].seq : 0;
@@ -763,7 +775,7 @@ function build({
     state,
     /** The server's state as this client last heard it (plain; read only) */
     get base() { return base.state; },
-    /** A record's clock in the base: { live, gone }, the times by path the server decides by */
+    /** A record's clock in the base: { live, gone }, the times by path the server decides by (what patches said, under `clocks: false`) */
     clockOf: (c, id) => base.clock(c, id),
     replicaId,
     store: storeId,

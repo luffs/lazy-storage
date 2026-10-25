@@ -8,9 +8,12 @@
 // snapshotMessage): `GET <path>/snapshot/<store id>` serves the state with
 // the version and epoch it is at, compressed once per change (brotli, or
 // gzip for a client without it) and kept until the next, with an ETag so
-// a reload that finds the store unchanged is answered 304. The rest of
-// the protocol is untouched: patches keep flowing on the socket, and the
-// client lays the ones newer than the snapshot it fetched on top of it.
+// a reload that finds the store unchanged is answered 304. The document
+// carries the records' clocks; `?clocks=0` serves the state alone, for a
+// client whose hello asked for none, cached and tagged on its own. The
+// rest of the protocol is untouched: patches keep flowing on the socket,
+// and the client lays the ones newer than the snapshot it fetched on top
+// of it.
 import { gzipSync, brotliCompressSync, constants } from 'node:zlib';
 import { isStoreId } from './registry.js';
 import { SNAPSHOT_THRESHOLD, TALLY, utf8Bytes } from './wire.js';
@@ -83,19 +86,25 @@ export function snapshotId(pathname, path) {
   }
 }
 
-// The document per store, kept as long as the state's JSON is the same
-// string (the store encodes it once per change): plain, and each encoding
-// on first demand
+// The documents per store, kept as long as the state's JSON is the same
+// string (the store encodes it once per change): with the records' clocks
+// and without, each assembled on first demand, plain, and each encoding on
+// first demand
 const bodies = new WeakMap();
 
-function snapshotBody(store) {
+function snapshotBody(store, clocks) {
   const json = store.snapshotJSON();
-  let body = bodies.get(store);
-  if (!body || body.json !== json || body.v !== store.version) {
-    body = { json, v: store.version, epoch: store.epoch, plain: `{"v":${store.version},"epoch":${JSON.stringify(store.epoch)},"state":${json},"clocks":${store.clocksJSON()}}`, plainBytes: undefined, br: null, gzip: null };
-    bodies.set(store, body);
+  let bodyOf = bodies.get(store);
+  if (!bodyOf || bodyOf.json !== json || bodyOf.v !== store.version) {
+    bodyOf = { json, v: store.version, epoch: store.epoch, full: null, bare: null };
+    bodies.set(store, bodyOf);
   }
-  return body;
+  const kind = clocks ? 'full' : 'bare';
+  if (!bodyOf[kind]) {
+    const head = `{"v":${bodyOf.v},"epoch":${JSON.stringify(bodyOf.epoch)},"state":${json}`;
+    bodyOf[kind] = { plain: clocks ? `${head},"clocks":${store.clocksJSON()}}` : `${head}}`, plainBytes: undefined, br: null, gzip: null, etag: `"${bodyOf.epoch}:${bodyOf.v}${clocks ? '' : ':state'}"` };
+  }
+  return bodyOf[kind];
 }
 
 function matchesETag(header, etag) {
@@ -103,9 +112,10 @@ function matchesETag(header, etag) {
 }
 
 /**
- * The response to a request for a store's snapshot: `{ v, epoch, state }`
- * as JSON, brotli or gzip as the request accepts (brotli first), with an
- * ETag of the epoch and version and a 304 when If-None-Match carries it.
+ * The response to a request for a store's snapshot: `{ v, epoch, state,
+ * clocks }` as JSON (`{ v, epoch, state }` under `?clocks=0`), brotli or
+ * gzip as the request accepts (brotli first), with an ETag of the epoch
+ * and version and a 304 when If-None-Match carries it.
  * Authentication and authorization are the caller's (the adapters do
  * both; see serveSnapshot).
  * @param {Object} store
@@ -115,8 +125,9 @@ function matchesETag(header, etag) {
  * @returns {Response}
  */
 export function snapshotResponse(store, request, { origins = '*' } = {}) {
-  const body = snapshotBody(store);
-  const etag = `"${body.epoch}:${body.v}"`;
+  const clocks = !['0', 'false'].includes(new URL(request.url).searchParams.get('clocks'));
+  const body = snapshotBody(store, clocks);
+  const etag = body.etag;
   const headers = {
     etag,
     'cache-control': 'private, no-cache',   // kept, and revalidated: unchanged is a 304

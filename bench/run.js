@@ -205,6 +205,22 @@ bench('hello: answered with a snapshot while the store is quiet (cached encoding
   }
 });
 
+// A client asks for the records' clocks by default, to judge its pending edits as the server
+// will: a snapshot half as large again, assembled from a second cached encoding
+bench('hello: answered with a snapshot and the records\' clocks while the store is quiet (cached encodings)', {
+  unit: 'hello',
+  setup: () => {
+    const c = seeded(10_000);
+    c.session = c.store.session({ send: message => { toJSON(message); } });
+    c.session.receive({ t: 'hello', proto: PROTOCOL, replica: 'warm', ops: [], clocks: true });
+    return c;
+  },
+  iterations: 200,
+  run: (c, n) => {
+    for (let i = 0; i < n; i++) c.session.receive({ t: 'hello', proto: PROTOCOL, replica: `r${i}`, ops: [], clocks: true });
+  }
+});
+
 bench('hello: answered with a delta of 10 ops, 10k-task store (encoded)', {
   unit: 'hello',
   setup: () => {
@@ -281,17 +297,22 @@ bench('hello: snapshot over HTTP, a reload of a store that has not changed (304)
 });
 
 // --- Wire size ---------------------------------------------------------------------------------
-// What permessage-deflate saves on the largest message there is, and what the route serves instead
+// What permessage-deflate saves on the largest message there is, with the records' clocks (what a
+// client asks for by default) and without (`clocks: false`), and what the route serves instead
 
 const sized = seeded(10_000);
-let snapshotJSON = '';
-sized.store.session({ send: message => { if (message.t === 'snapshot') snapshotJSON = toJSON(message); } })
-  .receive({ t: 'hello', proto: PROTOCOL, replica: 'size', ops: [] });
-const rawBytes = Buffer.byteLength(snapshotJSON);
-const deflatedBytes = deflateRawSync(Buffer.from(snapshotJSON)).length;
-const routeBytes = async encoding => (await snapshotResponse(sized.store, new Request(SNAPSHOT_ROUTE, { headers: { 'accept-encoding': encoding } })).arrayBuffer()).byteLength;
+const snapshotSize = clocks => {
+  let json = '';
+  const session = sized.store.session({ send: message => { if (message.t === 'snapshot') json = toJSON(message); } });
+  session.receive({ t: 'hello', proto: PROTOCOL, replica: `size${clocks ? '-clocks' : ''}`, ops: [], ...(clocks ? { clocks: true } : {}) });
+  return { raw: Buffer.byteLength(json), deflated: deflateRawSync(Buffer.from(json)).length };
+};
+const withClocks = snapshotSize(true);
+const { raw: rawBytes, deflated: deflatedBytes } = snapshotSize(false);
+const routeBytes = async (encoding, query = '') => (await snapshotResponse(sized.store, new Request(`${SNAPSHOT_ROUTE}${query}`, { headers: { 'accept-encoding': encoding } })).arrayBuffer()).byteLength;
 const brotliBytes = await routeBytes('br');
 const gzipBytes = await routeBytes('gzip');
+const bareBrotliBytes = await routeBytes('br', '?clocks=0');
 
 // --- Report ------------------------------------------------------------------------------------
 
@@ -303,7 +324,7 @@ for (const r of results) {
   const per = r.perOp >= 1000 ? `${fmt(r.perOp / 1000, 2)} ms` : `${fmt(r.perOp, 1)} µs`;
   console.log(`${r.name.padEnd(width)}  ${per.padStart(10)}  ${fmt(r.perSec).padStart(12)} ${r.unit}/s`);
 }
-console.log(`\nwire: a 10k-task snapshot is ${fmt(rawBytes / 1024)} KB of JSON, ${fmt(deflatedBytes / 1024)} KB with permessage-deflate (${fmt(rawBytes / deflatedBytes, 1)}x smaller); the route serves it as ${fmt(brotliBytes / 1024)} KB of brotli (${fmt(gzipBytes / 1024)} KB of gzip for a client without it), compressed once per change`);
+console.log(`\nwire: a 10k-task snapshot is ${fmt(withClocks.raw / 1024)} KB of JSON with the records' clocks (a client's default), ${fmt(withClocks.deflated / 1024)} KB with permessage-deflate (${fmt(withClocks.raw / withClocks.deflated, 1)}x smaller); without them (clocks: false) ${fmt(rawBytes / 1024)} KB and ${fmt(deflatedBytes / 1024)} KB; the route serves it with the clocks as ${fmt(brotliBytes / 1024)} KB of brotli (${fmt(gzipBytes / 1024)} KB of gzip for a client without it) and without them as ${fmt(bareBrotliBytes / 1024)} KB, compressed once per change`);
 
 // --- Guards (--check) ----------------------------------------------------------------------------
 // A ceiling per case on the median time per op, about ten times what a
@@ -322,6 +343,7 @@ const GUARDS = {
   'client: local op, row adapter (IndexedDB-like), 1k-task state': 1000,
   'hello: answered with a snapshot after an op, 10k-task store (encoded)': 3000,
   'hello: answered with a snapshot while the store is quiet (cached encoding)': 30,
+  'hello: answered with a snapshot and the records\' clocks while the store is quiet (cached encodings)': 30,
   'hello: answered with a delta of 10 ops, 10k-task store (encoded)': 40,
   'hello: snapshot on the socket, compressed per socket (deflate of the cached encoding)': 400,
   'hello: snapshot over HTTP, the route answering the fetch that follows (compressed once)': 400,

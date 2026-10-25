@@ -434,7 +434,8 @@ export function createRelay({
         edge.synced = false;
         const own = edge.queue.filter(e => e.own).map(e => e.op);
         for (const entry of edge.queue) entry.sent = false;
-        // A site's relay speaks for clients of its own; a browser's is one replica, listed and sharing as itself
+        // A site's relay speaks for clients of its own; a browser's is one replica, listed and sharing as itself.
+        // Either asks for the clocks whatever its clients ask: it decides for them (a client's `clocks: false` reaches no further than itself)
         const hello = { t: 'hello', proto: PROTOCOL, replica: replicaId, ops: own, clocks: true };
         if (!local) hello.follower = true;
         if (edge.have && edge.epoch) Object.assign(hello, { since: edge.v, epoch: edge.epoch });

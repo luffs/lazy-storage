@@ -173,6 +173,19 @@ sees only what changed; when an ack arrives, its op leaves the outbox
 and its records are worked out again. `db.base` and `db.clockOf(c, id)`
 show what the client is working from.
 
+The clocks come with every snapshot, asked for in the client's hello,
+and weigh: two fifths of the JSON for records of a few short fields, a
+quarter once compressed (`npm run bench` says what a store of ten
+thousand records costs with and without).
+`clocks: false` on `createClient` leaves them out, on the socket and
+over HTTP: the client then judges a pending edit by what it has heard
+since the snapshot, which every patch stamps, and shows the rest as
+landed until the ack says it lost; `db.clockOf` knows only what patches
+said. A relay's clients, a browser's tabs behind `sharedConnection`
+included, are in that position already: the relay sends its copy
+without clocks and judges for them, and asks the server for the clocks
+whatever its clients ask (see [Relays](relays.md)).
+
 ### Time
 
 A timestamp is a whole number of milliseconds. A client stamps with
