@@ -1,10 +1,13 @@
 // client.test.js - What a client says about itself: its base and clocks,
 // what is pending, undo's grouping and history, a declaration the server
-// does not share, a patch that went missing, a listener that throws
+// does not share, a patch that went missing, a listener that throws, and
+// a client that takes its snapshots without the records' clocks
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createStore, createHub } from '../src/server/index.js';
 import { createClient } from '../src/client/index.js';
+import { memoryOutbox } from '../src/client/storage.js';
+import { createRelay } from '../src/relay/index.js';
 import { createNetwork, fakeTime } from './helpers.js';
 
 const SHAPE = { initial: { tasks: {}, settings: { theme: 'light' } }, singletons: ['settings'] };
@@ -224,4 +227,164 @@ test('a new op supersedes older pending writes of its own record only: not a sin
   assert.equal(store.state.settings.title, 'singleton');
   assert.equal(store.state.tasks.settings.title, 'again');
   assert.equal(store.state.tasks.other.title, 'other');
+});
+
+// --- Without the records' clocks ------------------------------------------------------
+
+/** A link whose transport records what the client is sent and what it sends, and holds back what `hold` picks until `release()` */
+function recorded(net, hold = () => false) {
+  const link = net.link();
+  const received = [];
+  const sent = [];
+  const held = [];
+  const factory = () => {
+    const t = link.factory();
+    const send = t.send;
+    t.send = m => { sent.push(m); send(m); };
+    queueMicrotask(() => {
+      const onmessage = t.onmessage;
+      t.onmessage = m => {
+        received.push(m);
+        if (hold(m)) held.push(() => onmessage?.(m));
+        else onmessage?.(m);
+      };
+    });
+    return t;
+  };
+  return { link, factory, received, sent, release: () => { for (const deliver of held.splice(0)) deliver(); } };
+}
+
+test('a client without clocks shows an edit the server will refuse as landed until the ack; one with them, as lost before it', async () => {
+  const now = fakeTime(1_000_000);
+  const store = createStore({ ...SHAPE, now });
+  const net = createNetwork(store);
+  const a = net.client({ replicaId: 'a', ...SHAPE, now });
+  await net.settle();
+  a.state.tasks.k = { title: 'old' };
+  await net.settle();
+  now.advance(20);
+  a.state.tasks.k.title = 'theirs';
+  await net.settle();
+
+  // Two clients connecting now, whose snapshot takes a while (held back here, as a large one fetched over HTTP does) while the
+  // user edits: the edit is stamped behind the server's write of the title (after the record's birth), and sent once the snapshot lands
+  const seen = {};
+  const lost = {};
+  const clients = {};
+  const wires = {};
+  for (const [name, clocks] of [['judged', true], ['optimistic', false]]) {
+    const wire = recorded(net, m => m.t === 'snapshot');
+    const db = createClient({ transport: wire.factory, reconnect: false, store: 'main', replicaId: name, ...SHAPE, now: () => now() - 10, clocks });
+    db.connect();
+    seen[name] = [];
+    lost[name] = [];
+    db.watch(() => seen[name].push([db.state.tasks.k?.title, db.pending]));
+    db.on('lost', e => lost[name].push(e));
+    clients[name] = db;
+    wires[name] = wire;
+  }
+  await net.settle();
+  for (const db of Object.values(clients)) {
+    assert.equal(db.status, 'connecting', 'the snapshot is on its way');
+    db.state.tasks.k = { title: 'mine' };
+  }
+  await new Promise(resolve => setImmediate(resolve));
+  for (const db of Object.values(clients)) assert.equal(db.state.tasks.k.title, 'mine', 'the edit shows at once, nothing heard yet');
+  for (const wire of Object.values(wires)) wire.release();
+  await net.settle();
+
+  for (const [name, db] of Object.entries(clients)) {
+    assert.equal(db.pending, 0, name);
+    assert.equal(db.state.tasks.k.title, 'theirs', `${name} ends with the server's value`);
+    assert.deepEqual(lost[name].map(e => e.lost.map(l => l.why)), [['newer']], `${name} hears why`);
+    assert.equal(wires[name].sent.find(m => m.t === 'hello').clocks, name === 'judged' ? true : undefined, 'the hello asks, or not');
+    const snapshot = wires[name].received.find(m => m.t === 'snapshot');
+    assert.equal('clocks' in snapshot, name === 'judged', 'the snapshot carries them only when asked');
+  }
+  assert.equal(seen.judged.some(([title, pending]) => title === 'theirs' && pending === 1), true, 'judged by the clocks: the edit falls away on the snapshot, while still pending');
+  assert.equal(seen.optimistic.every(([title, pending]) => pending === 0 || title === 'mine'), true, 'without them: shown as landed until the ack');
+  assert.deepEqual(clients.optimistic.clockOf('tasks', 'k'), { live: {}, gone: {} }, 'no clock known');
+  assert.equal(Object.keys(clients.judged.clockOf('tasks', 'k').live).length > 0, true);
+  for (const db of Object.values(clients)) db.dispose();
+});
+
+test('a client without clocks still judges by what patches told it, undoes, and reloads a persisted base without them', async () => {
+  const now = fakeTime(1_000_000);
+  const store = createStore({ ...SHAPE, now });
+  const net = createNetwork(store);
+  store.patch({ tasks: { k: { title: 'one' } } });
+  const storage = memoryOutbox();
+  const open = () => {
+    const link = net.link();
+    const db = createClient({ transport: link.factory, reconnect: false, store: 'main', replicaId: 'a', storage, cacheDelay: 0, ...SHAPE, now, clocks: false });
+    db.link = link;
+    db.connect();
+    return db;
+  };
+  let db = open();
+  await net.settle();
+  assert.deepEqual(db.clockOf('tasks', 'k'), { live: {}, gone: {} }, 'from the snapshot: no clock');
+  now.advance(5);
+  store.patch({ tasks: { j: { title: 'two' } } });
+  await net.settle();
+  assert.deepEqual(db.clockOf('tasks', 'j'), { at: 1_000_005, live: {}, gone: {} }, 'from a patch: what it stamped');
+
+  // Offline, an edit of what another client writes later; the undo manager works as ever
+  db.link.goOffline();
+  await net.settle();
+  db.state.tasks.k.title = 'mine';
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(db.state.tasks.k.title, 'mine');
+  db.undo();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(db.state.tasks.k.title, 'one', 'undone locally');
+  db.redo();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(db.state.tasks.k.title, 'mine');
+  await new Promise(resolve => setTimeout(resolve, 5));   // the base written (cacheDelay 0)
+  const saved = storage.load();
+  assert.deepEqual(saved.state.tasks.k, { title: 'one' }, 'the base, not the edit');
+  assert.deepEqual(saved.clocks, [['tasks', 'j', { at: 1_000_005, live: {}, gone: {} }]], 'only a clock that says something is written');
+  assert.equal(saved.ops.length, 1);
+  db.dispose();
+  const b = net.client({ replicaId: 'b', ...SHAPE, now });
+  await net.settle();
+  now.advance(5);
+  b.state.tasks.k.title = 'three';
+  await net.settle();
+
+  db = open();
+  assert.equal(db.restored, true);
+  assert.equal(db.pending, 1);
+  assert.equal(db.state.tasks.k.title, 'mine', 'the pending edit over the reloaded base');
+  assert.deepEqual(db.clockOf('tasks', 'k'), { live: {}, gone: {} });
+  assert.deepEqual(db.clockOf('tasks', 'j'), { at: 1_000_005, live: {}, gone: {} });
+  await net.settle();
+  assert.equal(db.pending, 0);
+  assert.equal(db.state.tasks.k.title, 'three', 'lost to the newer write: the delta stamped it, and the ack agreed');
+  assert.deepEqual(db.base, store.snapshot());
+  db.dispose();
+});
+
+test('a relay asks the server for the clocks whatever its clients ask: it decides for them', async () => {
+  const now = fakeTime(1_000_000);
+  const store = createStore({ ...SHAPE, now });
+  const central = createNetwork(store, { vouch: credential => credential });
+  const up = recorded(central);
+  const relay = createRelay({ shapeOf: () => SHAPE, link: up.factory, grace: 0, reconnect: false, keepalive: false, now });
+  const site = createNetwork(relay);
+  const settle = async () => {
+    for (let i = 0; i < 20; i++) {
+      await central.settle();
+      await site.settle();
+      if (central.pending === 0 && site.pending === 0) return;
+    }
+  };
+  const d = site.client({ replicaId: 'd', ...SHAPE, now, clocks: false }, { user: { id: 'd' } });
+  await settle();
+  assert.equal(d.status, 'online');
+  assert.equal(up.sent.find(m => m.t === 'hello').clocks, true, 'the relay\'s own hello');
+  assert.equal('clocks' in up.received.find(m => m.t === 'snapshot'), true, 'and its snapshot carries them');
+  d.dispose();
+  relay.close();
 });

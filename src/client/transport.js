@@ -65,7 +65,8 @@ export function webSocketTransport(url, { WebSocket: WS = globalThis.WebSocket, 
       const socket = new URL(typeof url === 'function' ? url() : url, globalThis.location?.href);
       const target = new URL(path, socket);
       target.protocol = socket.protocol === 'wss:' ? 'https:' : socket.protocol === 'ws:' ? 'http:' : socket.protocol;
-      if (!target.search) target.search = socket.search;
+      // The socket's query (its credentials) goes with the fetch, after any the path has of its own
+      if (socket.search) target.search = target.search ? `${target.search}&${socket.search.slice(1)}` : socket.search;
       return fetchImpl(target.href);
     };
   }

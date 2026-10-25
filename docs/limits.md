@@ -59,7 +59,11 @@ A public server needs a few ceilings, all on by default:
   client that can fetch (one on
   `webSocketTransport`, by default) says so in its hello, and a snapshot
   of `httpSnapshots.threshold` bytes or more (default 64 KB) is answered
-  with where to fetch it rather than the state. The route sits behind the
+  with where to fetch it rather than the state. The document carries the
+  records' clocks; a client made with `clocks: false` (see [The
+  model](model.md#the-client-base-and-pending)) is pointed at `?clocks=0`,
+  the state alone, a quarter to a third smaller compressed, cached and
+  tagged on its own. The route sits behind the
   same `authenticate`, `authorizeId` and `authorize` as the socket, and the response
   carries an ETag, so a reload that finds the store unchanged costs a 304.
   Patches keep flowing on the socket meanwhile; the client lays the ones

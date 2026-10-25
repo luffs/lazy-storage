@@ -8,7 +8,9 @@
 // written whole, a field deleted, the record deleted), a child made under
 // a parent that may not be there, a singleton or a register written, an
 // undo, a server's own patch, a client or the relay's link going away or
-// coming back, time moving on (or not, for ties). At the end everything
+// coming back, time moving on (or not, for ties). `clocks` says whether the
+// clients take their snapshots with the records' clocks ('all', the
+// default), without ('none'), or some of each ('mixed'). At the end everything
 // comes back online and settles, and:
 //
 // - every client, and the relay's copy, holds the store's state
@@ -34,7 +36,7 @@ const SHAPE = {
 const IDS = ['t0', 't1', 't2', 't3'];
 const SUB_IDS = ['s0', 's1', 's2'];
 
-async function oneRun(rng, { steps, clients: count, relay: withRelay, trace }, trail) {
+async function oneRun(rng, { steps, clients: count, relay: withRelay, clocks, trace }, trail) {
   const now = fakeTime(1_000_000);
   const errors = [];
   const onError = err => errors.push(err);
@@ -79,7 +81,8 @@ async function oneRun(rng, { steps, clients: count, relay: withRelay, trace }, t
   for (let i = 0; i < count; i++) {
     const behind = withRelay && i % 2 === 1;
     const net = behind ? site : central;
-    const client = net.client({ replicaId: `c${i}`, ...SHAPE, now }, { user: { id: `u${i}` } });
+    const withClocks = clocks === 'mixed' ? rng.chance(0.5) : clocks !== 'none';
+    const client = net.client({ replicaId: `c${i}`, ...SHAPE, now, clocks: withClocks }, { user: { id: `u${i}` } });
     client.behind = behind;
     client.on('error', err => { if (err.code !== 'rate-limited') errors.push(err); });
     client.on('rejected', e => errors.push(new Error(`rejected ${e.code}: ${e.message}`)));
@@ -157,17 +160,18 @@ async function oneRun(rng, { steps, clients: count, relay: withRelay, trace }, t
   return steps;
 }
 
-async function campaign({ seed = 1, runs = 20, steps = 40, clients = 3, relay = false, only, trace = false } = {}) {
+async function campaign({ seed = 1, runs = 20, steps = 40, clients = 3, relay = false, clocks = 'all', only, trace = false } = {}) {
   let operations = 0;
   for (let run = only ?? 0; run < (only === undefined ? runs : only + 1); run++) {
     const runSeed = seed * 1000 + run;
     const rng = seededRandom(runSeed);
     const trail = [];
     try {
-      operations += await oneRun(rng, { steps, clients, relay, trace }, trail);
+      operations += await oneRun(rng, { steps, clients, relay, clocks, trace }, trail);
     } catch (err) {
       const mode = relay ? ' --mode relay' : '';
-      throw new Error(`fuzz failed (seed ${seed}, run ${run}): ${err.message}\nlast actions: ${trail.join(', ')}\nreproduce: node test/fuzz/run.js${mode} --seed ${seed} --runs ${run + 1} --steps ${steps} --clients ${clients}`, { cause: err });
+      const knob = clocks === 'all' ? '' : ` --clocks ${clocks}`;
+      throw new Error(`fuzz failed (seed ${seed}, run ${run}): ${err.message}\nlast actions: ${trail.join(', ')}\nreproduce: node test/fuzz/run.js${mode}${knob} --seed ${seed} --runs ${run + 1} --steps ${steps} --clients ${clients}`, { cause: err });
     }
   }
   return operations;

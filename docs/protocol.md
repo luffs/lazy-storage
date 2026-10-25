@@ -47,7 +47,7 @@ resolve](model.md#how-conflicts-resolve)).
 
 | Message | Fields | Meaning |
 |---|---|---|
-| `hello` | `proto`, `replica`, `ops`, `since?`, `epoch?`, `clocks?`, `share?`, `presence?`, `fetch?`, `follower?` | Connect or reconnect. `proto` is the protocol the client speaks; a server that speaks another answers `closed` with code `outdated`. `since` is the store version the client has everything up to and `epoch` the storage life it belongs to, asking for a delta; `clocks: true` asks for the records' clocks with a snapshot (a client judging its own pending edits does); `share` is what this client shares with its peers, restored on reconnect; `presence: false` asks not to be sent presence, and every hello says it again either way; `fetch: true` says the client can fetch a large snapshot over HTTP; `follower: true` is a relay's own session (below) |
+| `hello` | `proto`, `replica`, `ops`, `since?`, `epoch?`, `clocks?`, `share?`, `presence?`, `fetch?`, `follower?` | Connect or reconnect. `proto` is the protocol the client speaks; a server that speaks another answers `closed` with code `outdated`. `since` is the store version the client has everything up to and `epoch` the storage life it belongs to, asking for a delta; `clocks: true` asks for the records' clocks with a snapshot (a client judging its own pending edits does, unless made with `clocks: false`; a relay always does); `share` is what this client shares with its peers, restored on reconnect; `presence: false` asks not to be sent presence, and every hello says it again either way; `fetch: true` says the client can fetch a large snapshot over HTTP; `follower: true` is a relay's own session (below) |
 | `op` | `op`, `as?` | One batch, live |
 | `leave` | `as?` | Close this store's session; the socket stays up |
 | `share` | `data`, `as?` | What this session shares with every peer, a JSON value within `presence.maxShare` that `presence.validate` lets through; `null` clears it. Refused with `forbidden` while the store's presence is off |
@@ -58,7 +58,7 @@ resolve](model.md#how-conflicts-resolve)).
 
 | Message | Fields | Meaning |
 |---|---|---|
-| `snapshot` | `state` or `fetch`, `clocks?`, `seq`, `v`, `epoch`, `now`, `shape`, `lost?`, `relay?` | The whole state, to start from. `clocks` lists `[c, id, clock]` per record when the hello asked. For a client that can fetch, when the state is `httpSnapshots.threshold` bytes or more, `fetch` names the route to fetch `{ v, epoch, state, clocks }` from instead |
+| `snapshot` | `state` or `fetch`, `clocks?`, `seq`, `v`, `epoch`, `now`, `shape`, `lost?`, `relay?` | The whole state, to start from. `clocks` lists `[c, id, clock]` per record when the hello asked. For a client that can fetch, when the state is `httpSnapshots.threshold` bytes or more, `fetch` names the route to fetch `{ v, epoch, state, clocks }` from instead, with `?clocks=0` (the state alone) when the hello asked for no clocks |
 | `delta` | `ops`, `seq`, `v`, `epoch`, `now`, `shape`, `lost?`, `relay?` | The changes accepted since the client's `since`, as `[{ v, ts, changes }]`, in order |
 | `patch` | `changes`, `ts`, `v` | What landed of an op from any replica, or a server write, with its timestamp and the version it made |
 | `ack` | `seq`, `v`, `now`, `lost?`, `as?`, `replica?` | The op was decided; `lost` lists what of it lost as `[{ c, id, path, why }]`, `why` being `missing`, `newer` or `stale`; `v` the store's version with the op in it |

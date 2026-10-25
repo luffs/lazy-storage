@@ -76,6 +76,31 @@ test('a large snapshot is fetched: the hello is answered with the route and no s
   a.dispose();
 });
 
+test('a client that takes its snapshots without the records\' clocks is pointed at the state-only document, cached and tagged on its own', async () => {
+  const { store, net, sent, fetches, link } = setup();
+  store.patch({ tasks: { a: { id: 'a', title: 'first' } } });
+  const a = createClient({ transport: link().factory, reconnect: false, store: 'main', initial: INITIAL, replicaId: 'a', clocks: false });
+  a.connect();
+  await settle(net);
+  assert.deepEqual(fetches, ['/ws/snapshot/main?clocks=0']);
+  assert.equal(sent.find(m => m.t === 'snapshot').fetch, '/ws/snapshot/main?clocks=0');
+  assert.equal(a.status, 'online');
+  assert.deepEqual(snap(a), store.snapshot());
+  assert.deepEqual(a.clockOf('tasks', 'a'), { live: {}, gone: {} }, 'no clock came');
+
+  const request = (path, headers = {}) => new Request(`http://localhost${path}`, { headers });
+  const bare = snapshotResponse(store, request('/ws/snapshot/main?clocks=0'));
+  assert.deepEqual(await bare.json(), { v: store.version, epoch: store.epoch, state: store.snapshot() }, 'the state alone');
+  const etag = bare.headers.get('etag');
+  assert.equal(etag, `"${store.epoch}:${store.version}:state"`);
+  assert.equal(snapshotResponse(store, request('/ws/snapshot/main?clocks=0', { 'if-none-match': etag })).status, 304);
+  const full = snapshotResponse(store, request('/ws/snapshot/main', { 'if-none-match': etag }));
+  assert.equal(full.status, 200, 'the document with the clocks is another');
+  assert.equal('clocks' in await full.json(), true);
+  assert.equal(snapshotResponse(store, request('/ws/snapshot/main?clocks=false')).headers.get('etag'), etag, 'false says the same');
+  a.dispose();
+});
+
 test('what the socket delivers during the fetch waits and lands on top of the fetched state, whichever of the two is newer', async () => {
   for (const bodyAfterPatch of [false, true]) {
     let release;

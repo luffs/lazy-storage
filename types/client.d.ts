@@ -268,6 +268,11 @@ export interface ClientOptionsBase<S extends object = any> extends Omit<ShapeOpt
   reconnect?: ReconnectOptions | false;
   /** false asks the server not to send presence to this client, which then never has peers; it may still share (default true) */
   presence?: boolean;
+  /**
+   * Ask for the records' clocks with every snapshot, so a pending edit shows as the server will decide it (default true).
+   * false takes smaller snapshots, and shows an edit as landed until the ack says it lost; `clockOf` then knows only what patches said
+   */
+  clocks?: boolean;
   /** Wall clock (injectable for tests) */
   now?: () => number;
 }
@@ -388,7 +393,7 @@ export interface Client<S extends object = any> {
   readonly state: S;
   /** The server's state as this client last heard it (plain; read only) */
   readonly base: S;
-  /** A record's clock in the base: the times by path the server decides by */
+  /** A record's clock in the base: the times by path the server decides by (empty but for what patches said, under `clocks: false`) */
   clockOf(c: string, id?: string): RecordClock;
   readonly shape: Shape;
   readonly replicaId: string;
