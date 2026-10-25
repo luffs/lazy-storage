@@ -2,7 +2,18 @@
 
 All notable changes to lazy-storage are documented here. The format follows Keep a Changelog; versions follow Semantic Versioning.
 
-## [Unreleased]
+## [1.0.1] - 2026-10-25
+
+A user's replicas are capped: a client that minted a new replica id with
+every hello left a persisted entry each, within its rate limit, and now
+leaves at most `maxReplicas` (1000) a user, the oldest forgotten as the
+retention window would forget them. A client may take its snapshots
+without the records' clocks (`clocks: false`), half the JSON for records
+of a few short fields, showing an edit as landed until the ack says it
+lost; and `store.observe('op')` tells which changes lost and why, so a
+server can count what the merge decides against. On upgrade: nothing to
+change; a store without authentication that has more than a thousand
+devices should raise `maxReplicas`.
 
 ### Security
 
