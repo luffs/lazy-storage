@@ -102,6 +102,9 @@ function presenceOptions(presence) {
  * @param {number} [options.compactEvery=1 hour]
  * @param {number} [options.deltaLog=1000]
  * @param {number} [options.maxChanges=10000] - changes in one op, each field a put writes counted
+ * @param {number} [options.maxReplicas=1000] - replicas remembered per user (the replicas of sessions without
+ *   a user share one allowance): past it, the user's replicas not seen for longest, and not live, are
+ *   forgotten, as the retention window forgets them, so a client minting replica ids fills nothing
  * @param {{burst: number, perSecond: number}|false} [options.rateLimit]
  * @param {Object} [options.storage]
  * @param {boolean} [options.groupCommit=true]
@@ -122,6 +125,7 @@ export function createStore({
   compactEvery = HOUR,
   deltaLog = 1000,
   maxChanges = 10_000,
+  maxReplicas = 1000,
   rateLimit = { burst: 500, perSecond: 100 },
   storage = memoryStorage(),
   groupCommit = true,
@@ -133,6 +137,7 @@ export function createStore({
   const shape = createShape({ initial, singletons, registers, parents });
   const pres = presenceOptions(presenceOption);
   if (rateLimit && !(rateLimit.burst > 0 && rateLimit.perSecond > 0)) throw new TypeError('rateLimit needs positive burst and perSecond');
+  if (!(maxReplicas >= 1)) throw new TypeError('maxReplicas must be a positive number (Infinity for no limit)');
   if (validate !== undefined && typeof validate !== 'function') throw new TypeError('validate must be a function');
   // readOnly as a list: those collections and singletons are the server's alone
   const locked = Array.isArray(readOnly) ? Object.fromEntries(readOnly.map(key => [key, false])) : {};
@@ -143,6 +148,14 @@ export function createStore({
   const saved = storage.load();
   const doc = saved ? docFromRecords(shape, saved.records) : createDoc(shape);
   const replicas = new Map(Object.entries(saved?.replicas ?? {}).map(([id, r]) => [id, { ...r }]));
+  // The replicas each user owns (null: those of sessions without a user), to keep them within maxReplicas
+  const replicasOf = new Map();
+  const ownerSet = owner => {
+    const key = owner ?? null;
+    if (!replicasOf.has(key)) replicasOf.set(key, new Set());
+    return replicasOf.get(key);
+  };
+  for (const [id, r] of replicas) if (id !== 'server') ownerSet(r.owner).add(id);
   let version = saved ? saved.version : 0;
   const epoch = saved?.epoch ?? randomId();
   let schema = saved ? (Number.isInteger(saved.schema) ? saved.schema : 0) : migrations.length;
@@ -443,13 +456,46 @@ export function createStore({
     return null;
   }
 
+  /** The replicas some session speaks for now: never forgotten for the limit */
+  function liveReplicas() {
+    const live = new Set();
+    for (const s of sessions) {
+      if (s.replicaId) live.add(s.replicaId);
+      if (s.grants) for (const g of s.grants.values()) if (g.replicaId) live.add(g.replicaId);
+    }
+    return live;
+  }
+
+  /**
+   * A replica's entry set, and the owner's allowance kept: past maxReplicas,
+   * the owner's replicas not seen for longest go, as the retention window
+   * takes them, but for those a session speaks for now
+   */
+  function rememberReplica(id, entry) {
+    const before = replicas.get(id);
+    if (before && (before.owner ?? null) !== (entry.owner ?? null)) ownerSet(before.owner).delete(id);
+    replicas.set(id, entry);
+    const mine = ownerSet(entry.owner);
+    mine.add(id);
+    if (mine.size <= maxReplicas) return;
+    const live = liveReplicas();
+    const stale = [...mine].filter(other => other !== id && !live.has(other)).sort((a, b) => (replicas.get(a).seen ?? 0) - (replicas.get(b).seen ?? 0));
+    const forgotten = stale.slice(0, mine.size - maxReplicas);
+    if (!forgotten.length) return;
+    for (const other of forgotten) {
+      replicas.delete(other);
+      mine.delete(other);
+    }
+    commit({ upserts: [], deletes: [], forgetReplicas: forgotten });
+  }
+
   /** Record the user as the owner of a replica nobody owns yet */
   function takeReplica(user, replicaId) {
     const key = ownerKey(user);
     const known = replicas.get(replicaId);
     if (key === undefined || known?.owner !== undefined) return;
     const entry = { seq: known?.seq ?? 0, seen: known?.seen ?? time(), owner: key };
-    replicas.set(replicaId, entry);
+    rememberReplica(replicaId, entry);
     commit({ upserts: [], deletes: [], replica: { id: replicaId, ...entry } });
   }
 
@@ -589,7 +635,7 @@ export function createStore({
     clock.observe(ts);
     const entry = { seq: op.seq, seen: wall, ...(known?.owner !== undefined ? { owner: known.owner } : {}) };
     if (known?.owner === undefined && ownerKey(speaker.user) !== undefined) entry.owner = ownerKey(speaker.user);
-    replicas.set(op.replica, entry);
+    rememberReplica(op.replica, entry);
     landed(applied, ts, op.replica, entry, speaker.user, op.seq, lost);
     maybeCompact();
     return { lost, duplicate: false };
@@ -639,6 +685,7 @@ export function createStore({
     for (const [id, r] of replicas) {
       if (id !== 'server' && (r.seen ?? 0) < cutoff) {
         replicas.delete(id);
+        ownerSet(r.owner).delete(id);
         forgotten.push(id);
       }
     }

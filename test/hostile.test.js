@@ -255,3 +255,30 @@ test('a client told outdated is closed for good: it reports the code, stays offl
   assert.equal(client.pending, 1, "the edit waits for a client that speaks the server's protocol");
   assert.equal(store.snapshot().tasks.x, undefined);
 });
+
+test('a user minting replica ids fills nothing: past maxReplicas, its replicas not seen for longest are forgotten, never a live one', () => {
+  const now = fakeTime(1_000_000);
+  const storage = memoryStorage();
+  const store = createStore({ initial: { notes: {} }, now, storage, maxReplicas: 3 });
+  const mallory = { id: 'mallory' };
+  // A live session on m-live, then one hello each on a hundred ids, each socket closed again
+  const live = rawSession(store, 'm-live', mallory);
+  for (let i = 0; i < 100; i++) {
+    now.advance(1);
+    rawSession(store, `m-${i}`, mallory).session.close();
+  }
+  // Another user's replica, and the honest one's, untouched
+  rawSession(store, 'ann-1', { id: 'ann' }).session.close();
+  store.flush();
+  const kept = Object.keys(storage.load().replicas).sort();
+  assert.equal(kept.filter(id => id.startsWith('m-')).length, 3, 'three of mallory\'s');
+  assert.ok(kept.includes('m-live'), 'the one a session speaks for');
+  assert.deepEqual(kept.filter(id => id.startsWith('m-') && id !== 'm-live'), ['m-98', 'm-99'], 'and the two seen last');
+  assert.ok(kept.includes('ann-1'));
+  // An op under a forgotten id is a new replica again: taken, and the oldest goes in its turn
+  live.op(1, [{ c: 'notes', id: 'n', put: { text: 'x' } }]);
+  assert.equal(live.last().t, 'ack');
+  assert.equal(store.stats().replicas, 4);
+  assert.throws(() => createStore({ initial: { notes: {} }, maxReplicas: 0 }), TypeError);
+  store.dispose();
+});

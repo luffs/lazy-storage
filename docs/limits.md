@@ -100,6 +100,15 @@ A public server needs a few ceilings, all on by default:
   nothing is lost and a runaway client is throttled rather than broken.
   A hello costs one token and the ops inside it are not counted. `false`
   turns it off.
+- **Replicas per user.** A store remembers each replica's progress (its
+  last sequence number, when, and whose it is) for the retention window,
+  and a client that minted a new replica id with every hello would leave
+  one such entry a hello, persisted. `maxReplicas` (default 1000) is how
+  many a user may have remembered at once: past it, the user's replicas
+  not seen for longest go, as the window takes them, never one a session
+  speaks for now. The replicas of sessions without a user share one
+  allowance, so a store without authentication that has more than a
+  thousand devices should raise it (`Infinity` for none).
 - **Presence rate.** Presence is off unless a store asks for it. On, it
   travels as deltas, one small message to every session per change,
   batched per turn of the event loop; `presence.every` (milliseconds,

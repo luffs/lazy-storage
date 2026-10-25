@@ -159,6 +159,8 @@ export interface StoreOptions<S extends object = any> extends Omit<ShapeOptions,
   deltaLog?: number;
   /** The most changes in one op (default 10 000) */
   maxChanges?: number;
+  /** Replicas remembered per user (default 1000; those of sessions without a user share one allowance): past it, the user's replicas not seen for longest and not live are forgotten */
+  maxReplicas?: number;
   rateLimit?: RateLimit | false;
   storage?: ServerStorage;
   /** Commit what a turn of the event loop merged together (default true) */
