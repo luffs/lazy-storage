@@ -75,8 +75,9 @@ socket's status, and the replica's unsent ops (`connection.upstream` and
 for a plain client, that the state is current: with the socket up, the
 replica answers a tab's hello once it has the store from the server
 itself, so a store the browser has not opened before stays `connecting`
-until the server's answer is in; with the socket down, it answers at once
-from what it has, and the tab says `offline`.
+until the server's answer is in, and so does one it kept a copy of, which
+may be behind; with the socket down, it answers at once from what it has,
+and the tab says `offline`.
 
 When the leader tab closes, the next tab acquires the lock, loads the
 replica's copies and outbox from `storage`, reconnects, and the other

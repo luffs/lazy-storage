@@ -46,6 +46,11 @@ function copiesIn(adapterOf, { delay = 200, onError }) {
   const written = new Map();   // store -> seqs of the ops written
   const timers = new Map();
   const latest = new Map();
+  // store -> the version the records written are at: what an op written before them may say, since the version
+  // stored is where a reload asks for what came since. Said ahead of its records, a reload right after an ack
+  // (the op gone from the outbox, the records it changed not written yet) would take the edit as had, and lose it
+  const stored = new Map();
+  const NOTHING_STORED = { version: 0, epoch: null, fepoch: undefined, fv: undefined };
   const adapterFor = id => {
     if (!adapters.has(id)) adapters.set(id, adapterOf(id));
     return adapters.get(id);
@@ -60,6 +65,7 @@ function copiesIn(adapterOf, { delay = 200, onError }) {
     try {
       if (typeof adapter.commit === 'function') adapter.replace({ records: copy.records, meta: metaOf(copy) });
       else adapter.saveState({ records: copy.records, version: copy.v, epoch: copy.epoch, fepoch: copy.fepoch, fv: copy.fv, admitted: copy.admitted });
+      stored.set(id, { version: copy.v, epoch: copy.epoch, fepoch: copy.fepoch, fv: copy.fv });
     } catch (err) {
       onError(err);
     }
@@ -75,6 +81,7 @@ function copiesIn(adapterOf, { delay = 200, onError }) {
       const toCopy = saved => {
         if (!Utils.isPlainObject(saved)) return null;
         written.set(id, new Set((saved.ops ?? []).map(op => op.seq)));
+        stored.set(id, { version: saved.version ?? 0, epoch: saved.epoch ?? null, fepoch: saved.fepoch, fv: saved.fv });
         return {
           records: Array.isArray(saved.records) ? saved.records : null,
           v: saved.version ?? 0,
@@ -92,7 +99,8 @@ function copiesIn(adapterOf, { delay = 200, onError }) {
       const adapter = adapterFor(id);
       // Kept as given: its records are read when the base is written, not with every op
       latest.set(id, copy);
-      const meta = metaOf(copy);
+      // The outbox as it is, at the version of the records as written (see `stored`)
+      const meta = { ...metaOf(copy), ...(stored.get(id) ?? NOTHING_STORED) };
       const before = written.get(id) ?? new Set();
       const now = new Set(copy.own.ops.map(op => op.seq));
       try {

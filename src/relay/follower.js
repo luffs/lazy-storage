@@ -152,7 +152,14 @@ export function createRelay({
   connection.on('status', status => {
     noteLink();
     emit('status', status);
+    // The socket down: the tabs a browser's replica held back for the server's answer are answered from the copy
+    if (status === 'offline') answerWaiting();
   });
+
+  /** The sessions whose hello waits on the server's answer (tryHello), answered as things now stand */
+  function answerWaiting() {
+    for (const edge of edges.values()) for (const ss of edge.sessions) if (!ss.synced && ss.hello) tryHello(edge, ss);
+  }
 
   // --- A store's copy --------------------------------------------------------------------
 
@@ -700,6 +707,11 @@ export function createRelay({
       if (grant.state === 'pending') vouch(edge, grant);
     }
     if (!edge.have || !admitted(edge, ss)) return;
+    // A browser's replica answers a tab once its copy has the store from the server (the snapshot or delta
+    // applied) while the socket is up or coming up: the tab says 'online' on this answer, as a plain client does
+    // on the server's, and an app reads its state then. What storage kept may be behind. With the socket down,
+    // or the host holding it down, at once from what the copy has (answered again on 'offline', below)
+    if (local && !edge.synced && !forcedDown && connection.status !== 'offline') return;
     ss.hello = null;
     const lost = [];
     for (const op of Array.isArray(msg.ops) ? msg.ops : []) take(edge, ss, op, { answer: false });
@@ -922,6 +934,7 @@ export function createRelay({
       clearTimeout(graceTimer);
       graceTimer = null;
       setMode('local');
+      answerWaiting();
     },
     upstreamUp() {
       const held = forcedDown && connection.status === 'online';

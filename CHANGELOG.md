@@ -2,6 +2,13 @@
 
 All notable changes to lazy-storage are documented here. The format follows Keep a Changelog; versions follow Semantic Versioning.
 
+## [Unreleased]
+
+### Fixed
+
+- **A reload right after an edit was acknowledged kept the old value.** The browser's replica writes its outbox at once and its records once changes settle (200 ms), and the outbox's writes carried the replica's version: an ack took the op out of the outbox and stored the version it brought while the records the op changed were not written yet, so a page reloaded in between came back at that version with the records from before, asked the server for nothing older, and showed the edit gone. The outbox is now written at the version of the records as stored, and a reload asks for what came since then
+- **A tab said `online` from a copy that was behind.** The browser's replica answered a tab's hello at once whenever it had kept a copy of the store, with the socket up or coming up, so a page opened again showed what the replica had last stored and reported `online` before the server's answer brought it up to date; an app that reads its state at `online` (a form's values) read the old one. As 0.24.1 did, the replica now answers once it has the store from the server while the socket is up or connecting, and at once from its copy when the socket is down or the host holds it down
+
 ## [1.0.1] - 2026-10-25
 
 A user's replicas are capped: a client that minted a new replica id with

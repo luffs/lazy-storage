@@ -63,6 +63,13 @@ function browser(net, { storage, now } = {}) {
   return {
     links,
     tabs,
+    /** A tab that goes as a reload takes it: its lock let go and its socket gone, with nothing flushed or disposed */
+    vanish(t) {
+      t.link.goOffline();
+      locks.forceRelease(`lazy-storage:${name}`);
+      locks.forceRelease(`lazy-storage:${name}:tab:${t.id}`);
+      tabs.splice(tabs.indexOf(t), 1);
+    },
     tab(tabId) {
       const link = net.link({ user: { id: 'u1' } });
       links.push(link);
@@ -142,6 +149,46 @@ test('when the leader goes, the next tab leads from what the replica kept, and s
   two.connection.connect();
   await b.until(() => store.state.tasks.y?.n === 2 && two.db.status === 'online', 'the server has it');
   assert.deepEqual(snap(two.db), store.snapshot());
+  b.close();
+});
+
+test('a reload right after an edit is acknowledged keeps it: the replica never says it is at a version its records are not', async () => {
+  const now = fakeTime();
+  const store = createStore({ ...SHAPE, now });
+  const net = createNetwork(store);
+  const db = `shared-${Math.random()}`;
+  const b = browser(net, { now, storage: id => indexedDBStorage(`${db}:${id}`) });
+  const one = b.tab('one');
+  await b.until(() => one.db.status === 'online', 'online');
+  await sleep(300);   // the replica's records as they were before the edit are written
+  one.db.state.tasks.k = { title: 'Milk' };
+  await b.until(() => store.state.tasks.k?.title === 'Milk' && one.db.pending === 0, 'acknowledged');
+  // Reloaded at once: the ack has taken the op out of the outbox, and the records it changed are not written yet
+  b.vanish(one);
+  const again = b.tab('again');
+  await b.until(() => again.connection.leader && again.db.status === 'online', 'the reloaded tab leads');
+  await b.until(() => again.db.state.tasks.k?.title === 'Milk', 'the edit is there after the reload');
+  assert.deepEqual(snap(again.db), store.snapshot());
+  b.close();
+});
+
+test('a tab opened again says online only once the replica has the store from the server, not from what it kept', async () => {
+  const now = fakeTime();
+  const store = createStore({ ...SHAPE, now });
+  const net = createNetwork(store);
+  const db = `shared-${Math.random()}`;
+  const b = browser(net, { now, storage: id => indexedDBStorage(`${db}:${id}`) });
+  const one = b.tab('one');
+  await b.until(() => one.db.status === 'online', 'online');
+  one.close();
+  // Changed while the browser was away: the replica's copy is behind
+  store.patch({ tasks: { k: { title: 'Changed meanwhile' } } });
+  const again = b.tab('again');
+  let atOnline;
+  again.db.on('status', status => { if (status === 'online' && atOnline === undefined) atOnline = snap(again.db); });
+  await b.until(() => again.db.status === 'online', 'online again');
+  // An app reads its state when the store says online (a form's values): it has to be the server's then
+  assert.deepEqual(atOnline, store.snapshot());
   b.close();
 });
 
