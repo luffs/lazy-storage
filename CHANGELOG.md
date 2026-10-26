@@ -2,7 +2,17 @@
 
 All notable changes to lazy-storage are documented here. The format follows Keep a Changelog; versions follow Semantic Versioning.
 
-## [Unreleased]
+## [1.0.3] - 2026-10-26
+
+A browser's replica takes a large snapshot over HTTP again, as before
+1.0: compressed once per change and cached at the server, rather than
+compressed again on the socket for every browser that opens the store.
+For a store of 5 000 records the first load took 4.7 MB of JSON on the
+socket under 1.0, and some 70 kB now, with the snapshot fetched
+compressed beside it. On upgrade: nothing to change; a proxy in front of
+the server should pass the snapshot route (`<path>/snapshot/<store id>`)
+as it does for plain clients, or the replica reports `snapshot-fetch`
+and takes the snapshot on the socket as in 1.0.
 
 ### Fixed
 
