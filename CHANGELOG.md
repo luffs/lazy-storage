@@ -2,6 +2,12 @@
 
 All notable changes to lazy-storage are documented here. The format follows Keep a Changelog; versions follow Semantic Versioning.
 
+## [Unreleased]
+
+### Fixed
+
+- **A browser's replica takes a large snapshot over HTTP again.** Before 1.0 the replica behind `sharedConnection` was a plain client, and fetched a large snapshot from the snapshot route, compressed once per change (brotli) and cached at the server; the follower 1.0 runs there took every snapshot on its socket, so the server compressed the whole state again for every browser that opened the store (4.7 MB of JSON for a store of 5 000 records with their clocks), with deflate rather than brotli. Its hello now says it can fetch when its transport can (`webSocketTransport`, by default), it fetches with the clocks it decides its tabs' edits by, and what the socket brings meanwhile waits and lands on top, as for a plain client; a fetch that fails is reported with code `snapshot-fetch` and the snapshot is asked for inline. A site's relay still takes its snapshots on its link: it reads nothing of a store before a client of its is let in
+
 ## [1.0.2] - 2026-10-26
 
 A browser's edits stay where they were made across a reload: the replica

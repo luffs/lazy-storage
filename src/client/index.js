@@ -38,6 +38,7 @@ import { createShape } from '../core/shape.js';
 import { createDoc, docFromRecords } from '../core/doc.js';
 import { compile, within } from '../core/compile.js';
 import { registerKey } from '../core/paths.js';
+import { createSnapshotFetcher, pointsToFetch } from './snapshot-fetch.js';
 import { randomId } from '../core/ids.js';
 import { memoryOutbox } from './storage.js';
 import { createConnection } from './connection.js';
@@ -178,9 +179,8 @@ function build({
   let throttled = false;
   let relayed = false;
   let answeredByRelay = false;
-  let fetching = 0;
-  let held = null;
-  let fetchFailed = false;
+  // A large snapshot fetched over HTTP (snapshot-fetch.js): what the link brings meanwhile waits for it
+  const snapshots = createSnapshotFetcher({ onError: err => emit('error', err) });
   const sentAt = new Map();
   let ackMs = null;
 
@@ -424,7 +424,7 @@ function build({
     if (known.epoch !== null) Object.assign(message, { since: known.v, epoch: known.epoch });
     if (shared !== undefined) message.share = shared;
     if (!wantsPresence) message.presence = false;
-    if (typeof connection.fetch === 'function' && !fetchFailed) message.fetch = true;
+    if (snapshots.offers(connection)) message.fetch = true;
     link?.send(message);
   }
 
@@ -492,36 +492,17 @@ function build({
   }
 
   function fetchSnapshot(msg) {
-    const attempt = ++fetching;
-    const queue = held = [];
-    const current = () => attempt === fetching && held === queue;
-    Promise.resolve()
-      .then(() => connection.fetch(msg.fetch))
-      .then(async response => {
-        if (!response.ok) throw new Error(`the server answered ${response.status}`);
-        const body = await response.json();
-        if (!isObj(body) || !isObj(body.state) || !Number.isInteger(body.v)) throw new Error('the response is not a snapshot');
-        return body;
-      })
-      .then(
-        body => {
-          if (!current()) return;
-          held = null;
-          caughtUp({ ...msg, v: body.v, epoch: typeof body.epoch === 'string' ? body.epoch : msg.epoch }, () => snapshotInto(body.state, body.clocks));
-          for (const m of queue) if (m.t !== 'patch' || !(Number.isInteger(m.v) && m.v <= body.v)) handle(m);
-        },
-        err => {
-          if (!current()) return;
-          held = null;
-          fetchFailed = true;
-          const error = new Error(`The snapshot could not be fetched: ${err?.message ?? err}`);
-          error.code = 'snapshot-fetch';
-          emit('error', error);
-          for (const m of queue) handle(m);
-          hello();
-        }
-      )
-      .catch(err => emit('error', err));
+    snapshots.fetch(connection, msg, {
+      landed(body, after) {
+        caughtUp({ ...msg, v: body.v, epoch: typeof body.epoch === 'string' ? body.epoch : msg.epoch }, () => snapshotInto(body.state, body.clocks));
+        for (const m of after) handle(m);
+      },
+      failed(error, waited) {
+        emit('error', error);
+        for (const m of waited) handle(m);
+        hello();
+      }
+    });
   }
 
   /** Changes from the server, decided already: onto the base. Returns them */
@@ -549,10 +530,10 @@ function build({
   }
 
   function handle(msg) {
-    if (held && msg.t !== 'closed') return void held.push(msg);
+    if (snapshots.hold(msg)) return;
     switch (msg.t) {
       case 'snapshot':
-        if (typeof msg.fetch === 'string' && msg.state === undefined) return fetchSnapshot(msg);
+        if (pointsToFetch(msg)) return fetchSnapshot(msg);
         return caughtUp(msg, () => snapshotInto(msg.state, msg.clocks));
       case 'delta':
         return caughtUp(msg, () => {
@@ -601,8 +582,7 @@ function build({
       case 'closed': {
         if (msg.code === 'unavailable') {
           synced = false;
-          fetching++;
-          held = null;
+          snapshots.cancel();
           clearPresence();
           refreshStatus();
           retryHello(250 + Math.random() * 750);
@@ -614,8 +594,7 @@ function build({
           link = null;
         }
         synced = false;
-        fetching++;
-        held = null;
+        snapshots.cancel();
         if (ownsConnection) connection.close();
         clearPresence();
         refreshStatus();
@@ -651,9 +630,7 @@ function build({
     onOpen(attached) {
       link = attached;
       synced = false;
-      fetching++;
-      held = null;
-      fetchFailed = false;
+      snapshots.reset();
       ended = null;
       hello();
       refreshStatus();
@@ -661,8 +638,7 @@ function build({
     onMessage: handle,
     onClose() {
       synced = false;
-      fetching++;
-      held = null;
+      snapshots.cancel();
       clearPresence();
       refreshStatus();
       setRelayed(false);
@@ -687,8 +663,7 @@ function build({
     }
     if (ownsConnection) connection.close();
     synced = false;
-    fetching++;
-    held = null;
+    snapshots.cancel();
     clearPresence();
     refreshStatus();
   }

@@ -50,6 +50,7 @@ import { createRules, RuleError } from '../core/rules.js';
 import { fingerprintOf } from './fingerprint.js';
 import { randomId, isStoreId } from '../core/ids.js';
 import { createConnection } from '../client/connection.js';
+import { createSnapshotFetcher, pointsToFetch } from '../client/snapshot-fetch.js';
 import { memoryCopies } from './copies.js';
 import { tagStore } from '../server/wire.js';
 
@@ -242,7 +243,9 @@ export function createRelay({
       link: null,
       synced: false,
       retry: null,
-      lingering: null
+      lingering: null,
+      // A browser's replica fetches a large snapshot over HTTP (client/snapshot-fetch.js)
+      snapshots: createSnapshotFetcher({ onError: fault })
     };
     // An op of another shape (a browser's storage from before 1.0, whose ops were diffs) is let go of, not left to stop the store
     const ops = (saved?.own?.ops ?? []).filter(op => isObj(op) && Number.isInteger(op.seq) && Array.isArray(op.changes));
@@ -276,6 +279,8 @@ export function createRelay({
     // Still waiting for the server, or still answering with the server's word (closedWith): kept a while longer
     if (edge.queue.length || (edge.closedWith && now() < edge.closedWith.until)) return idle(edge);
     clearTimeout(edge.retry);
+    // A snapshot being fetched is for a store let go of: it is not taken, nor its copy written again
+    edge.snapshots.cancel();
     persist(edge);
     edges.delete(edge.id);
     edge.link?.detach();
@@ -434,21 +439,76 @@ export function createRelay({
 
   // --- The link to the server --------------------------------------------------------
 
+  /** The store's hello on its link: from scratch, or since what the copy has */
+  function helloUp(edge) {
+    const attached = edge.link;
+    if (!attached) return;
+    edge.synced = false;
+    edge.snapshots.cancel();
+    const own = edge.queue.filter(e => e.own).map(e => e.op);
+    for (const entry of edge.queue) entry.sent = false;
+    // A site's relay speaks for clients of its own; a browser's is one replica, listed and sharing as itself.
+    // Either asks for the clocks whatever its clients ask: it decides for them (a client's `clocks: false` reaches no further than itself)
+    const hello = { t: 'hello', proto: PROTOCOL, replica: replicaId, ops: own, clocks: true };
+    if (!local) hello.follower = true;
+    // A browser's replica takes a large snapshot over HTTP, as a plain client does: compressed once per change
+    // and cached at the server, rather than for every browser on its socket. Its session is the user's own, so
+    // the route authorizes it as the socket. A site's relay reads nothing before a client of its is let in, and
+    // takes its snapshots inline
+    if (local && edge.snapshots.offers(connection)) hello.fetch = true;
+    if (edge.have && edge.epoch) Object.assign(hello, { since: edge.v, epoch: edge.epoch });
+    attached.send(hello);
+    for (const entry of own.length ? edge.queue.filter(e => e.own) : []) entry.sent = true;
+    for (const grant of edge.grants.values()) if (grant.state === 'pending') vouch(edge, grant);
+  }
+
+  /** The records of a snapshot's state and clocks into the base; returns the records touched (the base's before, and the new) */
+  function snapshotInto(edge, state, clocksJSON) {
+    const records = [];
+    const clocks = new Map((Array.isArray(clocksJSON) ? clocksJSON : []).map(([c, id, clockJSON]) => [edge.shape.recordKey(c, id ?? undefined), clockJSON]));
+    const touched = new Set();
+    for (const [c, id] of edge.base.records()) touched.add(JSON.stringify([c, id ?? null]));
+    for (const c of edge.shape.collections) {
+      for (const id of Object.keys(state?.[c] ?? {})) {
+        records.push([c, id, state[c][id], clocks.get(edge.shape.recordKey(c, id))]);
+        touched.add(JSON.stringify([c, id]));
+      }
+    }
+    for (const c of edge.shape.singletons) if (state && Object.hasOwn(state, c)) records.push([c, null, state[c], clocks.get(edge.shape.recordKey(c))]);
+    edge.base = docFromRecords(edge.shape, records);
+    return [...touched].map(k => JSON.parse(k)).map(([c, id]) => [c, id ?? undefined]);
+  }
+
+  /**
+   * A snapshot the server points at its HTTP route, fetched (client/snapshot-fetch.js): what the link brings
+   * meanwhile is handled after it; a fetch that fails says hello again without asking to fetch, so the server
+   * sends the snapshot inline, and what waited goes with it (the answer replaces it)
+   */
+  function fetchSnapshot(edge, msg) {
+    edge.snapshots.fetch(connection, msg, {
+      landed(body, after) {
+        caughtUp(edge, { ...msg, v: body.v, epoch: typeof body.epoch === 'string' ? body.epoch : msg.epoch }, () => snapshotInto(edge, body.state, body.clocks));
+        for (const m of after) {
+          try {
+            fromUpstream(edge, m);
+          } catch (err) {
+            fault(err);
+          }
+        }
+      },
+      failed(error) {
+        fault(Object.assign(error, { store: edge.id }));
+        helloUp(edge);
+      }
+    });
+  }
+
   function upstreamHandler(edge) {
     return {
       onOpen(attached) {
         edge.link = attached;
-        edge.synced = false;
-        const own = edge.queue.filter(e => e.own).map(e => e.op);
-        for (const entry of edge.queue) entry.sent = false;
-        // A site's relay speaks for clients of its own; a browser's is one replica, listed and sharing as itself.
-        // Either asks for the clocks whatever its clients ask: it decides for them (a client's `clocks: false` reaches no further than itself)
-        const hello = { t: 'hello', proto: PROTOCOL, replica: replicaId, ops: own, clocks: true };
-        if (!local) hello.follower = true;
-        if (edge.have && edge.epoch) Object.assign(hello, { since: edge.v, epoch: edge.epoch });
-        attached.send(hello);
-        for (const entry of own.length ? edge.queue.filter(e => e.own) : []) entry.sent = true;
-        for (const grant of edge.grants.values()) if (grant.state === 'pending') vouch(edge, grant);
+        edge.snapshots.reset();
+        helloUp(edge);
       },
       onMessage: msg => {
         try {
@@ -459,6 +519,8 @@ export function createRelay({
       },
       onClose() {
         edge.synced = false;
+        // A snapshot being fetched belongs to the link that is gone
+        edge.snapshots.cancel();
         for (const grant of edge.grants.values()) if (grant.state !== 'refused') grant.state = 'pending';
         forgetOrphans(edge);
         for (const entry of edge.queue) entry.sent = false;
@@ -494,24 +556,13 @@ export function createRelay({
   }
 
   function fromUpstream(edge, msg) {
+    // While a snapshot is fetched, what comes after it waits for it (the store's end does not)
+    if (edge.snapshots.hold(msg)) return;
     switch (msg.t) {
       case 'snapshot': {
+        if (local && pointsToFetch(msg) && typeof connection.fetch === 'function') return fetchSnapshot(edge, msg);
         if (msg.state === undefined) return fault(new Error('A relay needs snapshots inline'));
-        return caughtUp(edge, msg, () => {
-          const records = [];
-          const clocks = new Map((Array.isArray(msg.clocks) ? msg.clocks : []).map(([c, id, clockJSON]) => [edge.shape.recordKey(c, id ?? undefined), clockJSON]));
-          const touched = new Set();
-          for (const [c, id] of edge.base.records()) touched.add(JSON.stringify([c, id ?? null]));
-          for (const c of edge.shape.collections) {
-            for (const id of Object.keys(msg.state?.[c] ?? {})) {
-              records.push([c, id, msg.state[c][id], clocks.get(edge.shape.recordKey(c, id))]);
-              touched.add(JSON.stringify([c, id]));
-            }
-          }
-          for (const c of edge.shape.singletons) if (msg.state && Object.hasOwn(msg.state, c)) records.push([c, null, msg.state[c], clocks.get(edge.shape.recordKey(c))]);
-          edge.base = docFromRecords(edge.shape, records);
-          return [...touched].map(k => JSON.parse(k)).map(([c, id]) => [c, id ?? undefined]);
-        });
+        return caughtUp(edge, msg, () => snapshotInto(edge, msg.state, msg.clocks));
       }
       case 'delta':
         return caughtUp(edge, msg, () => {
@@ -636,6 +687,8 @@ export function createRelay({
       }
       case 'closed': {
         edge.synced = false;
+        // A snapshot being fetched is for a session the server has ended: it is not taken
+        edge.snapshots.cancel();
         if (msg.code === 'unavailable') {
           // The server's session is gone with every grant on it: they are asked for again on the next one, and what was sent goes again
           for (const grant of edge.grants.values()) if (grant.state !== 'refused') grant.state = 'pending';
@@ -968,6 +1021,7 @@ export function createRelay({
         if (edge.loading) continue;
         clearTimeout(edge.retry);
         clearTimeout(edge.lingering);
+        edge.snapshots.cancel();
         persist(edge);
       }
       storage.flush?.();

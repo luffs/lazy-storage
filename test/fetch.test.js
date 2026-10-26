@@ -8,6 +8,8 @@ import { LazyWatch } from 'lazy-watch';
 import { createStore, createHub, memoryStorage, snapshotResponse } from '../src/server/index.js';
 import { snapshotOptions } from '../src/server/snapshot.js';
 import { createClient } from '../src/client/index.js';
+import { sharedConnection } from '../src/client/shared.js';
+import { memoryOutbox } from '../src/client/storage.js';
 import { createNetwork } from './helpers.js';
 
 const INITIAL = { tasks: {} };
@@ -250,4 +252,116 @@ test('the snapshot route asks authorizeId before it loads the store', async () =
   const ok = await serveSnapshot(new Request('http://x/ws/snapshot/team-1'), 'team-1', { resolveStore, authorizeId: (user, id) => id === 'team-1' });
   assert.equal(ok.status, 200);
   assert.deepEqual(loaded, ['team-1']);
+});
+
+/** A browser's replica (a shared connection, one tab leading on its own) on a link of the setup, and a tab's client on it */
+function browserTab(link, { onError, storage = () => memoryOutbox(), linger } = {}) {
+  const connection = sharedConnection({ name: `fetch-${Math.random()}`, transport: link.factory, storage, locks: null, channel: null, replicaId: 'browser', keepalive: false, reconnect: false, onError, ...(linger === undefined ? {} : { linger }) });
+  const tab = createClient({ connection, store: 'main', initial: INITIAL });
+  tab.connect();
+  return { connection, tab, close() { tab.dispose(); connection.dispose(); } };
+}
+
+test("a browser's replica fetches a large snapshot too, with the clocks, and its tab is online with it", async () => {
+  const { store, net, sent, fetches, link } = setup();
+  store.patch({ tasks: { a: { id: 'a', title: 'first' }, b: { id: 'b', title: 'second' } } });
+  const b = browserTab(link());
+  await settle(net);
+  assert.deepEqual(fetches, ['/ws/snapshot/main'], 'fetched once, with the clocks (the replica decides for its tabs)');
+  const answer = sent.find(m => m.t === 'snapshot');
+  assert.equal(answer.state, undefined, 'nothing of the state on the socket');
+  assert.equal(b.tab.status, 'online');
+  assert.deepEqual(snap(b.tab), store.snapshot());
+  store.patch({ tasks: { a: { done: true } } });
+  b.tab.collection('tasks').add({ id: 'c', title: 'third' });
+  await settle(net);
+  assert.equal(b.tab.state.tasks.a.done, true, 'a patch after the fetch arrives on the socket');
+  assert.equal(store.state.tasks.c.title, 'third', 'and an edit goes up');
+  b.close();
+});
+
+test("what the socket brings while a browser's replica fetches waits for the snapshot, and what it already has is passed over", async () => {
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const fetched = [];
+  const { store, net, link } = setup({
+    fetch: async path => {
+      await gate;
+      const response = snapshotResponse(store, new Request(`http://localhost${path}`));
+      fetched.push(store.version);
+      return response;
+    }
+  });
+  store.patch({ tasks: { a: { id: 'a', title: 'first' } } });
+  const b = browserTab(link());
+  await settle(net);
+  assert.notEqual(b.tab.status, 'online', 'waiting for the snapshot');
+  store.patch({ tasks: { a: { title: 'renamed while fetching' } } });
+  await settle(net);
+  store.patch({ tasks: { d: { id: 'd', title: 'after the fetch began' } } });
+  release();
+  await settle(net);
+  assert.equal(b.tab.status, 'online');
+  assert.deepEqual(snap(b.tab), store.snapshot());
+  b.close();
+});
+
+test("a browser's replica whose fetch fails says so and takes the snapshot inline", async () => {
+  const errors = [];
+  const { store, net, sent, fetches, link } = setup({ fetch: () => Promise.resolve(new Response('no', { status: 500 })) });
+  store.patch({ tasks: { a: { id: 'a', title: 'first' } } });
+  const b = browserTab(link(), { onError: err => errors.push(err) });
+  await settle(net);
+  assert.deepEqual(fetches, ['/ws/snapshot/main']);
+  assert.deepEqual(errors.map(e => e.code), ['snapshot-fetch']);
+  assert.ok(sent.some(m => m.t === 'snapshot' && m.state !== undefined), 'asked again, it got the state inline');
+  assert.equal(b.tab.status, 'online');
+  assert.deepEqual(snap(b.tab), store.snapshot());
+  b.close();
+});
+
+/** A fetch that waits until `release()`, and a replica's storage that keeps every copy it is asked to write */
+function gatedSetup() {
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const env = setup({ fetch: async path => { await gate; return snapshotResponse(env.store, new Request(`http://localhost${path}`)); } });
+  const written = [];
+  const storage = () => {
+    const inner = memoryOutbox();
+    return { ...inner, saveState: copy => { written.push(copy); inner.saveState(copy); } };
+  };
+  const wrote = id => written.some(copy => (copy.records ?? []).some(([c, rid]) => c === 'tasks' && rid === id));
+  return { ...env, release, storage, wrote };
+}
+
+test("a snapshot fetched for a store the server has since closed is not taken by a browser's replica", async () => {
+  const { store, net, link, release, storage, wrote } = gatedSetup();
+  store.patch({ tasks: { a: { id: 'a', title: 'first' } } });
+  const b = browserTab(link(), { storage });
+  await settle(net);
+  assert.notEqual(b.tab.status, 'online', 'fetching');
+  store.closeSessions(() => true, 'removed from the team');
+  await settle(net);
+  release();
+  await settle(net);
+  await new Promise(resolve => setTimeout(resolve, 300));   // the replica writes its copy once changes settle
+  assert.equal(b.tab.closed?.code, 'evicted');
+  assert.deepEqual(snap(b.tab), { tasks: {} }, 'nothing of it reached the tab');
+  assert.equal(wrote('a'), false, "nor the replica's storage");
+  b.close();
+});
+
+test("a snapshot fetched for a store a browser's replica has let go of is not taken, nor its copy written", async () => {
+  const { store, net, link, release, storage, wrote } = gatedSetup();
+  store.patch({ tasks: { a: { id: 'a', title: 'first' } } });
+  const b = browserTab(link(), { storage, linger: 0 });
+  await settle(net);
+  b.tab.dispose();   // the last tab leaves: the replica lets go of the store
+  await settle(net);
+  await new Promise(resolve => setTimeout(resolve, 50));
+  release();
+  await settle(net);
+  await new Promise(resolve => setTimeout(resolve, 300));
+  assert.equal(wrote('a'), false);
+  b.connection.dispose();
 });

@@ -62,7 +62,9 @@ A public server needs a few ceilings, all on by default:
   per change (brotli, or gzip for a client without it; brotli packs this
   JSON some 15% tighter in the same time) and kept until the next: a
   client that can fetch (one on
-  `webSocketTransport`, by default) says so in its hello, and a snapshot
+  `webSocketTransport`, by default, and a browser's replica behind
+  `sharedConnection`, which fetches with the clocks for its tabs) says
+  so in its hello, and a snapshot
   of `httpSnapshots.threshold` bytes or more (default 64 KB) is answered
   with where to fetch it rather than the state. The document carries the
   records' clocks; a client made with `clocks: false` (see [The
@@ -83,7 +85,9 @@ A public server needs a few ceilings, all on by default:
   no CORS header at all. `httpSnapshots: false` on the adapter,
   or `fetch: false` on the transport, keeps every snapshot on the socket;
   `snapshotResponse(store, request)` serves the route from a server of
-  your own.
+  your own. A site's relay takes its snapshots on its link: it reads
+  nothing of a store before a client of its is let in, which the route
+  would not wait for.
 - **Op size.** `maxChanges` on the store (default 10 000) is the most
   changes one op may carry, each field a `put` writes counted as one
   (a put is merged into a record field by field); a larger one is refused
