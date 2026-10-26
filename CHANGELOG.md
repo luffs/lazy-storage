@@ -2,7 +2,17 @@
 
 All notable changes to lazy-storage are documented here. The format follows Keep a Changelog; versions follow Semantic Versioning.
 
-## [Unreleased]
+## [1.0.2] - 2026-10-26
+
+A browser's edits stay where they were made across a reload: the replica
+behind a shared connection no longer stores a version ahead of its
+records, so a page reloaded right after an edit was acknowledged comes
+back with it, and a tab opened again says `online` only once the server
+has brought the replica's copy up to date, not from the copy as it was
+last stored. On upgrade: nothing to change; a browser that reloaded under
+1.0.1 right after an edit may keep the old value of what that edit
+changed until the same field is written again or the replica takes a
+snapshot (a new epoch, or clearing the site's storage).
 
 ### Fixed
 
