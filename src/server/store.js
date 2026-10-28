@@ -602,7 +602,7 @@ export function createStore({
     }
     const wall = time();
     if (Number.isFinite(retention) && op.ts < wall - retention) throw new RefusedError('expired', 'The op is older than the store keeps track of; resync and make it again');
-    const ts = clamp(op.ts, wall);
+    const ts = clamp(op.ts, clock.time);
     const applied = [];
     const lost = [];
     const validated = () => {
@@ -728,7 +728,7 @@ export function createStore({
   function snapshotMessage(replicaId, session, lost = []) {
     const json = encodedState();
     const seq = replicas.get(replicaId)?.seq ?? 0;
-    const message = { t: 'snapshot', seq, v: version, epoch, now: time(), shape: shape.hash };
+    const message = { t: 'snapshot', seq, v: version, epoch, now: clock.time, shape: shape.hash };
     if (lost.length) message.lost = lost;
     const route = session.fetch ? session.httpSnapshot : null;
     if (route && json.length >= route.threshold) return { ...message, fetch: session.clocks ? route.url : `${route.url}${route.url.includes('?') ? '&' : '?'}clocks=0` };
@@ -764,7 +764,7 @@ export function createStore({
   function catchUp(session, since, sinceEpoch, lost) {
     const ops = sinceEpoch === epoch ? deltaSince(since) : null;
     if (ops === null) return snapshotMessage(session.replicaId, session, lost);
-    const message = { t: 'delta', ops, seq: replicas.get(session.replicaId)?.seq ?? 0, v: version, epoch, now: time(), shape: shape.hash };
+    const message = { t: 'delta', ops, seq: replicas.get(session.replicaId)?.seq ?? 0, v: version, epoch, now: clock.time, shape: shape.hash };
     if (lost.length) message.lost = lost;
     return message;
   }
@@ -836,7 +836,7 @@ export function createStore({
         }
         const { lost } = apply(op, speaker);
         // For a follower's client, which replica it was: the follower routes the ack by it
-        const ack = { t: 'ack', ...tag, ...(as === undefined ? {} : { replica: op.replica }), seq: op.seq, v: version, now: time() };
+        const ack = { t: 'ack', ...tag, ...(as === undefined ? {} : { replica: op.replica }), seq: op.seq, v: version, now: clock.time };
         if (lost.length) ack.lost = lost;
         return send(ack);
       } catch (err) {
@@ -939,7 +939,7 @@ export function createStore({
             if (s.grants && s.grants.size === 0) {
               s.follows = false;
               s.held = { since: msg.since, epoch: msg.epoch, lost };
-              for (const seq of acked) send({ t: 'ack', seq, v: version, now: time() });
+              for (const seq of acked) send({ t: 'ack', seq, v: version, now: clock.time });
               return;
             }
             send(catchUp(s, msg.since, msg.epoch, lost));
@@ -1106,7 +1106,7 @@ export function createStore({
     get sessions() { return sessions.size; },
     get disposed() { return disposed; },
     /** The current time on the store's clock */
-    now: () => time(),
+    now: () => clock.time,
     session,
     patch,
     /** Delete a record, or a path in one, as the server */

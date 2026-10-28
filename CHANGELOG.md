@@ -2,6 +2,12 @@
 
 All notable changes to lazy-storage are documented here. The format follows Keep a Changelog; versions follow Semantic Versioning.
 
+## [Unreleased]
+
+### Fixed
+
+- **An edit made right after the server wrote several times in one millisecond is no longer lost.** The server stamps its own writes one after another (`max(now, highest + 1)`), so a burst of `store.patch` calls in one millisecond is stamped ahead of the wall clock, while the time it sent in every snapshot, delta and ack, and clamped a replica's op to, was the wall's. A client that had seen the burst was handed a time below it, and its edit was clamped back below it: lost as `stale` under a record the burst made (a member the server had just added, written to at once), or as `newer` on a path the burst wrote. A store the server writes more often than once a millisecond drifted further, and kept its clients' edits behind it for as long. A clock's time is now never before a timestamp it has made or seen, and the server reports, clamps to and answers `store.now()` with that time; it runs ahead of the wall clock only by the stamps a burst made, and with it again once the wall clock catches up. A relay reports and clamps by the same clock, so a client behind one is answered the same way
+
 ## [1.0.3] - 2026-10-26
 
 A browser's replica takes a large snapshot over HTTP again, as before

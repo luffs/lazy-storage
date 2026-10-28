@@ -194,7 +194,11 @@ server's `now` in every snapshot, delta and ack, so a clock that runs
 slow is corrected, and `highest seen` is the largest timestamp it has
 received, so its edits sort after everything it has seen. The server
 clamps a timestamp ahead of its own time to its own time and stamps its
-own writes with its own time. Nothing is ever re-stamped.
+own writes with its own time. Nothing is ever re-stamped. The server's
+time is never before a timestamp it has made or accepted: writes made in
+one millisecond are stamped one after another, ahead of the wall clock,
+and the time it reports and clamps to runs with them until the wall clock
+catches up, so an edit made right after them still sorts after them.
 
 ## Undo
 

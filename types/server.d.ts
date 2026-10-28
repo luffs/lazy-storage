@@ -227,6 +227,7 @@ export interface Store<S extends object = any> {
   readonly epoch: string;
   readonly sessions: number;
   readonly disposed: boolean;
+  /** The time on the store's clock: the wall clock's, never before a timestamp the store has made or accepted */
   now(): number;
   /** The server's own write, in the tree's shape: merged, missing containers and records made, stamped now */
   patch(diff: Record<string, any>): Change[];

@@ -69,8 +69,9 @@ resolve](model.md#how-conflicts-resolve)).
 | `lost`, `rejected`, `reset` | as the client events | From a browser's shared connection: what the server said of an op the browser's replica sent for this tab |
 | `pong` | | |
 
-Across these: `now` is the server's time, which the client adopts as the
-offset of its clock; `seq` on `snapshot` and `delta` is the last op of
+Across these: `now` is the server's time (never before a timestamp it
+has made or accepted), which the client adopts as the offset of its
+clock; `seq` on `snapshot` and `delta` is the last op of
 this replica the server holds, so the client can drop acknowledged ops;
 `shape` is a hash of the server's declaration (`initial`, `singletons`,
 `registers`, `parents`), and a client whose own differs reports an

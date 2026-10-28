@@ -139,3 +139,19 @@ test('in local mode the tabs are one replica, acknowledged by the relay', async 
   assert.deepEqual(store.state.tasks.k, { title: 'offline' });
   assert.ok(relay.replicaId);
 });
+
+test('behind a relay, an edit right after a burst of the server\'s writes in one millisecond lands', async () => {
+  const { store, settle, display } = setup();
+  const a = display('a');
+  await settle();
+  for (let i = 0; i < 5; i++) store.patch({ tasks: { [`x${i}`]: { n: i } } });
+  store.patch({ tasks: { k: { title: 'Milk' } } });
+  await settle();
+  const lost = [];
+  a.on('lost', e => lost.push(...e.lost.map(l => l.why)));
+  a.state.tasks.k.done = true;
+  await settle();
+  assert.deepEqual(lost, []);
+  assert.equal(store.state.tasks.k.done, true);
+  assert.equal(a.state.tasks.k.done, true);
+});

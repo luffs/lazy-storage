@@ -103,7 +103,19 @@ test('the clock adopts only a server time that is one, and stamps after what it 
   clock.observe(9000);
   assert.equal(clock.stamp(), 9001, 'after the highest it has seen');
   wall = 2000;
-  assert.equal(clock.time, 6000);
+  assert.equal(clock.time, 9001, 'never before a timestamp it has made or seen');
+  wall = 5000;
+  assert.equal(clock.time, 9001);
+  wall = 6000;
+  assert.equal(clock.time, 10000, 'and the wall clock again once it has caught up');
+});
+
+test('a clock that stamps several times in one millisecond keeps its time after the stamps', () => {
+  const clock = createClock({ now: () => 1000 });
+  for (let i = 0; i < 5; i++) clock.stamp();
+  assert.equal(clock.highest, 1004);
+  assert.equal(clock.time, 1004, 'what a server says is its time, and clamps to');
+  assert.equal(clock.stamp(), 1005);
 });
 
 test('path helpers: keys parse back, a deletion leaves the ancestors, and nothing walks into the prototype', () => {

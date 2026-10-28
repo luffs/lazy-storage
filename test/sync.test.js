@@ -297,3 +297,41 @@ test('validate judges the whole op as one diff, and readOnly names what is the s
   assert.equal(a.state.settings.theme, 'light');
   assert.deepEqual(seen, [[['tasks'], 'a'], [['tasks'], 'a']]);
 });
+
+// The server stamps its own writes after the highest it has made, so several
+// in one millisecond run ahead of the wall clock. Its time (in every
+// snapshot, delta and ack, and what it clamps a replica's op to) runs with
+// them, or an edit made right after, by a client that has seen them, is
+// stamped or clamped below them: lost as stale under a record born then, or
+// to the server's newer write on a path it wrote.
+test('an edit right after a burst of the server\'s writes in one millisecond lands', async () => {
+  const { store, net, client } = setup();
+  for (let i = 0; i < 5; i++) store.patch({ tasks: { [`x${i}`]: { n: i } } });
+  store.patch({ tasks: { k: { title: 'Milk' } } });
+  const a = client('a');
+  const lost = [];
+  a.on('lost', e => lost.push(...e.lost.map(l => l.why)));
+  await net.settle();
+  a.state.tasks.k.done = true;    // a path made under a record the burst made
+  a.state.tasks.x4.n = 40;        // and one the burst wrote
+  await net.settle();
+  assert.deepEqual(lost, []);
+  assert.equal(store.state.tasks.k.done, true);
+  assert.equal(store.state.tasks.x4.n, 40);
+});
+
+test('an edit made after hearing a burst of the server\'s writes is not clamped back below them', async () => {
+  const { store, net, client } = setup();
+  const a = client('a');
+  await net.settle();
+  for (let i = 0; i < 5; i++) store.patch({ tasks: { [`x${i}`]: { n: i } } });
+  store.patch({ tasks: { k: { title: 'Milk' } } });
+  await net.settle();
+  const lost = [];
+  a.on('lost', e => lost.push(...e.lost.map(l => l.why)));
+  a.state.tasks.k.done = true;
+  await net.settle();
+  assert.deepEqual(lost, []);
+  assert.equal(store.state.tasks.k.done, true);
+  assert.equal(a.state.tasks.k.done, true);
+});

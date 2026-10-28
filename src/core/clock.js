@@ -15,6 +15,12 @@
 //   retention safe (store.js).
 // - The server stamps its own writes with its own time, so they win over
 //   what is there.
+//
+// A clock's time is never before a timestamp it has made or seen. Stamps
+// made in one millisecond run ahead of the wall clock (each one after the
+// last), and a server that said its time was the wall's, or clamped to it,
+// would hand a replica that had seen them a time to stamp below them, and
+// clamp its edit back below them: lost as stale under a record born then.
 
 /**
  * @param {Object} [options]
@@ -40,8 +46,8 @@ export function createClock({ now = Date.now } = {}) {
       offset = serverNow - now();
       if (serverNow > highest) highest = serverNow - 1;
     },
-    /** Where this clock thinks the server's time is */
-    get time() { return Math.floor(now() + offset); },
+    /** Where this clock thinks the server's time is: never before a stamp it has made or seen */
+    get time() { return Math.max(Math.floor(now() + offset), highest); },
     get offset() { return offset; },
     get highest() { return highest; }
   };
