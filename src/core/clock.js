@@ -11,8 +11,8 @@
 //   check (doc.js) depends on that.
 // - The server clamps a timestamp ahead of its own time to its own time
 //   (`clamp`): a clock that runs fast wins nothing, nothing is re-stamped,
-//   and an op is never stamped later than it arrived, which is what makes
-//   retention safe (store.js).
+//   and an op is never stamped later than the server's time when it
+//   arrived, which is what makes retention safe (store.js).
 // - The server stamps its own writes with its own time, so they win over
 //   what is there.
 //
@@ -21,6 +21,8 @@
 // last), and a server that said its time was the wall's, or clamped to it,
 // would hand a replica that had seen them a time to stamp below them, and
 // clamp its edit back below them: lost as stale under a record born then.
+// So a clock loaded with a store's records, or a relay's copy, observes the
+// newest stamp they hold before it says what time it is.
 
 /**
  * @param {Object} [options]

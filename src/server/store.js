@@ -166,8 +166,11 @@ export function createStore({
     throw err;
   }
   const log = (Array.isArray(saved?.log) ? saved.log : []).filter(e => e.v <= version).slice(-deltaLog);
+  // The clock starts after every stamp the store holds: its records' as well as its log's, since a short
+  // log may end with a replica's op stamped before the server's last writes (an edit made offline)
   const clock = createClock({ now: time });
   for (const entry of log) clock.observe(entry.ts);
+  clock.observe(doc.latest());
   const sessions = new Set();
   let madeSessions = 0;
   let lastCompaction = -Infinity;

@@ -732,3 +732,53 @@ test('a patch to many displays is encoded once, tagged per display as the hub ta
     for (const s of sessions) s.close();
   }
 });
+
+// A relay restarted from its copies takes its time from the newest stamp
+// they hold, as the server does from its records: while the server is away
+// it decides its clients' edits on its own, and a clock that started at the
+// wall's time would clamp an edit made right after a burst of the server's
+// writes back below them, and show it lost when the server will keep it
+test('a relay restarted from its copies during an outage keeps its time after the stamps they hold', async () => {
+  const now = fakeTime(1_000_000);
+  const store = createStore({ ...SHAPE, now });
+  const central = createNetwork(store, { vouch: credential => credential });
+  const uplink = central.link({ user: { id: 'relay' } });
+  const storage = memoryCopies();
+  const options = { shapeOf: () => SHAPE, link: uplink.factory, storage, grace: 0, reconnect: false, keepalive: false, now };
+  const first = createRelay(options);
+  let site = createNetwork(first);
+  const settle = async () => {
+    for (let i = 0; i < 20; i++) {
+      await central.settle();
+      await site.settle();
+      if (central.pending === 0 && site.pending === 0) return;
+    }
+  };
+  const a = site.client({ replicaId: 'a', ...SHAPE, now }, { user: { id: 'a' } });
+  await settle();
+  for (let i = 0; i < 5; i++) store.patch({ tasks: { [`x${i}`]: { n: i } } });
+  store.patch({ tasks: { k: { title: 'Milk' } } });
+  await settle();
+  assert.equal(first.copy('main').tasks.k.title, 'Milk');
+  first.close();
+  a.dispose();
+
+  uplink.goOffline();
+  const second = createRelay(options);
+  site = createNetwork(second);
+  const again = site.client({ replicaId: 'a', ...SHAPE, now }, { user: { id: 'a' } });
+  await settle();
+  assert.equal(again.relayed, true, 'answered from the copy');
+  again.state.tasks.k.done = true;    // under a record the burst made
+  again.state.tasks.x4.n = 40;        // on a path the burst wrote
+  await settle();
+  assert.equal(second.copy('main').tasks.k.done, true, 'the relay decides it as the server will');
+  assert.equal(second.copy('main').tasks.x4.n, 40);
+
+  uplink.goOnline();
+  second.upstreamUp();
+  await settle();
+  assert.equal(store.state.tasks.k.done, true);
+  assert.equal(store.state.tasks.x4.n, 40);
+  second.close();
+});

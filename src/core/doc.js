@@ -407,6 +407,12 @@ export function createDoc(shape, { state, clocks, track = true } = {}) {
     newest(c, id) {
       return maxOf(clockOf(shape.recordKey(c, id)));
     },
+    /** The newest time in any record (-1 for none): where a clock loaded with the doc starts (see clock.js) */
+    latest() {
+      let max = -1;
+      if (clocks) for (const clock of clocks.values()) max = Math.max(max, maxOf(clock));
+      return max;
+    },
     /**
      * Forget what is older than `cutoff` in every clock: deletions, and
      * the times of writes and births, which nothing an op may still

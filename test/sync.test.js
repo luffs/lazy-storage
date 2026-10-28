@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { LazyWatch } from 'lazy-watch';
-import { createStore } from '../src/server/index.js';
+import { createStore, memoryStorage } from '../src/server/index.js';
 import { createNetwork, fakeTime } from './helpers.js';
 
 const SHAPE = { initial: { tasks: {}, subtasks: {}, settings: { theme: 'light' } }, singletons: ['settings'], parents: { subtasks: { taskId: 'tasks' } } };
@@ -334,4 +334,38 @@ test('an edit made after hearing a burst of the server\'s writes is not clamped 
   assert.deepEqual(lost, []);
   assert.equal(store.state.tasks.k.done, true);
   assert.equal(a.state.tasks.k.done, true);
+});
+
+// A store loaded from storage takes its time from the newest stamp it holds,
+// in its records as well as its log: a short log (deltaLog) may end with a
+// replica's op stamped earlier (an edit made offline) after a burst of the
+// server's own, and a clock that knew only the log would start below the
+// burst, and clamp an edit made right after the restart back below it
+test('a store loaded after a burst keeps its time after the stamps in its records, whatever its log ends with', async () => {
+  const now = fakeTime(1_000_000);
+  const storage = memoryStorage();
+  const first = createStore({ ...SHAPE, now, storage, deltaLog: 1 });
+  for (let i = 0; i < 5; i++) first.patch({ tasks: { [`x${i}`]: { n: i } } });
+  first.patch({ tasks: { k: { title: 'Milk' } } });
+  const highest = first.now();
+  assert.ok(highest > now(), 'the burst ran ahead of the wall clock');
+  // An edit made offline a while ago lands last: the log's one entry is stamped before the burst
+  first.apply({ replica: 'r1', seq: 1, ts: now() - 5000, changes: [{ c: 'tasks', id: 'old', put: { n: 0 } }] });
+  first.flush();
+  first.dispose();
+
+  const store = createStore({ ...SHAPE, now, storage, deltaLog: 1 });
+  assert.equal(store.now(), highest);
+  const net = createNetwork(store);
+  const a = net.client({ replicaId: 'a', ...SHAPE, now });
+  const lost = [];
+  a.on('lost', e => lost.push(...e.lost.map(l => l.why)));
+  await net.settle();
+  a.state.tasks.k.done = true;    // under a record the burst made
+  a.state.tasks.x4.n = 40;        // on a path the burst wrote
+  await net.settle();
+  assert.deepEqual(lost, []);
+  assert.equal(store.state.tasks.k.done, true);
+  assert.equal(store.state.tasks.x4.n, 40);
+  store.dispose();
 });

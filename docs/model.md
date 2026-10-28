@@ -198,7 +198,9 @@ own writes with its own time. Nothing is ever re-stamped. The server's
 time is never before a timestamp it has made or accepted: writes made in
 one millisecond are stamped one after another, ahead of the wall clock,
 and the time it reports and clamps to runs with them until the wall clock
-catches up, so an edit made right after them still sorts after them.
+catches up, so an edit made right after them still sorts after them. A
+store loaded from storage, and a relay from its copies, start their time
+after the newest stamp their records hold.
 
 ## Undo
 

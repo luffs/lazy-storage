@@ -250,6 +250,9 @@ export function createRelay({
     // An op of another shape (a browser's storage from before 1.0, whose ops were diffs) is let go of, not left to stop the store
     const ops = (saved?.own?.ops ?? []).filter(op => isObj(op) && Number.isInteger(op.seq) && Array.isArray(op.changes));
     for (const op of ops) edge.queue.push({ own: true, replica: replicaId, op, sent: false });
+    // A copy loaded while the server is away is decided on alone: the clock starts after every stamp it holds
+    clock.observe(edge.base.latest());
+    for (const op of ops) clock.observe(op.ts);
     // The view's records are copies: a change from the server applied to the base must show as a change of the view
     edge.view = docFromRecords(shape, structuredClone([...edge.base.records()]));
     for (const entry of edge.queue) for (const change of entry.op.changes) safeApply(edge.view, change, entry.op.ts);
