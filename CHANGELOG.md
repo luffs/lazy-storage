@@ -4,6 +4,21 @@ All notable changes to lazy-storage are documented here. The format follows Keep
 
 ## [Unreleased]
 
+## [1.0.4] - 2026-10-28
+
+An edit made right after the server wrote several times in one
+millisecond lands again. The server stamps its own writes one after
+another, ahead of the wall clock in a burst, but told its clients the
+wall's time and clamped their edits to it, so a client's first write to
+a record the server had just made was lost about two times in three.
+The server's time now runs with its stamps, and a store or a relay
+loaded from storage starts it after the newest stamp it holds. Clients,
+relays and the wire are unchanged, and any mix of 1.0 versions works. On
+upgrade: `store.now()` is the store's time, which can run a few
+milliseconds ahead of the wall clock after a burst (more under a steady
+stream of the server's own writes); code that wants the wall's time
+should use `Date.now()`.
+
 ### Fixed
 
 - **An edit made right after the server wrote several times in one millisecond is no longer lost.** The server stamps its own writes one after another (`max(now, highest + 1)`), so a burst of `store.patch` calls in one millisecond is stamped ahead of the wall clock, while the time it sent in every snapshot, delta and ack, and clamped a replica's op to, was the wall's. A client that had seen the burst was handed a time below it, and its edit was clamped back below it: lost as `stale` under a record the burst made (a member the server had just added, written to at once), or as `newer` on a path the burst wrote. A store the server writes more often than once a millisecond drifted further, and kept its clients' edits behind it for as long. A clock's time is now never before a timestamp it has made or seen, and the server reports, clamps to and answers `store.now()` with that time; it runs ahead of the wall clock only by the stamps a burst made, and with it again once the wall clock catches up. A relay reports and clamps by the same clock, so a client behind one is answered the same way. A store loaded from storage, and a relay from its copies, start that clock after the newest stamp their records hold, not only their log's: a short log (`deltaLog`) may end with an edit made offline, stamped before the server's last writes, and a store restarted right after a burst, or a relay restarted while the server is away, would otherwise have clamped the next edit below them
