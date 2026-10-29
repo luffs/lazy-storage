@@ -577,7 +577,8 @@ test('a relay\'s files keep a fingerprint of a credential, never the credential,
     for (let i = 0; i < 20; i++) { await central.settle(); await site.settle(); }
     db.state.tasks.k = { title: 'x' };
     for (let i = 0; i < 20; i++) { await central.settle(); await site.settle(); }
-    relay.flush?.();
+    // Written by the time the relay is closed: saveDelay 0 is still a timer, which a fast machine reads the directory before
+    relay.close();
     const files = readdirSync(dir).sort();
     assert.deepEqual(files, ['_relay.json', 'relay.json']);
     for (const file of files) assert.ok(!readFileSync(join(dir, file), 'utf8').includes('a-secret-bearer-token'), `${file} holds no credential`);
