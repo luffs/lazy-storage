@@ -154,7 +154,8 @@ clock (its birth, its writes, and the paths deleted inside it), and the
 progress kept per replica (every browser tab that ever connected). A
 store keeps them for its **retention window** (`retention`, default 30
 days) and forgets what is older, on load and then once an hour as ops
-arrive (`store.compact()` does it on demand and reports what it removed);
+and the server's own writes arrive (`store.compact()` does it on demand
+and reports what it removed);
 a record nobody has touched for a window carries no times at all. A
 deleted record keeps nothing to forget. To make forgetting safe, an op
 stamped before the window is refused whole with code `expired`: it might

@@ -48,6 +48,20 @@ test('deletions inside records and replicas older than the window are forgotten,
   assert.deepEqual(Object.keys(storage.load().replicas), [], 'the replica forgotten in storage too');
 });
 
+test('a store only the server writes compacts as it writes: what it deleted inside a record is forgotten once the window has passed', () => {
+  const now = fakeTime(100 * DAY);
+  const store = createStore({ initial: { flags: {} }, singletons: ['flags'], now, retention: 30 * DAY });
+  for (let i = 0; i < 20; i++) {
+    store.patch({ flags: { [`k${i}`]: true } });
+    now.advance(DAY);
+    store.del('flags', [`k${i}`]);
+  }
+  assert.equal(Object.keys(store.clock('flags').gone).length, 20, 'inside the window, every deletion is kept');
+  now.advance(40 * DAY);
+  store.patch({ flags: { last: true } });
+  assert.deepEqual(store.clock('flags').gone, {}, 'forgotten as the next write arrives, with no replica\'s op and no compact() to do it');
+});
+
 test('retention: Infinity keeps every deletion and replica and takes ops of any age', () => {
   const now = fakeTime(1000 * DAY);
   const store = createStore({ ...SHAPE, now, retention: Infinity });

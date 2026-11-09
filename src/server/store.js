@@ -675,6 +675,8 @@ export function createStore({
     const applied = [];
     for (const change of list) applied.push(...doc.apply(change, ts, 'authority').applied);
     landed(applied, ts, 'server', null, undefined, null);
+    // As a replica's op does: a store only the server writes would otherwise forget nothing until it was loaded again
+    maybeCompact();
     return applied;
   }
 
