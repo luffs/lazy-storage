@@ -8,6 +8,7 @@ import { serve, createHandlers } from '../src/server/node.js';
 import { createClient, createConnection, webSocketTransport } from '../src/index.js';
 import { probeFrames, stalledSocket } from './frames.js';
 import { randomBytes } from 'node:crypto';
+import { connect as connectSocket } from 'node:net';
 import { createRelay } from '../src/relay/index.js';
 import { credentialRequest } from '../src/server/follow.js';
 import { createNetwork } from './helpers.js';
@@ -520,6 +521,39 @@ test('a relay on the relay route: its clients are vouched for by their own crede
     for (const c of behind) c.dispose();
     relay.close();
     bobs.close();
+    await server.shutdown();
+  }
+});
+
+test('a request target no URL can hold is answered 400, on a plain request and on an upgrade, and a throw in the app\'s own handler 500: none ends the process', async () => {
+  const errors = [];
+  const rejections = [];
+  const onRejection = err => rejections.push(err);
+  process.on('unhandledRejection', onRejection);
+  const stores = createStores(() => createStore({ initial: INITIAL }));
+  const server = serve({ stores, port: 0, onError: err => errors.push(err), request: () => { throw new Error('the app threw'); } });
+  const port = await listening(server);
+  /** The status line a raw request is answered with */
+  const statusOf = async text => {
+    const socket = connectSocket(port, 'localhost');
+    await once(socket, 'connect');
+    socket.write(text);
+    let reply = '';
+    socket.on('data', chunk => { reply += chunk; });
+    await Promise.race([once(socket, 'close'), sleep(2000)]);
+    socket.destroy();
+    return reply.split('\r\n')[0];
+  };
+  try {
+    assert.equal(await statusOf('GET // HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n'), 'HTTP/1.1 400 Bad Request');
+    assert.equal(await statusOf('GET // HTTP/1.1\r\nHost: x\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n'), 'HTTP/1.1 400 Bad request');
+    assert.equal(errors.length, 0, 'a malformed target is the client\'s affair');
+    assert.equal(await statusOf('GET /other HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n'), 'HTTP/1.1 500 Internal Server Error');
+    assert.equal(errors[0]?.message, 'the app threw', 'reported to onError');
+    await sleep(20);
+    assert.equal(rejections.length, 0, 'nothing left as an unhandled rejection');
+  } finally {
+    process.off('unhandledRejection', onRejection);
     await server.shutdown();
   }
 });

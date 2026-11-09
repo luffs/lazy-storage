@@ -4,6 +4,10 @@ All notable changes to lazy-storage are documented here. The format follows Keep
 
 ## [Unreleased]
 
+### Security
+
+- **A request whose target no URL can hold no longer ends a Node server.** `GET // HTTP/1.1`, as a plain request or an upgrade, made the Node adapter's `new URL(req.url, ...)` throw before anything caught it, and `serve()` left the rejected promise unhandled, which ends a Node process by default: any client that could reach the port could stop the server, without authenticating. `createHandlers`' `request` and `upgrade` now answer such a target with 400 and resolve to true, and `serve()` answers a throw on either path, the app's own `request` handler included, with 500 and reports it to `onError`. The Bun adapter is handed a parsed `Request` and was not affected
+
 ## [1.0.4] - 2026-10-28
 
 An edit made right after the server wrote several times in one

@@ -40,6 +40,18 @@ function refuse(socket, status, text) {
 }
 
 /**
+ * The path a request asks for, or null when its target is not one a URL
+ * can hold (`//`): Node hands over whatever the request line said
+ */
+function pathnameOf(req) {
+  try {
+    return new URL(req.url, 'http://localhost').pathname;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * @param {Object} options - as the Bun adapter's createHandlers, plus:
  * @param {number|false} [options.idleTimeout=120000] - close a socket that
  *   has sent nothing for this long (ms), as Bun's own idle timeout does: a
@@ -209,7 +221,11 @@ export function createHandlers({
   }
 
   async function upgrade(req, socket, head) {
-    const pathname = new URL(req.url, 'http://localhost').pathname;
+    const pathname = pathnameOf(req);
+    if (pathname === null) {
+      refuse(socket, 400, 'Bad request');
+      return true;
+    }
     if (pathname !== path && pathname !== relayPath) return false;
     try {
       if (closing) {
@@ -251,7 +267,13 @@ export function createHandlers({
    * snapshot.js); resolves to false when it is not, for the app to answer
    */
   async function request(req, res) {
-    const id = snapshots ? snapshotId(new URL(req.url, 'http://localhost').pathname, path) : null;
+    const pathname = pathnameOf(req);
+    if (pathname === null) {
+      res.writeHead(400, { 'content-type': 'text/plain' });
+      res.end('Bad request');
+      return true;
+    }
+    const id = snapshots ? snapshotId(pathname, path) : null;
     if (id === null) return false;
     let response;
     if (closing) {
@@ -371,6 +393,9 @@ export function createHandlers({
  */
 export function serve({ port = 3200, host, request, ...options } = {}) {
   const handlers = createHandlers(options);
+  const onError = options.onError ?? (err => console.error('lazy-storage:', err));
+  // A throw on either path (the app's own `request` included) is answered
+  // and reported: left as an unhandled rejection it would end the process
   const server = createServer((req, res) => {
     handlers.request(req, res).then(ours => {
       if (ours) return;
@@ -378,10 +403,17 @@ export function serve({ port = 3200, host, request, ...options } = {}) {
       res.statusCode = 404;
       res.setHeader('content-type', 'text/plain');
       res.end('Not found');
+    }).catch(err => {
+      onError(err);
+      if (!res.headersSent) res.writeHead(500, { 'content-type': 'text/plain' });
+      res.end('Something went wrong');
     });
   });
   server.on('upgrade', (req, socket, head) => {
-    handlers.upgrade(req, socket, head).then(ours => { if (!ours) refuse(socket, 404, 'Not found'); });
+    handlers.upgrade(req, socket, head).then(ours => { if (!ours) refuse(socket, 404, 'Not found'); }).catch(err => {
+      onError(err);
+      refuse(socket, 500, 'Upgrade failed');
+    });
   });
   server.sockets = handlers.sockets;
   server.socketStats = handlers.socketStats;
