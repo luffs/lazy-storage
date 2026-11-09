@@ -13,9 +13,9 @@ npm test              # node --test "test/*.test.js": unit and integration tests
 npm run test:bun      # the Bun-only tests in test/bun (bun:sqlite adapters, the Bun server and relay)
 npm run test:types    # tsc over test/types against the declarations in types/
 npm run test:coverage # the Node suite under c8; fails below 96% lines/statements, 88% branches, 92% functions
-npm run fuzz          # a longer convergence campaign: node test/fuzz/run.js [--mode convergence|relay|hostile] [--seed N] [--runs N] [--steps N] [--clients N] [--run N --trace]
+npm run fuzz          # a longer convergence campaign: node test/fuzz/run.js [--mode convergence|relay|hostile] [--seed N] [--runs N] [--steps N] [--clients N] [--rate] [--local] [--run N --trace]
 npm run fuzz:hostile  # the same with an attacker beside honest clients
-node test/fuzz/run.js --mode relay   # half the clients behind a relay (src/relay) whose link drops and comes back
+node test/fuzz/run.js --mode relay   # half the clients behind a relay (src/relay) whose link drops and comes back; --local: a browser's relay (acknowledge: 'local'); --rate (any convergence mode): a small rate limit on the store
 npm run bench         # server benchmark (bench/run.js); medians of 5 rounds
 npm run bench:client  # client benchmark (bench/client.js) in happy-dom: React/Vue renders, list views, persistence
 npm run bench:check   # both benchmarks with --check: every case under its ceiling, the client counts within their bounds

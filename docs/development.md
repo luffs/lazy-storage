@@ -74,6 +74,7 @@ npm run test:bun      # the Bun adapters (the server's and the relay's) and the 
 npm run fuzz          # a longer randomized convergence campaign; a failure prints the seed
 npm run fuzz:hostile  # the same with an attacker beside honest clients
 node test/fuzz/run.js --mode relay   # clients behind a relay whose link drops, beside clients on the store
+node test/fuzz/run.js --mode relay --local --rate   # --local: the relay is a browser's; --rate: the store's rate limit on, and small
 npm run test:coverage # the Node suite under c8, failing below 96% of lines and statements, 88% of branches, 92% of functions
 npm run bench:check   # both benchmarks, failing when a case is over its ceiling or a count over its bound
 ```
@@ -101,7 +102,12 @@ written deep, written whole, a field or the record deleted), make
 children under parents that may be gone, write singletons and registers,
 undo, and go offline and back, while the server patches too and time
 moves or stands still for ties. In relay mode half of them are behind a
-relay whose link to the server drops and comes back. At the end every
+relay whose link to the server drops and comes back: a site's, each
+client a replica of its own, or with `--local` a browser's, its clients
+the tabs of one replica. `--rate` gives the store a token bucket of two,
+so ops and hellos are refused for the rate throughout and land on their
+retries; the timers those wait on run on the run's own clock, so a seed
+still reproduces its run. At the end every
 client, and the relay's copy, holds the store's state, no child names a
 missing parent, no outbox holds anything, and no op was applied twice.
 

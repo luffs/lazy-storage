@@ -10,8 +10,11 @@
 // undo, a server's own patch, a client or the relay's link going away or
 // coming back, time moving on (or not, for ties). `clocks` says whether the
 // clients take their snapshots with the records' clocks ('all', the
-// default), without ('none'), or some of each ('mixed'). At the end everything
-// comes back online and settles, and:
+// default), without ('none'), or some of each ('mixed'). `rate` gives the
+// store a small token bucket, so ops and hellos are refused for the rate
+// all the time and wait for their retries; `local` makes the relay a
+// browser's (`acknowledge: 'local'`: its clients are one replica's tabs).
+// At the end everything comes back online and settles, and:
 //
 // - every client, and the relay's copy, holds the store's state
 // - no child names a parent that is not there
@@ -35,12 +38,60 @@ const SHAPE = {
 };
 const IDS = ['t0', 't1', 't2', 't3'];
 const SUB_IDS = ['s0', 's1', 's2'];
+// A bucket a run empties in a few steps: 'time moves' (1 to 20 ms) refills it by up to two
+const RATE = { burst: 2, perSecond: 100 };
 
-async function oneRun(rng, { steps, clients: count, relay: withRelay, clocks, trace }, trail) {
+/**
+ * setTimeout and clearTimeout on the run's fake clock, for a run with the
+ * rate limit on: a refused client or relay retries on a timer, `retryAfter`
+ * from the refusal, and on the real clock when that fires between two steps
+ * would be the machine's to say, and a seed would not reproduce its run.
+ * `run()` fires what is due, in order; `waiting()` says whether any is due
+ * within two seconds
+ */
+function fakeTimers(now) {
+  const real = { setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout };
+  let timers = [];
+  let made = 0;
+  globalThis.setTimeout = (fn, delay, ...args) => {
+    const timer = { at: now() + Math.max(0, Number(delay) || 0), n: made++, fire: () => fn(...args), unref: () => timer, ref: () => timer };
+    timers.push(timer);
+    return timer;
+  };
+  globalThis.clearTimeout = timer => {
+    if (timers.includes(timer)) timers = timers.filter(t => t !== timer);
+    else real.clearTimeout(timer);
+  };
+  return {
+    // One a timer makes as it fires waits for the next run: a relay with `linger: 0` and ops queued asks again at once
+    run() {
+      const upTo = made;
+      for (;;) {
+        const due = timers.filter(t => t.at <= now() && t.n < upTo).sort((a, b) => a.at - b.at || a.n - b.n)[0];
+        if (!due) return;
+        timers = timers.filter(t => t !== due);
+        due.fire();
+      }
+    },
+    waiting: () => timers.some(t => t.at <= now() + 2000),
+    restore() { Object.assign(globalThis, real); }
+  };
+}
+
+async function oneRun(rng, options, trail) {
   const now = fakeTime(1_000_000);
+  const timers = options.rate ? fakeTimers(now) : null;
+  try {
+    return await theRun(rng, options, trail, now, timers);
+  } finally {
+    timers?.restore();
+  }
+}
+
+async function theRun(rng, { steps, clients: count, relay: withRelay, clocks, rate, local, trace }, trail, now, timers) {
   const errors = [];
   const onError = err => errors.push(err);
-  const store = createStore({ ...SHAPE, now, onError, rateLimit: false });
+  const store = createStore({ ...SHAPE, now, onError, rateLimit: rate ? RATE : false });
   const applied = new Set();
   store.observe('op', ({ replicaId, seq, changes }) => {
     if (seq === null || !changes.length) return;
@@ -57,21 +108,22 @@ async function oneRun(rng, { steps, clients: count, relay: withRelay, clocks, tr
     const traced = !trace ? uplink.factory : () => {
       const t = uplink.factory();
       const send = t.send;
-      t.send = m => { if (m.as || m.t === 'hello') console.log('  relay->server', m.t, m.as ?? '', m.op ? `${m.op.replica}:${m.op.seq}` : ''); send(m); };
+      t.send = m => { if (m.as || m.t === 'hello') console.log('  relay->server', m.t, m.as ?? '', m.op ? `${m.op.replica}:${m.op.seq}` : '', m.ops ? m.ops.map(o => o.seq).join(',') : ''); send(m); };
       queueMicrotask(() => {
         const onmessage = t.onmessage;
-        t.onmessage = m => { if (m.as || ['snapshot', 'delta', 'closed'].includes(m.t)) console.log('  server->relay', m.t, m.as ?? '', m.seq ?? '', m.code ?? ''); onmessage?.(m); };
+        t.onmessage = m => { if (m.as || ['snapshot', 'delta', 'closed', 'error', 'ack'].includes(m.t)) console.log('  server->relay', m.t, m.as ?? '', m.seq ?? '', m.code ?? '', m.retryAfter ?? ''); onmessage?.(m); };
         const onclose = t.onclose;
         t.onclose = e => { console.log('  link closed'); onclose?.(e); };
       });
       return t;
     };
     // Half the runs let go of a store the moment its last client leaves, and open it again from the copy
-    relay = createRelay({ shapeOf: () => SHAPE, link: traced, grace: 0, linger: rng.chance(0.5) ? 0 : false, reconnect: false, keepalive: false, now, onError });
+    relay = createRelay({ shapeOf: () => SHAPE, link: traced, acknowledge: local ? 'local' : 'upstream', grace: 0, linger: rng.chance(0.5) ? 0 : false, reconnect: false, keepalive: false, now, onError });
     site = createNetwork(relay);
   }
   const settle = async () => {
     for (let i = 0; i < 50; i++) {
+      timers?.run();
       await central.settle();
       if (site) await site.settle();
       if (central.pending === 0 && (!site || site.pending === 0)) return;
@@ -141,6 +193,13 @@ async function oneRun(rng, { steps, clients: count, relay: withRelay, clocks, tr
   await settle();
   now.advance(1);
   await settle();
+  // What the rate held back goes as the bucket refills: time moves on until no retry is waiting and nothing is pending
+  if (timers) {
+    for (let i = 0; i < 2000 && (timers.waiting() || clients.some(c => c.pending) || relay?.pending('main')); i++) {
+      now.advance(5);
+      await settle();
+    }
+  }
 
   const truth = store.snapshot();
   const fail = message => { throw new Error(message); };
@@ -160,17 +219,17 @@ async function oneRun(rng, { steps, clients: count, relay: withRelay, clocks, tr
   return steps;
 }
 
-async function campaign({ seed = 1, runs = 20, steps = 40, clients = 3, relay = false, clocks = 'all', only, trace = false } = {}) {
+async function campaign({ seed = 1, runs = 20, steps = 40, clients = 3, relay = false, clocks = 'all', rate = false, local = false, only, trace = false } = {}) {
   let operations = 0;
   for (let run = only ?? 0; run < (only === undefined ? runs : only + 1); run++) {
     const runSeed = seed * 1000 + run;
     const rng = seededRandom(runSeed);
     const trail = [];
     try {
-      operations += await oneRun(rng, { steps, clients, relay, clocks, trace }, trail);
+      operations += await oneRun(rng, { steps, clients, relay, clocks, rate, local, trace }, trail);
     } catch (err) {
       const mode = relay ? ' --mode relay' : '';
-      const knob = clocks === 'all' ? '' : ` --clocks ${clocks}`;
+      const knob = `${clocks === 'all' ? '' : ` --clocks ${clocks}`}${rate ? ' --rate' : ''}${relay && local ? ' --local' : ''}`;
       throw new Error(`fuzz failed (seed ${seed}, run ${run}): ${err.message}\nlast actions: ${trail.join(', ')}\nreproduce: node test/fuzz/run.js${mode}${knob} --seed ${seed} --runs ${run + 1} --steps ${steps} --clients ${clients}`, { cause: err });
     }
   }

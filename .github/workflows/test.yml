@@ -114,6 +114,18 @@ jobs:
         # Clients behind a relay whose link drops and comes back, beside clients on the store
         run: node test/fuzz/run.js --mode relay --runs 100 --steps 50 --clients 4
 
+      - name: Run the campaigns again with the rate limit on
+        # A small token bucket: ops and hellos are refused for the rate throughout, and wait for their retries
+        run: |
+          node test/fuzz/run.js --rate --runs 200 --steps 50 --clients 4
+          node test/fuzz/run.js --mode relay --rate --runs 100 --steps 50 --clients 4
+
+      - name: Run a longer campaign behind a browser's relay
+        # The relay as a browser's tabs share it (acknowledge: 'local'), with the rate limit off and on
+        run: |
+          node test/fuzz/run.js --mode relay --local --runs 100 --steps 50 --clients 4
+          node test/fuzz/run.js --mode relay --local --rate --runs 100 --steps 50 --clients 4
+
       - name: Run a longer hostile-client campaign
         # An attacker beside honest clients: forged ops, poisoned stamps, reserved names, churn
         run: node test/fuzz/run.js --mode hostile --runs 300 --steps 60
