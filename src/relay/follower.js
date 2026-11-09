@@ -545,8 +545,15 @@ export function createRelay({
   function caughtUp(edge, msg, applyToBase) {
     clock.adopt(msg.now);
     const previous = edge.epoch;
-    if (Number.isInteger(msg.seq)) edge.queue = edge.queue.filter(e => !(e.own && e.op.seq <= msg.seq));
+    // What the answer acknowledges of the relay's own ops, kept by seq for what it says lost
+    const answered = new Map();
+    if (Number.isInteger(msg.seq)) {
+      for (const e of edge.queue) if (e.own && e.op.seq <= msg.seq) answered.set(e.op.seq, e);
+      edge.queue = edge.queue.filter(e => !answered.has(e.op.seq) || !e.own);
+    }
     const records = applyToBase();
+    // The records those ops wrote are worked out again too: one that lost whole is in no patch, and would go on being shown
+    for (const e of answered.values()) for (const ch of e.op.changes) records.push([ch.c, ch.id]);
     edge.v = Number.isInteger(msg.v) ? msg.v : edge.v;
     edge.epoch = typeof msg.epoch === 'string' ? msg.epoch : null;
     edge.have = true;
@@ -558,7 +565,14 @@ export function createRelay({
     }
     recompute(edge, records, clock.highest);
     persist(edge);
-    for (const p of Array.isArray(msg.lost) ? msg.lost : []) if (isObj(p) && p.lost?.length) fault(new Error(`The server took only part of the relay's op ${p.seq}`));
+    for (const p of Array.isArray(msg.lost) ? msg.lost : []) {
+      if (!isObj(p) || !p.lost?.length) continue;
+      // The browser's replica: an edit made while the server was away lost to a newer one, as edits do, and
+      // every tab is told, as when the op is acknowledged live (by the tab's seq; an op the queue was loaded
+      // with, made before a reload, by the replica's own). A site's own write that lost is its fault to hear
+      if (local) for (const ss of edge.sessions) { if (ss.synced) ss.send({ t: 'lost', seq: answered.get(p.seq)?.from?.seq ?? p.seq, lost: p.lost }); }
+      else fault(new Error(`The server took only part of the relay's op ${p.seq}`));
+    }
     noteLink();
     // Who was waiting, and what was waiting to go up
     for (const grant of edge.grants.values()) if (grant.state === 'pending') vouch(edge, grant);

@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { LazyWatch } from 'lazy-watch';
 import { createStore } from '../src/server/index.js';
-import { createRelay } from '../src/relay/index.js';
+import { createRelay, memoryCopies } from '../src/relay/index.js';
 import { createNetwork, fakeTime } from './helpers.js';
 
 const SHAPE = { initial: { tasks: {}, subtasks: {} }, parents: { subtasks: { taskId: 'tasks' } } };
@@ -209,6 +209,75 @@ test("a browser's relay back with more ops than a hello carries sends the rest o
   await settle();
   assert.equal(relay.pending('main'), 0);
   assert.equal(Object.keys(store.state.tasks).length, 1005);
+});
+
+// Found by the relay fuzzer with a browser's relay (--local): an edit a tab made while the server was away, that
+// lost at the server, was a fault of the relay's, and one that lost whole went on being shown
+test("a browser's relay back with edits that lost: the tabs hear `lost`, the relay reports no fault, and what lost whole is shown no longer", async () => {
+  const { store, relay, settle, display, direct, centralDown, centralUp, central, errors } = setup({ acknowledge: 'local' });
+  const tab = display('tab', { id: 'relay' });
+  const other = direct('other');
+  await settle();
+  tab.state.tasks.t = { title: 'Milk' };
+  await settle();
+  const lost = [];
+  tab.on('lost', e => lost.push(e.lost.map(l => l.why)));
+  await centralDown();
+  delete other.state.tasks.t;
+  await central.settle();
+  // The relay still holds the task: a child of it is let in there, and is refused by the server, which does not
+  tab.state.subtasks.whole = { taskId: 't', n: 1 };
+  await settle();
+  tab.state.subtasks.part = { taskId: 't', n: 2 };
+  tab.state.tasks.x = { title: 'Eggs' };
+  await settle();
+  assert.equal(relay.pending('main'), 2);
+  await centralUp();
+  assert.deepEqual(errors, [], 'an edit that lost is no fault');
+  assert.deepEqual(lost, [['missing'], ['missing']], 'each told to the tab, as when it is acknowledged live');
+  assert.deepEqual(store.state.subtasks, {});
+  assert.deepEqual(relay.copy('main').subtasks, {}, 'the child that lost whole is in no patch, and is gone from the copy all the same');
+  assert.deepEqual(snap(tab).subtasks, {});
+  assert.deepEqual(snap(tab).tasks, { x: { title: 'Eggs' } }, 'what landed of the op that lost in part stays');
+});
+
+test("a browser's relay loaded with queued edits (a reload while the server was away) hears of the ones that lost without a fault", async () => {
+  const now = fakeTime(1_000_000);
+  const store = createStore({ ...SHAPE, now });
+  const central = createNetwork(store);
+  const storage = memoryCopies();
+  const errors = [];
+  const open = () => {
+    const uplink = central.link({ user: { id: 'u' } });
+    const relay = createRelay({ shapeOf: () => SHAPE, link: uplink.factory, storage, acknowledge: 'local', grace: 0, reconnect: false, keepalive: false, now, onError: err => errors.push(err) });
+    const site = createNetwork(relay);
+    const settle = async () => { for (let i = 0; i < 20; i++) { await central.settle(); await site.settle(); if (central.pending === 0 && site.pending === 0) return; } };
+    return { uplink, relay, site, settle };
+  };
+  const first = open();
+  const tab = first.site.client({ replicaId: 'tab', ...SHAPE, now });
+  const other = central.client({ replicaId: 'other', ...SHAPE, now }, { user: { id: 'o' } });
+  await first.settle();
+  tab.state.tasks.t = { title: 'Milk' };
+  await first.settle();
+  first.uplink.goOffline();
+  await first.settle();
+  delete other.state.tasks.t;
+  await central.settle();
+  tab.state.subtasks.s = { taskId: 't', n: 1 };
+  tab.state.tasks.x = { title: 'Eggs' };
+  await first.settle();
+  tab.dispose();
+  first.relay.close();
+
+  const second = open();
+  const again = second.site.client({ replicaId: 'tab2', ...SHAPE, now });
+  await second.settle();
+  assert.deepEqual(errors, []);
+  assert.equal(second.relay.pending('main'), 0);
+  assert.deepEqual(store.state.tasks, { x: { title: 'Eggs' } });
+  assert.deepEqual(second.relay.copy('main').subtasks, {});
+  assert.deepEqual(snap(again).subtasks, {});
 });
 
 // Found by the relay fuzzer with the rate limit on (--rate --local)
