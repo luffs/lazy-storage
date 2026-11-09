@@ -102,8 +102,17 @@ A public server needs a few ceilings, all on by default:
   session until its next hello; the client stops sending, keeps the ops,
   and resends its outbox in a hello after `retryAfter`, in order, so
   nothing is lost and a runaway client is throttled rather than broken.
-  A hello costs one token and the ops inside it are not counted. `false`
-  turns it off.
+  A hello costs one token, which pays for its first op, and each op
+  after it costs one more, but for the ops the store has merged already
+  (sent live, their ack lost with the socket): n ops cost n tokens,
+  live or in a hello. At the first op beyond the bucket the rest of the
+  hello waits:
+  that op is refused with `rate-limited`, none after it is judged, and
+  `retryAfter` is how long until the bucket holds enough for what is
+  left (as much of it as the bucket can hold). So a client back from a
+  long time offline with more ops than `burst` lands them a bucket at a
+  time, a few seconds apart at the defaults, and a reconnecting client
+  writes no faster than a connected one. `false` turns it off.
 - **Replicas per user.** A store remembers each replica's progress (its
   last sequence number, when, and whose it is) for the retention window,
   and a client that minted a new replica id with every hello would leave

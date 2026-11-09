@@ -208,7 +208,11 @@ export function createStore({
     }
   }
 
-  function throttle(bucketKey) {
+  /**
+   * Take a token from a bucket: 0 when there was one, else how long (ms)
+   * until the bucket holds `want` of them (never more than it can hold)
+   */
+  function throttle(bucketKey, want = 1) {
     if (!rateLimit) return 0;
     const wall = time();
     let bucket = buckets.get(bucketKey);
@@ -223,7 +227,7 @@ export function createStore({
       bucket.tokens -= 1;
       return 0;
     }
-    return Math.ceil(((1 - bucket.tokens) / rateLimit.perSecond) * 1000);
+    return Math.ceil(((Math.max(1, Math.min(want, rateLimit.burst)) - bucket.tokens) / rateLimit.perSecond) * 1000);
   }
 
   // --- Group commit ---------------------------------------------------------------------
@@ -901,7 +905,10 @@ export function createStore({
             const claim = claimReplica(s, user, msg.replica);
             if (claim?.code === 'replica-taken') return closeWith({ t: 'closed', code: claim.code, message: claim.message });
             if (claim) return send({ t: 'error', ...claim });
-            const wait = throttle(bucketOf(user, msg.replica));
+            const ops = Array.isArray(msg.ops) ? msg.ops.slice(0, HELLO_OPS) : [];
+            const bucket = bucketOf(user, msg.replica);
+            // Its token pays for its first op (see below). Refused, it is asked back once the bucket holds enough for the ops it carries
+            const wait = throttle(bucket, Math.max(1, ops.length));
             if (wait > 0) return send({ t: 'error', code: 'rate-limited', message: `Too many hellos; try again in ${wait} ms`, retryAfter: wait });
             s.heldUntil = null;
             s.speaksFor = msg.replica;
@@ -929,7 +936,22 @@ export function createStore({
             }
             const lost = [];
             const acked = [];
-            for (const op of Array.isArray(msg.ops) ? msg.ops.slice(0, HELLO_OPS) : []) {
+            // Each op draws on the bucket as a live one does, or a hello would be a thousand ops for one token: the
+            // hello's own token pays for the first, so n ops cost n tokens however they come, and a bucket of one
+            // still lands one op a hello. One the store has merged already (sent live, its ack lost with the socket)
+            // costs nothing again. At the first op beyond the bucket the rest wait, in order: the client says hello
+            // again after `retryAfter`, long enough for what is left (as much of it as the bucket holds)
+            let paid = true;
+            for (let i = 0; i < ops.length; i++) {
+              const op = ops[i];
+              const merged = Utils.isPlainObject(op) && op.replica === msg.replica && op.seq <= (replicas.get(msg.replica)?.seq ?? 0);
+              let wait = 0;
+              if (!merged && paid) paid = false;
+              else if (!merged) wait = throttle(bucket, ops.length - i);
+              if (wait > 0) {
+                send(refusal(op, new RefusedError('rate-limited', `Too many ops; try again in ${wait} ms`, { retryAfter: wait }), user));
+                break;
+              }
               try {
                 const result = apply(op, s);
                 acked.push(op.seq);

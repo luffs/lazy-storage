@@ -94,7 +94,7 @@ without help from the app: it drops the op, takes its edit back from
 | `forbidden` | A rule, `readOnly` or `validate` refused it |
 | `expired` | Stamped before the retention window (see [Persistence](server.md#persistence)) |
 | `too-large` | More changes than `maxChanges`, each field a put writes counted |
-| `rate-limited` | Beyond the user's token bucket, or after such a refusal and before the next hello; `retryAfter` says how long in ms. The client keeps the op, sends nothing more live, and resends its outbox in a hello after `retryAfter`; no `rejected` |
+| `rate-limited` | Beyond the user's token bucket, or after such a refusal and before the next hello; `retryAfter` says how long in ms. The client keeps the op, sends nothing more live, and resends its outbox in a hello after `retryAfter`; no `rejected`. An op in a hello draws on the bucket too (the hello's own token pays for the first): the first beyond it is refused so, and the hello's ops after it are not judged (the answer's `seq` says how far the server got) |
 
 ## Closed codes
 

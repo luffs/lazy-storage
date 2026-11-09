@@ -57,6 +57,8 @@ import { tagStore } from '../server/wire.js';
 const { Utils } = LazyWatch;
 const isObj = Utils.isPlainObject;
 const DELTA_LOG = 1000;
+/** The most ops one hello carries (the server reads no more: HELLO_OPS in store.js); the rest go live once it is answered */
+const HELLO_LIMIT = 1000;
 /** How long a store the server would not let the relay carry is answered with the server's word before it asks again */
 const REASK = 10 * 60_000;
 const clone = value => (value === null || value === undefined || typeof value !== 'object' ? value : structuredClone(value));
@@ -243,6 +245,7 @@ export function createRelay({
       link: null,
       synced: false,
       retry: null,
+      throttled: false,
       lingering: null,
       // A browser's replica fetches a large snapshot over HTTP (client/snapshot-fetch.js)
       snapshots: createSnapshotFetcher({ onError: fault })
@@ -423,6 +426,8 @@ export function createRelay({
   function sendUp(edge, entry) {
     if (!edge.synced || !linkUp() || entry.sent) return;
     if (entry.own) {
+      // After a refusal for the rate, the server takes none of its ops live before its next hello
+      if (edge.throttled) return;
       edge.link.send({ t: 'op', op: entry.op });
       entry.sent = true;
       return;
@@ -448,7 +453,10 @@ export function createRelay({
     if (!attached) return;
     edge.synced = false;
     edge.snapshots.cancel();
-    const own = edge.queue.filter(e => e.own).map(e => e.op);
+    // As many of its own ops as a hello carries; the rest go live once it is answered, as a client's do
+    const carried = edge.queue.filter(e => e.own).slice(0, HELLO_LIMIT);
+    const own = carried.map(e => e.op);
+    edge.throttled = false;
     for (const entry of edge.queue) entry.sent = false;
     // A site's relay speaks for clients of its own; a browser's is one replica, listed and sharing as itself.
     // Either asks for the clocks whatever its clients ask: it decides for them (a client's `clocks: false` reaches no further than itself)
@@ -461,7 +469,7 @@ export function createRelay({
     if (local && edge.snapshots.offers(connection)) hello.fetch = true;
     if (edge.have && edge.epoch) Object.assign(hello, { since: edge.v, epoch: edge.epoch });
     attached.send(hello);
-    for (const entry of own.length ? edge.queue.filter(e => e.own) : []) entry.sent = true;
+    for (const entry of carried) entry.sent = true;
     for (const grant of edge.grants.values()) if (grant.state === 'pending') vouch(edge, grant);
   }
 
@@ -618,14 +626,22 @@ export function createRelay({
         return;
       }
       case 'error': {
-        if (!Number.isInteger(msg.seq)) {
+        // A refusal for the rate is not a fault: of an op, or of the relay's own hello (or share), which names none
+        const limited = msg.code === 'rate-limited' && (Number.isInteger(msg.seq) || msg.as === undefined);
+        if (!Number.isInteger(msg.seq) && !limited) {
           fault(new Error(`The server${msg.as === undefined ? '' : ` (about ${msg.as})`}: ${msg.message}`));
           return;
         }
-        if (msg.code === 'rate-limited') {
+        if (limited) {
           for (const entry of edge.queue) if (entry.as === msg.as) entry.sent = false;
           clearTimeout(edge.retry);
-          edge.retry = setTimeout(() => { for (const entry of edge.queue) sendUp(edge, entry); }, Number.isInteger(msg.retryAfter) ? msg.retryAfter : 1000);
+          // Its own ops wait for a hello, as a client's do: the server refuses every live op of the session
+          // until one. A client's (`as`) wait out their time and go live again
+          if (msg.as === undefined) edge.throttled = true;
+          edge.retry = setTimeout(() => {
+            if (edge.throttled) return helloUp(edge);
+            for (const entry of edge.queue) sendUp(edge, entry);
+          }, Number.isInteger(msg.retryAfter) ? msg.retryAfter : 1000);
           if (typeof edge.retry?.unref === 'function') edge.retry.unref();
           return;
         }
