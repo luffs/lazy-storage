@@ -51,7 +51,30 @@ import { ModelError } from './shape.js';
 const { Utils } = LazyWatch;
 const isObj = Utils.isPlainObject;
 const ROOT = pathKey([]);
-const clone = value => (value === null || typeof value !== 'object' ? value : structuredClone(value));
+// A copy of a value of the state. What the state holds is JSON (shape.js checks what is written to it), and
+// copying that by hand costs a fifth of what structuredClone does for a record of a few fields or a list of
+// ids, on the path every write takes. Two things are left to structuredClone: an object of many keys, which it
+// copies as fast and with less garbage, and anything that is not JSON (nothing a store is given, but a doc is
+// also made from what storage or an upstream hands over)
+const BY_HAND = 64;
+function clone(value) {
+  if (value === null || typeof value !== 'object') return value;
+  if (Array.isArray(value)) {
+    const out = new Array(value.length);
+    for (let i = 0; i < value.length; i++) out[i] = clone(value[i]);
+    return out;
+  }
+  if (!isObj(value)) return structuredClone(value);
+  const keys = Object.keys(value);
+  if (keys.length > BY_HAND) return structuredClone(value);
+  const out = {};
+  for (const key of keys) {
+    // Assigned, this one key would set the copy's prototype
+    if (key === '__proto__') Object.defineProperty(out, key, { value: clone(value[key]), enumerable: true, writable: true, configurable: true });
+    else out[key] = clone(value[key]);
+  }
+  return out;
+}
 
 /** The kind of change a value makes at a path: null deletes, an object is put, anything else set */
 export const changeFor = (base, value) => (value === null ? { ...base, del: true } : isObj(value) ? { ...base, put: value } : { ...base, set: value });

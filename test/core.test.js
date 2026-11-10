@@ -191,3 +191,28 @@ test('a record written whole has one timestamp, `at`; a path written since has a
   assert.deepEqual(clockToJSON(clockFromJSON({ live: { '["x"]': 1 }, gone: {} })), { live: { '["x"]': 1 }, gone: {} });
   assert.deepEqual(clockToJSON(clockFromJSON(undefined)), { live: {}, gone: {} });
 });
+
+test('a doc keeps a copy of what it is given, whatever its form: nested, wide, a key that names the prototype, a value that is not JSON', () => {
+  const doc = createDoc(createShape({ initial: { tasks: {} } }));
+  const wide = Object.fromEntries(Array.from({ length: 200 }, (_, i) => [`f${i}`, { n: i }]));
+  const given = { title: 'Milk', meta: { tags: ['a', { deep: [1, 2] }], none: null }, wide, when: new Date(5) };
+  // As JSON.parse makes it: an own property, where an assignment would set the copy's prototype
+  const odd = JSON.parse('{ "__proto__": { "polluted": true }, "kept": 1 }');
+  doc.apply({ c: 'tasks', id: 'k', put: given }, 1, 'trust');
+  doc.apply({ c: 'tasks', id: 'odd', put: odd }, 1, 'trust');
+  const held = doc.get('tasks', 'k');
+  assert.deepEqual(held, given);
+  assert.notEqual(held, given);
+  assert.notEqual(held.meta.tags[1].deep, given.meta.tags[1].deep, 'a list inside a list inside a record is its own');
+  assert.notEqual(held.wide.f7, given.wide.f7, 'and so is what an object of many keys holds');
+  assert.ok(held.when instanceof Date && held.when !== given.when);
+  given.meta.tags[1].deep.push(3);
+  given.wide.f7.n = 'changed';
+  assert.deepEqual(held.meta.tags[1].deep, [1, 2]);
+  assert.equal(held.wide.f7.n, 7);
+  const copy = doc.get('tasks', 'odd');
+  assert.ok(Object.hasOwn(copy, '__proto__'), 'kept as the property it was');
+  assert.equal(Object.getPrototypeOf(copy), Object.prototype);
+  assert.equal(copy.polluted, undefined);
+  assert.equal({}.polluted, undefined);
+});
