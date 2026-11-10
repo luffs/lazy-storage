@@ -1,5 +1,5 @@
 // Type declarations for `lazy-storage/relay`: a follower of the server. Hand-written.
-import type { ShapeOptions, RecordClock, Op } from './core.js';
+import type { ShapeOptions, RecordClock, Op, Schema } from './core.js';
 import type { TransportFactory } from './client.js';
 import type { Rule } from './server.js';
 
@@ -35,6 +35,7 @@ export interface CopyStorage {
 /** A store's shape as the relay judges it, with the rules it can judge offline */
 export interface RelayShape extends ShapeOptions {
   rules?: Record<string, Rule>;
+  schemas?: Record<string, Schema>;
   readOnly?: boolean;
 }
 

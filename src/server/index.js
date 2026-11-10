@@ -1,4 +1,5 @@
 export { createStore, RefusedError, HELLO_OPS } from './store.js';
+export { optional, oneOf, listItem, defineSchemas } from '../core/schema.js';
 export { memoryStorage, assertDocument } from './storage.js';
 export { createStores, isStoreId } from './registry.js';
 export { createHub } from './hub.js';

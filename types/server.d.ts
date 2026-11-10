@@ -1,9 +1,11 @@
 // Type declarations for `lazy-storage/server`: stores, storage adapters,
 // the registry, and hubs. Hand-written; the runtime is plain JS.
 import type { Unsubscribe } from 'lazy-watch';
-import type { Change, ClientMessage, Lost, Op, Path, Peer, RecordClock, ServerMessage, Shape, ShapeOptions, Tagged, Timestamp } from './core.js';
+import type { Change, ClientMessage, Lost, Op, Path, Peer, RecordClock, Schema, ServerMessage, Shape, ShapeOptions, Tagged, Timestamp } from './core.js';
 
-export type { ClientMessage, ServerMessage, Tagged } from './core.js';
+export type { ClientMessage, ServerMessage, Tagged, Schema, SchemaCheck } from './core.js';
+export { optional, oneOf, listItem, defineSchemas } from './core.js';
+export type { Infer, InferState } from './core.js';
 
 // --- Storage adapters ---------------------------------------------------------
 
@@ -148,6 +150,11 @@ export interface StoreOptions<S extends object = any> extends Omit<ShapeOptions,
   initial?: S;
   /** Per collection or singleton, '*' for the rest */
   rules?: Record<string, Rule<S>>;
+  /**
+   * Per collection or singleton, what a record may hold: a write that leaves a record otherwise is refused
+   * whole, a client's with `invalid` and the server's own with a throw
+   */
+  schemas?: { [K in keyof S]?: Schema };
   /** true refuses every client op; a list names the collections and singletons that are the server's alone */
   readOnly?: boolean | string[];
   /** A check of the whole op, its changes as one diff in the tree's shape: false or a throw refuses it */

@@ -90,7 +90,7 @@ without help from the app: it drops the op, takes its edit back from
 
 | Code | Why |
 |---|---|
-| `invalid` | The op breaks the shape: a collection or singleton the store does not have, a change that is not one of put, set or del, a record of the wrong kind, a forbidden key |
+| `invalid` | The op breaks the shape: a collection or singleton the store does not have, a change that is not one of put, set or del, a record of the wrong kind, a forbidden key; or it leaves a record outside the store's [schema](model.md#schemas) for it, the message naming the path |
 | `forbidden` | A rule, `readOnly` or `validate` refused it |
 | `expired` | Stamped before the retention window (see [Persistence](server.md#persistence)) |
 | `too-large` | More changes than `maxChanges`, each field a put writes counted |

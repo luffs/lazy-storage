@@ -13,6 +13,11 @@
 // puts back every record it touched; `state` is the store as the op leaves
 // it. The server and a follower judge with the same rules, so a site that
 // shares them refuses offline what the server would.
+//
+// A store's `schemas` (schema.js) are judged here too, on the same trial:
+// every record the op wrote that has a schema is checked as the op left
+// it, before the rule functions, which may then count on the record's
+// form. What breaks its schema throws a SchemaError.
 import { LazyWatch } from 'lazy-watch';
 
 const { Utils } = LazyWatch;
@@ -40,9 +45,11 @@ export class RuleError extends Error {
  * @param {Object} shape - from createShape
  * @param {Object} [rules]
  * @param {boolean} [readOnly] - refuse everything
- * @returns {(doc: Object, changes: Object[], user: any, replica: string, extra: Object, apply: () => any) => any} throws a RuleError, having undone `apply`
+ * @param {Object} [schemas] - from createSchemas: what a record may hold
+ * @returns {(doc: Object, changes: Object[], user: any, replica: string, extra: Object, apply: () => any) => any} throws a RuleError
+ *   or a SchemaError, having undone `apply`
  */
-export function createRules(shape, rules = {}, readOnly = false) {
+export function createRules(shape, rules = {}, readOnly = false, schemas = null) {
   if (!Utils.isPlainObject(rules)) throw new TypeError('rules must be an object of rules by collection');
   const byKey = new Map();
   for (const [key, rule] of Object.entries(rules)) {
@@ -54,11 +61,12 @@ export function createRules(shape, rules = {}, readOnly = false) {
   /**
    * Judge an op and apply it: `apply()` applies its changes to `doc` and
    * returns what it reports, which `judge` returns. What a `false` rule
-   * refuses is refused before anything is applied; a rule function judges
-   * the records as `apply` left them, and a refusal undoes it
+   * refuses is refused before anything is applied; a schema and a rule
+   * function judge the records as `apply` left them, and a refusal undoes it
    */
   return function judge(doc, list, user, replica, extra, apply) {
-    if (readOnly !== true && byKey.size === 0) return apply();
+    const checks = schemas !== null && schemas.size > 0;
+    if (readOnly !== true && byKey.size === 0 && !checks) return apply();
     const byRecord = new Map();
     for (const change of list) {
       const key = shape.recordKey(change.c, change.id);
@@ -66,13 +74,20 @@ export function createRules(shape, rules = {}, readOnly = false) {
       byRecord.get(key).changes.push(change);
     }
     const judged = [];
+    const checked = [];
     for (const record of byRecord.values()) {
       if (record.rule === false) throw new RuleError(`${record.c} is the server's to write`);
       if (record.rule !== null) judged.push(record);
+      if (checks && schemas.has(record.c)) checked.push(record);
     }
-    if (!judged.length) return apply();
+    if (!judged.length && !checked.length) return apply();
     const { result, before } = doc.trial(apply);
     try {
+      for (const { c, id } of checked) {
+        const now = doc.get(c, id);
+        const broken = now === undefined ? null : schemas.check(c, id, now);
+        if (broken) throw broken;
+      }
       for (const { key, c, id, changes, rule } of judged) {
         const was = before.has(key) ? before.get(key)[2] : doc.get(c, id);
         const now = doc.get(c, id);

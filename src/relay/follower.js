@@ -47,6 +47,7 @@ import { PROTOCOL } from '../core/protocol.js';
 import { createShape, assertChange } from '../core/shape.js';
 import { createDoc, docFromRecords, changeFor } from '../core/doc.js';
 import { createRules, RuleError } from '../core/rules.js';
+import { createSchemas } from '../core/schema.js';
 import { fingerprintOf } from './fingerprint.js';
 import { randomId, isStoreId } from '../core/ids.js';
 import { createConnection } from '../client/connection.js';
@@ -65,7 +66,7 @@ const clone = value => (value === null || value === undefined || typeof value !=
 
 /**
  * @param {Object} options
- * @param {(storeId: string) => Object|null} options.shapeOf - a store's shape ({ initial, singletons, registers, parents, rules?, readOnly? }), or null for one it does not carry
+ * @param {(storeId: string) => Object|null} options.shapeOf - a store's shape ({ initial, singletons, registers, parents, rules?, schemas?, readOnly? }), or null for one it does not carry
  * @param {() => Object} options.link - a transport factory to the server, under the relay's own credential
  * @param {Object} [options.storage] - memoryCopies() (default) or fileCopies(dir)
  * @param {'upstream'|'local'} [options.acknowledge='upstream']
@@ -224,7 +225,7 @@ export function createRelay({
     const edge = {
       id: storeId,
       shape,
-      judge: createRules(shape, declared.rules ?? {}, declared.readOnly === true),
+      judge: createRules(shape, declared.rules ?? {}, declared.readOnly === true, createSchemas(shape, declared.schemas ?? {})),
       // Records of their own: what storage handed over is not written in place
       base: Array.isArray(saved?.records) ? docFromRecords(shape, structuredClone(saved.records)) : createDoc(shape),
       view: null,

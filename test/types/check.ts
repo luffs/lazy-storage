@@ -9,7 +9,7 @@ import {
 import { createClient as createClientAgain, inOrder as inOrderAgain } from 'lazy-storage/client';
 import { sqliteClientStorage } from 'lazy-storage/client/sqlite';
 import {
-  createStore, createStores, createHub, memoryStorage, isStoreId, toJSON, tagStore,
+  createStore, createStores, createHub, memoryStorage, isStoreId, toJSON, tagStore, optional, oneOf, listItem, defineSchemas, type Infer, type InferState,
   type Store, type ServerStorage, type StorageCommit, type OpEvent, type StoreDocument
 } from 'lazy-storage/server';
 import { createHandlers, serve } from 'lazy-storage/server/bun';
@@ -137,6 +137,10 @@ const store: Store<State> = createStore<State>({
     settings: false,
     '*': true
   },
+  schemas: {
+    tasks: { title: 'string', done: 'boolean?', tags: optional(['string']), meta: optional({ color: oneOf('red', 'green'), '*': 'any' }), due: optional(value => typeof value === 'string' || 'expected a date') },
+    settings: { '~standard': { validate: (value: unknown) => ({ value }) } }
+  },
   readOnly: ['settings'],
   validate: (whole, { user, replicaId }) => { void [whole, user, replicaId]; return true; },
   retention: 30 * 86_400_000,
@@ -154,6 +158,37 @@ store.observe('op', (e: OpEvent) => { void [e.replicaId, e.changes]; });
 const exported: StoreDocument = store.export();
 const records: number = store.stats().records;
 void [dup, recordClock, exported, records];
+// A record's form declared once: the schemas, and the state's type from them
+const declared = defineSchemas({
+  tasks: listItem({ title: 'string', done: 'boolean?', estimate: 'integer?', tags: optional(['string']), votes: optional({ '*': 'number' }), color: oneOf('red', 'green'), due: optional(value => typeof value === 'string') }),
+  settings: { theme: oneOf('light', 'dark'), parsed: new (class { parse(value: unknown) { return value as { n: number }; } })() }
+});
+type DeclaredTask = Infer<typeof declared.tasks>;
+type Declared = InferState<typeof declared, 'settings'>;
+const declaredTask: DeclaredTask = { title: 'Milk', color: 'red' };
+const full: DeclaredTask = { id: 'k', pos: 'a0', title: 'Milk', done: true, estimate: 2, tags: ['a'], votes: { u1: 1 }, color: 'green', due: 'anything a check lets through' };
+const declaredState: Declared = { tasks: { k: declaredTask }, settings: { theme: 'dark', parsed: { n: 1 } } };
+const typed = createStore<Declared>({ initial: { tasks: {}, settings: { theme: 'light', parsed: { n: 0 } } }, singletons: ['settings'], schemas: declared });
+const theme: 'light' | 'dark' = typed.state.settings.theme;
+const votes: number | undefined = typed.state.tasks.k?.votes?.u1;
+void [full, declaredState, theme, votes];
+// @ts-expect-error a title is a string
+const untitled: DeclaredTask = { title: 5, color: 'red' };
+// @ts-expect-error a field its schema needs
+const colorless: DeclaredTask = { title: 'Milk' };
+// @ts-expect-error a choice is one of its values
+const blue: DeclaredTask = { title: 'Milk', color: 'blue' };
+void [untitled, colorless, blue];
+// A field of the list's own named id is the one that holds: required here
+const ownId = listItem({ id: 'string', title: 'string' });
+const withId: Infer<typeof ownId> = { id: 'k', title: 'Milk', pos: 'a0' };
+// @ts-expect-error the id this list item's fields declare is required
+const withoutId: Infer<typeof ownId> = { title: 'Milk' };
+void [withId, withoutId];
+// @ts-expect-error a schema names a collection or singleton of the state
+createStore<Declared>({ schemas: { nope: { title: 'string' } } });
+// @ts-expect-error a type's name is one the store knows
+createStore({ schemas: { tasks: { title: 'text' } } });
 // @ts-expect-error readOnly is true or a list of collections
 createStore({ readOnly: 'settings' });
 

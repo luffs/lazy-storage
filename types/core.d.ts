@@ -111,6 +111,98 @@ export function diffOf(shape: Shape, changes: Change[]): Record<string, any>;
 export function clockToJSON(clock: unknown): RecordClock;
 export function clockFromJSON(json: RecordClock): unknown;
 
+// --- Schemas ------------------------------------------------------------------------
+
+type TypeName = 'string' | 'number' | 'integer' | 'boolean' | 'any';
+
+/** A check of a value: false refuses, a string refuses with that message, a throw with its own */
+export type SchemaCheck = (value: any, context: { c: string; id: string | undefined }) => boolean | string | void;
+
+/** A check that says, to TypeScript alone, what type the values it lets through have (`oneOf` returns one) */
+export type TypedCheck<T> = SchemaCheck & { readonly '~type'?: T };
+
+/** A field that may be absent: what `optional(schema)` returns */
+export interface OptionalSchema<S = unknown> { readonly '~optional': S }
+
+/** Another library's validator, asked whether a value is valid and no more: Standard Schema (Zod, Valibot, ArkType), or an instance of a library's class with `safeParse` or `parse` (a plain object is read as an object of fields) */
+export type ForeignSchema =
+  | { readonly '~standard': { validate(value: unknown): unknown } }
+  | { safeParse(value: unknown): unknown }
+  | { parse(value: unknown): unknown };
+
+/**
+ * What a value may hold: a type's name (with `?` for a field that may be
+ * absent), an object of fields (`'*'` for every field not named), a list
+ * written `[schema]`, a check, another library's validator, or `optional(schema)`
+ */
+export type Schema =
+  | TypeName
+  | `${TypeName}?`
+  | SchemaCheck
+  | readonly [Schema]
+  | { readonly [field: string]: Schema }
+  | ForeignSchema
+  | OptionalSchema;
+
+type TypeOf<N> = N extends 'string' ? string : N extends 'number' | 'integer' ? number : N extends 'boolean' ? boolean : any;
+type MayBeAbsent<S> = S extends `${string}?` ? true : S extends OptionalSchema ? true : false;
+type Simplify<T> = { [K in keyof T]: T[K] } & {};
+type FieldsOf<S> = Simplify<
+  & { -readonly [K in keyof S as K extends '*' ? never : MayBeAbsent<S[K]> extends true ? never : K]: Infer<S[K]> }
+  & { -readonly [K in keyof S as K extends '*' ? never : MayBeAbsent<S[K]> extends true ? K : never]?: Infer<S[K]> }
+> & ('*' extends keyof S ? { [field: string]: Infer<S['*']> } : unknown);
+
+/**
+ * The type of the values a schema lets through, so a record's form is
+ * declared once: `type Task = Infer<typeof schemas.tasks>`. The schema
+ * has to keep its literal types, so declare it `as const` (or inline, in
+ * `defineSchemas`). A check written by hand is `any`; `oneOf` is the
+ * union of its values; another library's validator is its own output type
+ */
+export type Infer<S> =
+  S extends `${infer N}?` ? TypeOf<N>
+  : S extends string ? TypeOf<S>
+  : S extends OptionalSchema<infer I> ? Infer<I>
+  : S extends { readonly '~standard': { readonly types?: { readonly output: infer O } } } ? (unknown extends O ? any : O)
+  : S extends { parse(value: unknown): infer O } ? O
+  : S extends { safeParse(value: unknown): unknown } ? any
+  : S extends (...args: any[]) => unknown ? (S extends { readonly '~type'?: infer T } ? (unknown extends T ? any : T) : any)
+  : S extends readonly [infer I] ? Infer<I>[]
+  : S extends object ? FieldsOf<S>
+  : any;
+
+/**
+ * A store's state from its schemas: a collection is its records by id,
+ * a singleton (named in `Singletons`) one record.
+ * `type State = InferState<typeof schemas, 'settings'>`
+ */
+export type InferState<S, Singletons extends keyof S = never> = {
+  -readonly [K in keyof S]: K extends Singletons ? Infer<S[K]> : Record<string, Infer<S[K]>>;
+};
+
+/** A store's schemas with their literal types kept, for `Infer` and `InferState`: returns what it is given */
+export function defineSchemas<const S extends Record<string, Schema>>(schemas: S): S;
+
+/** Why a record broke its schema: `path` from the store's root */
+export class SchemaError extends Error {
+  code: 'invalid';
+  path: Path;
+}
+/** A field that may be absent, for a schema that is not a type's name */
+export function optional<const S extends Schema>(schema: S): OptionalSchema<S>;
+/** One of these values and no other */
+export function oneOf<const V extends readonly unknown[]>(...values: V): TypedCheck<V[number]>;
+/** The record of a list: its fields, and the `id` and position key (`position`, default 'pos') a list writes on it */
+// The fields given are spread last, so one of them named `id` or the position key is the one that holds
+export function listItem<const F extends Record<string, Schema>>(fields?: F): Omit<{ readonly id: 'string?'; readonly pos: 'string?' }, keyof F> & F;
+export function listItem<const F extends Record<string, Schema>, const P extends string>(fields: F, options: { position: P }): Omit<{ readonly id: 'string?' } & { readonly [K in P]: 'string?' }, keyof F> & F;
+/** The schemas of a store as they are judged: `check` says what is wrong with a record, or null */
+export function createSchemas(shape: Shape, schemas?: Record<string, Schema>): {
+  readonly size: number;
+  has(c: string): boolean;
+  check(c: string, id: string | undefined, record: unknown): SchemaError | null;
+};
+
 /** A lazy-watch batch as the changes it makes */
 export function compile(shape: Shape, diff: unknown, inverse: unknown, state: unknown): Change[];
 

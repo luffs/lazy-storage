@@ -43,6 +43,7 @@ import { PROTOCOL } from '../core/protocol.js';
 import { createShape, assertChange, ModelError } from '../core/shape.js';
 import { createDoc, docFromRecords, changeFor, diffOf } from '../core/doc.js';
 import { createRules, RuleError } from '../core/rules.js';
+import { createSchemas, SchemaError } from '../core/schema.js';
 import { memoryStorage, assertDocument } from './storage.js';
 import { toJSON, presetJSON, encodedBytes, utf8Bytes, SNAPSHOT_THRESHOLD, TALLY, LAZY } from './wire.js';
 import { randomId } from '../core/ids.js';
@@ -93,6 +94,8 @@ function presenceOptions(presence) {
  * @param {Object} [options.parents]
  * @param {Object} [options.rules] - per collection or singleton, `'*'` for the rest: true, false, or
  *   `(user, before, after, { c, id, state, replicaId, changes, store }) => boolean` (throw to say why)
+ * @param {Object} [options.schemas] - per collection or singleton, what a record may hold (schema.js): a write that
+ *   leaves a record otherwise is refused whole, a replica's op with 'invalid' and the server's own with a throw
  * @param {boolean|string[]} [options.readOnly=false] - refuse every client op (true), or every op that writes
  *   one of these collections or singletons
  * @param {(diff: Object, context: { user: any, replicaId: string, store: Object, changes: Object[] }) => boolean|void} [options.validate]
@@ -119,6 +122,7 @@ export function createStore({
   registers = [],
   parents = {},
   rules = {},
+  schemas = {},
   readOnly = false,
   validate,
   retention = 30 * DAY,
@@ -142,7 +146,17 @@ export function createStore({
   // readOnly as a list: those collections and singletons are the server's alone
   const locked = Array.isArray(readOnly) ? Object.fromEntries(readOnly.map(key => [key, false])) : {};
   for (const key of Object.keys(locked)) if (!shape.has(key)) throw new TypeError(`readOnly: "${key}" is not a collection or singleton`);
-  const judgeRules = createRules(shape, { ...rules, ...locked }, readOnly === true);
+  const checkRecord = createSchemas(shape, schemas);
+  // What the store starts from is held to the same schemas as what is written to it
+  for (const c of [...shape.collections, ...shape.singletons]) {
+    if (!checkRecord.has(c)) continue;
+    const broken = shape.isSingleton(c)
+      ? checkRecord.check(c, undefined, shape.initial[c])
+      : Object.keys(shape.initial[c]).map(id => checkRecord.check(c, id, shape.initial[c][id])).find(Boolean);
+    if (broken) throw new TypeError(`initial does not fit schemas: ${broken.message}`);
+  }
+  const judgeRules = createRules(shape, { ...rules, ...locked }, readOnly === true, checkRecord);
+  const judgeSchemas = createRules(shape, {}, false, checkRecord);
   if (!Array.isArray(migrations) || migrations.some(m => typeof m !== 'function')) throw new TypeError('migrations must be an array of functions');
   const time = now ?? Date.now;
   const saved = storage.load();
@@ -637,6 +651,7 @@ export function createStore({
       judgeRules(doc, op.changes, speaker.user, op.replica, { store: self }, applyAll);
     } catch (err) {
       if (err instanceof RuleError) throw new RefusedError('forbidden', err.message);
+      if (err instanceof SchemaError) throw new RefusedError('invalid', err.message);
       throw err;
     }
     clock.observe(ts);
@@ -677,7 +692,15 @@ export function createStore({
     }
     const ts = clock.stamp();
     const applied = [];
-    for (const change of list) applied.push(...doc.apply(change, ts, 'authority').applied);
+    const applyAll = () => { for (const change of list) applied.push(...doc.apply(change, ts, 'authority').applied); };
+    // The server's writes are held to the schemas too, by the same judge as a replica's op but with no rules:
+    // applied as a trial, each record they wrote checked once, and put back whole when one does not fit
+    try {
+      judgeSchemas(doc, list, null, 'server', { store: self }, applyAll);
+    } catch (err) {
+      if (err instanceof SchemaError) throw new TypeError(err.message);
+      throw err;
+    }
     landed(applied, ts, 'server', null, undefined, null);
     // As a replica's op does: a store only the server writes would otherwise forget nothing until it was loaded again
     maybeCompact();

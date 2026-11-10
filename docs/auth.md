@@ -163,9 +163,11 @@ createStore({
 
 A refusal refuses the op whole, with code `forbidden`: the client drops
 it, takes its edit back from `db.state`, and hears `rejected`. The
-server's own `store.patch` is never judged, and is the way to write what
-clients may not. Every check is synchronous and never sees the server's
-own writes. A relay that carries the store judges with the same rules
+server's own `store.patch` is never judged by the rules, and is the way
+to write what clients may not; what a record may hold, whoever writes
+it, is the store's [`schemas`](model.md#schemas), which judge the
+server's writes too, and a client's before the rules. Every rule is
+synchronous and never sees the server's own writes. A relay that carries the store judges with the same rules
 when they are part of the shape it is given (see
 [Relays](relays.md#working-while-the-server-is-away)), so a site refuses
 while the server is away what the server would.

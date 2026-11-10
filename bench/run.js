@@ -95,6 +95,66 @@ bench('session: one-change op through the gates (rules, validate, retention)', {
   }
 });
 
+// --- Schemas -------------------------------------------------------------------------------
+// What `schemas` costs a write: the record is copied for the trial and
+// checked whole, as the write leaves it, so the price follows the record's
+// size and not the op's. Each case here has its twin without a schema:
+// the merge cases above, and the two unchecked ones below
+
+const TASK = { id: 'string', title: 'string', done: 'boolean', n: 'number?', a: 'number?', b: 'number?', c: 'number?', d: 'number?', e: 'number?', f: 'number?', g: 'number?' };
+
+bench('schema: one-leaf op into a 10k-task store, the record checked', {
+  setup: () => seeded(10_000, { schemas: { tasks: TASK } }),
+  iterations: 5000,
+  run: (c, n) => {
+    for (let i = 0; i < n; i++) c.store.apply({ replica: 'bench', seq: ++c.seq, ts: c.clock.stamp(), changes: [{ c: 'tasks', id: c.ids[i % c.ids.length], path: ['title'], set: `edit ${i}` }] });
+    c.store.flush();
+  }
+});
+
+bench('schema: ten-leaf record add, the record checked', {
+  setup: () => seeded(10_000, { schemas: { tasks: TASK } }),
+  iterations: 5000,
+  run: (c, n) => {
+    for (let i = 0; i < n; i++) {
+      c.store.apply({ replica: 'bench', seq: ++c.seq, ts: c.clock.stamp(), changes: [{ c: 'tasks', id: `new${i}`, put: { id: `new${i}`, title: 'x', done: false, a: 1, b: 2, c: 3, d: 4, e: 5, f: 6, g: 7 } }] });
+    }
+    c.store.flush();
+  }
+});
+
+/** A store of 100 records of 200 fields each: what a check of the whole record costs when the record is large */
+function wide(options = {}) {
+  const store = createStore({ ...SHAPE, rateLimit: false, ...options });
+  const all = ids(100);
+  const tasks = {};
+  for (const id of all) {
+    tasks[id] = { title: `task ${id}` };
+    for (let f = 0; f < 200; f++) tasks[id][`f${f}`] = f;
+  }
+  store.patch({ tasks });
+  store.flush();
+  return { store, ids: all, clock: createClock(), seq: 0, dispose: () => store.dispose() };
+}
+const oneLeafOfWide = (c, n) => {
+  for (let i = 0; i < n; i++) c.store.apply({ replica: 'bench', seq: ++c.seq, ts: c.clock.stamp(), changes: [{ c: 'tasks', id: c.ids[i % c.ids.length], path: ['f7'], set: i }] });
+  c.store.flush();
+};
+
+bench('merge: one-leaf op on a record of 200 fields', { setup: () => wide(), iterations: 2000, run: oneLeafOfWide });
+bench('schema: one-leaf op on a record of 200 fields, the record checked', {
+  setup: () => wide({ schemas: { tasks: { title: 'string', '*': 'number' } } }),
+  iterations: 2000,
+  run: oneLeafOfWide
+});
+
+const serverWrite = (c, n) => {
+  for (let i = 0; i < n; i++) c.store.patch({ tasks: { [c.ids[i % c.ids.length]]: { title: `edit ${i}` } } });
+  c.store.flush();
+};
+bench('patch: the server\'s one-field write, 10k-task store', { setup: () => seeded(10_000), iterations: 5000, run: serverWrite });
+bench('schema: the server\'s one-field write, the record checked', { setup: () => seeded(10_000, { schemas: { tasks: TASK } }), iterations: 5000, run: serverWrite });
+
 // --- Broadcast ---------------------------------------------------------------------------
 
 for (const sockets of [100, 1000]) {
@@ -337,6 +397,12 @@ const GUARDS = {
   'merge: ten-leaf record add': 800,
   'merge: an array of 1000 ids written whole': 6000,
   'session: one-change op through the gates (rules, validate, retention)': 400,
+  'schema: one-leaf op into a 10k-task store, the record checked': 400,
+  'schema: ten-leaf record add, the record checked': 800,
+  'merge: one-leaf op on a record of 200 fields': 400,
+  'schema: one-leaf op on a record of 200 fields, the record checked': 600,
+  'patch: the server\'s one-field write, 10k-task store': 400,
+  'schema: the server\'s one-field write, the record checked': 400,
   'broadcast: one patch to 100 sockets (encoded once)': 300,
   'broadcast: one patch to 1000 sockets (encoded once)': 400,
   'client: local op, document adapter (localStorage-like), 1k-task state': 1000,

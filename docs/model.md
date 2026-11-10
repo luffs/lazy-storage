@@ -96,6 +96,121 @@ array of its own (a drag-and-drop list) hands the order back with
 `tasks.reconcile(ids)`, which writes the fewest positions that make the
 sort agree.
 
+## Schemas
+
+A record is any JSON until the store is told otherwise. `schemas` names,
+per collection or singleton, what a record may hold, and the store then
+never takes a write that leaves a record otherwise:
+
+```js
+import { createStore, optional, oneOf } from 'lazy-storage/server';
+
+createStore({
+  initial: { tasks: {}, settings: { theme: 'light' } },
+  singletons: ['settings'],
+  schemas: {
+    tasks: {
+      title: 'string',
+      done: 'boolean?',                          // ? : the field may be absent
+      estimate: 'integer?',
+      tags: optional(['string']),                // a list of strings
+      votes: optional({ '*': 'number' }),        // a map: any key, a number each
+      meta: optional({ color: oneOf('red', 'green'), note: 'string?' }),
+      due: optional(value => !Number.isNaN(Date.parse(value)) || 'expected a date')
+    },
+    settings: { theme: oneOf('light', 'dark') }
+  }
+});
+```
+
+A schema is one of:
+
+- **a type by name**: `'string'`, `'number'`, `'integer'`, `'boolean'` or
+  `'any'`, with a trailing `?` for a field that may be absent;
+- **an object of fields**, each a schema: the value is an object with
+  those fields and no others. `'*'` is the schema of every field not
+  named, so `{ '*': 'number' }` is a map of numbers, and
+  `{ title: 'string', '*': 'any' }` a record with a title and whatever else;
+- **a list**, written `[schema]`: an array of such values;
+- **a check**, `(value, { c, id }) => ...`: `false` refuses, a string
+  refuses with that message, a throw with its own. `oneOf(...values)` is
+  the check for a choice;
+- **another library's validator**: anything with the Standard Schema
+  interface (Zod, Valibot, ArkType), or an instance of a library's class
+  with `safeParse` or `parse`, for a whole record or a field inside one.
+  A plain object is always an object of fields, so a record may have
+  fields named `parse` or `safeParse`. It is asked whether the value is
+  valid and no more: what it would default, strip or transform is not
+  written, so a Zod object that should refuse unknown keys says
+  `.strict()`. It must validate synchronously;
+- **`optional(schema)`**, any of these for a field that may be absent;
+- **`listItem(fields)`**, the record of a [list](#lists): the fields, and
+  the `id` and position key a list writes on every record it adds, which
+  a schema of the fields alone would refuse. `listItem(fields, { position:
+  'at' })` for a list kept under another field than `pos`, and
+  `{ '*': listItem(fields) }` for a list inside a record.
+
+The record is judged whole, as the write leaves it, not the op's changes
+one by one: a client that sets one field is refused when the record then
+breaks its schema, whoever wrote the rest, and two edits made apart that
+each fit are refused at the second when together they do not. A record
+that is deleted is not judged, and a field the schema needs cannot be.
+A client's op that breaks a schema is refused whole with code `invalid`
+and a message that names the path (`tasks/k/done: expected true or
+false`): the client drops it, takes its edit back from `db.state`, and
+hears `rejected`. Schemas are judged before [rules](auth.md#who-may-write-what),
+which may then count on the form of the record they are handed.
+
+The server's own writes are held to the schemas too, unlike rules:
+`store.patch` and `store.del` throw a `TypeError` with the same message
+and leave the store as it was, and a migration that writes a record out
+of form fails. `initial` must fit when the store is made. What storage
+already holds is not judged on load: a schema added to a store with
+records, or tightened, comes with a [migration](server.md#migrations)
+that brings them into form, since a record out of form refuses every
+write to it until it is.
+
+A checked write costs what its record's size does, not the op's: the
+record is copied, to be put back on a refusal, and checked whole. For a
+record of a few fields that is within the noise of a write (`npm run
+bench`, the `schema:` cases beside their unchecked twins); a write to a
+record of 200 fields took some 60% longer, 29 µs for 18. Keep a record
+that grows without bound (a log, a map of thousands) in a collection of
+its own records.
+
+A [relay](relays.md) given the same `schemas` in its shape refuses while
+the server is away what the server would. A client does not judge: its
+edit shows at once and is taken back when the server, or its relay,
+refuses it. To check a form before writing, `createSchemas(shape,
+schemas).check(c, id, record)` from `lazy-storage/core` returns the same
+error, or null.
+
+In TypeScript the schemas are also the state's type, so a record's form
+is declared once. `defineSchemas` returns what it is given and keeps its
+literal types; `Infer` is the type of what one schema lets through, and
+`InferState` a store's state, its singletons named:
+
+```ts
+import { createStore, defineSchemas, listItem, oneOf, type Infer, type InferState } from 'lazy-storage/server';
+
+const schemas = defineSchemas({
+  tasks: listItem({ title: 'string', done: 'boolean?', color: oneOf('red', 'green') }),
+  settings: { theme: oneOf('light', 'dark') }
+});
+type Task = Infer<typeof schemas.tasks>;                 // { title: string; done?: boolean; color: 'red' | 'green'; id?: string; pos?: string }
+type State = InferState<typeof schemas, 'settings'>;     // { tasks: Record<string, Task>; settings: { theme: 'light' | 'dark' } }
+
+const store = createStore<State>({ initial: { tasks: {}, settings: { theme: 'light' } }, singletons: ['settings'], schemas });
+const db = createClient<State>({ ... });                 // the same type on the client
+```
+
+A type's name is its type, a `?` or `optional` an optional field, `'*'`
+an index signature, `oneOf` the union of its values, and another
+library's validator its own output type. A check written by hand is
+`any`: TypeScript cannot see what it lets through. The types are erased
+when the code runs, so they describe your own code's writes and the
+schema judges everyone's.
+
 ## How conflicts resolve
 
 Every op carries a timestamp: milliseconds, stamped by its client so

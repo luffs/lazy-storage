@@ -120,7 +120,7 @@ What a relay cannot do:
 - **Know what only the server knows.** An edit from a client elsewhere,
   newer than one made on the site, wins when the server is back, and a
   rule the relay was not given refuses only then. Give the relay the
-  store's `rules` and `readOnly` in its shape (`shapeOf`) and it refuses
+  store's `rules`, `schemas` and `readOnly` in its shape (`shapeOf`) and it refuses
   offline what the server would by them; a store's `validate` runs on the
   server alone.
 - **Acknowledge.** Offline edits live in their authors' storage until the

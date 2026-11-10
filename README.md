@@ -100,6 +100,10 @@ bun examples/basic/server.js
   away what someone edited after it, and a child never outlives its
   parent. A client whose edit lost is told what and why.
   ([How conflicts resolve](docs/model.md#how-conflicts-resolve))
+- **Records that keep their form.** A schema per collection, a few
+  lines of plain declarations or a validator you already have (Zod,
+  Valibot), and the store takes no write that leaves a record out of it,
+  a client's or the server's own. ([Schemas](docs/model.md#schemas))
 - **Undo and redo** that only ever touch your own edits, not a
   teammate's. ([Undo](docs/model.md#undo))
 - **React and Vue bindings**, `lazy-storage/react` and `lazy-storage/vue`,

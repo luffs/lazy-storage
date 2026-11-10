@@ -31,8 +31,8 @@
 
 **Server** (`lazy-storage/server`)
 
-- `createStore({ initial, singletons, registers, parents, rules, readOnly, validate, retention, compactEvery, deltaLog, maxChanges, maxReplicas, rateLimit, storage, groupCommit, migrations, presence, onError, now })` — `rules` and `validate` see [Who may write what](auth.md#who-may-write-what); `readOnly` is `true` or a list of collections and singletons; `groupCommit` (default true) see [Persistence](server.md#persistence); `migrations` see [Migrations](server.md#migrations); `presence` is `false` (default), `true`, or `{ key, user, validate, every, maxShare }`
-- `store.patch(diff)` → the changes that landed — the server's own write, in the tree's shape, stamped now and applied without checks; `store.del(c, id, path)`; `store.apply(op, { user })` → `{ lost, duplicate }` — a replica's op decided as if it came on that user's session (throws a `RefusedError` for one refused whole)
+- `createStore({ initial, singletons, registers, parents, rules, schemas, readOnly, validate, retention, compactEvery, deltaLog, maxChanges, maxReplicas, rateLimit, storage, groupCommit, migrations, presence, onError, now })` — `rules` and `validate` see [Who may write what](auth.md#who-may-write-what); `schemas` see [Schemas](model.md#schemas), with `optional(schema)`, `oneOf(...values)`, `listItem(fields, { position })` and `defineSchemas(schemas)` to write them, and the types `Infer` and `InferState` to take the state's type from them; `readOnly` is `true` or a list of collections and singletons; `groupCommit` (default true) see [Persistence](server.md#persistence); `migrations` see [Migrations](server.md#migrations); `presence` is `false` (default), `true`, or `{ key, user, validate, every, maxShare }`
+- `store.patch(diff)` → the changes that landed — the server's own write, in the tree's shape, stamped now and applied without rules, held to the store's `schemas` (a `TypeError` for a write that breaks one, and nothing applied); `store.del(c, id, path)`; `store.apply(op, { user })` → `{ lost, duplicate }` — a replica's op decided as if it came on that user's session (throws a `RefusedError` for one refused whole)
 - `store.state`, `store.snapshot()`, `store.clock(c, id)`, `store.shape`, `store.version`, `store.epoch`, `store.sessions`, `store.now()`
 - `store.on(listener)` — every batch that lands, as a diff with `{ origin, replicaId, v, changes }`, on the next microtask and before it is stored; `store.observe('op' | 'refused' | 'session', fn)` → unsubscribe — ops once stored (`{ replicaId, seq, user, changes, lost, version }`, `lost` the changes that did not land, with why), refusals, sessions opening and closing
 - `store.stats()` → `{ version, epoch, schema, sessions, replicas, records, log, sent }`
@@ -59,7 +59,7 @@ an `http.Server` with `shutdown({ reason })`, `sockets()`, `socketStats()`, `dis
 
 **Relay** (`lazy-storage/relay`, see [Relays](relays.md))
 
-- `createRelay({ shapeOf, link, storage, acknowledge, grace, authorizeOffline, linger, reconnect, keepalive, replicaId, onError, now })` — `shapeOf(storeId)` the shape of a store it carries (with `rules` and `readOnly` to refuse offline what the server would), or null; `link` a transport factory dialling the server's relay route with the relay's own credential; `storage` is `memoryCopies()` (default) or `fileCopies(dir, { saveDelay, onError })`; `acknowledge` is `'upstream'` (default: a site's relay, the server acknowledges) or `'local'` (a browser's tabs); `authorizeOffline(key, storeId)` whether a client the server let in before is answered while it is away; `linger` (30 s) how long a store is kept after its last client left, `false` to keep every store
+- `createRelay({ shapeOf, link, storage, acknowledge, grace, authorizeOffline, linger, reconnect, keepalive, replicaId, onError, now })` — `shapeOf(storeId)` the shape of a store it carries (with `rules`, `schemas` and `readOnly` to refuse offline what the server would), or null; `link` a transport factory dialling the server's relay route with the relay's own credential; `storage` is `memoryCopies()` (default) or `fileCopies(dir, { saveDelay, onError })`; `acknowledge` is `'upstream'` (default: a site's relay, the server acknowledges) or `'local'` (a browser's tabs); `authorizeOffline(key, storeId)` whether a client the server let in before is answered while it is away; `linger` (30 s) how long a store is kept after its last client left, `false` to keep every store
 - `relay.session({ send, credential, key })` → `{ receive(message), close() }` — a client's socket
 - `relay.mode` (`'through' | 'local'`), `relay.status` (the link's), `relay.on('mode' | 'status' | 'sync' | 'error', fn)`, `relay.copy(storeId)` — what it shows of a store, `relay.pending(storeId)` — its own unacknowledged ops, `relay.patch(storeId, diff)` — a write of its own, `relay.upstreamUp()`, `relay.upstreamDown()` — the host's word on the server, `relay.stats()` → `{ mode, link, stores: { [id]: { sessions, queue, v, synced, waiting } } }`, `relay.close()`
 
@@ -75,6 +75,7 @@ throughout.
 pieces both sides share — `createShape`, `createDoc`, `docFromRecords`,
 `compile` (a lazy-watch batch to changes), `diffOf` (changes to a diff in
 the tree's shape), `changeFor`, `assertChange`, `createClock`, `clamp`,
-`isTimestamp`, the path helpers, `randomId`, `PROTOCOL`, and the position
+`isTimestamp`, `createSchemas(shape, schemas)` (→ `check(c, id, record)`: a
+`SchemaError` or null), `optional`, `oneOf`, `listItem`, `defineSchemas`, the path helpers, `randomId`, `PROTOCOL`, and the position
 keys: `keyBetween(a, b)`, `keysBetween(a, b, n)`, `comparePositions`,
 `isPositionKey`.
