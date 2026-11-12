@@ -57,6 +57,9 @@ const DAY = 24 * HOUR;
 /** The most ops one hello carries; the client sends the rest once it is answered */
 export const HELLO_OPS = 1000;
 
+/** The most entries one answer to a client's history request carries; it asks again, `before` the oldest, for more */
+const HISTORY_PAGE = 100;
+
 /** The most changes one commit groups: a turn that merges more is stored this many at a time */
 const GROUP_MAX = 256;
 
@@ -112,9 +115,12 @@ function presenceOptions(presence) {
  * @param {Object} [options.storage]
  * @param {boolean} [options.groupCommit=true]
  * @param {Function[]} [options.migrations] - `(state, { store }) => diff` each, run once, in order
- * @param {boolean|{ keep?: number }} [options.history=false] - keep every record as each write left it, with when
- *   and who, for `store.history`, `store.recordAt` and `store.revert`; `keep` (ms) forgets what is older, but for
- *   the last form of each record before it. The storage has to keep history (the memory and SQLite adapters do)
+ * @param {boolean|{ keep?: number, clients?: boolean|Function }} [options.history=false] - keep every record as
+ *   each write left it, with when and who, for `store.history`, `store.recordAt` and `store.revert`; `keep` (ms)
+ *   forgets what is older, but for the last form of each record before it. `clients` lets clients ask for a
+ *   record's history (`db.historyOf`): true for every client that has the store open, or
+ *   `(user, { c, id, store }) => boolean`; off by default, since what a record was may be what was taken out of
+ *   it. The storage has to keep history (the memory and SQLite adapters do)
  * @param {boolean|Object} [options.presence=false]
  * @param {(error: any) => void} [options.onError]
  * @param {() => number} [options.now]
@@ -166,6 +172,9 @@ export function createStore({
   if (historyOption !== false && historyOption !== true && !Utils.isPlainObject(historyOption)) throw new TypeError('history must be true, false, or { keep }');
   const keeps = historyOption === false ? null : { keep: historyOption === true ? Infinity : historyOption.keep ?? Infinity };
   if (keeps && !(keeps.keep > 0)) throw new TypeError('history.keep must be a positive number of milliseconds');
+  // Who of the clients may read a record's history: nobody (the default), or whom the app says
+  const mayAsk = keeps && Utils.isPlainObject(historyOption) ? historyOption.clients ?? false : false;
+  if (mayAsk !== false && mayAsk !== true && typeof mayAsk !== 'function') throw new TypeError('history.clients must be true, false, or a function');
   if (keeps && ['history', 'historyOfVersion', 'historyCount', 'pruneHistory'].some(method => typeof storage[method] !== 'function')) {
     throw new TypeError("This store's storage keeps no history (it has no history(query), historyOfVersion(v), historyCount() and pruneHistory(before))");
   }
@@ -992,6 +1001,36 @@ export function createStore({
       return message;
     };
 
+    /**
+     * A client asks for a record's history, or with `when` for the record as it was: answered with the same
+     * `req`, by `history.clients` (nobody, unless the store says so). It draws on the rate limit as an op does
+     */
+    function askedHistory(msg, speaker, as) {
+      const tag = as === undefined ? {} : { as };
+      const req = Number.isInteger(msg.req) ? msg.req : undefined;
+      const refuse = (code, message, extra) => send({ t: 'error', ...tag, req, code, message, ...extra });
+      if (req === undefined) return refuse('invalid', 'A history request has a req to be answered by');
+      if (!speaker.replicaId) return refuse('forbidden', 'Say hello first');
+      const id = shape.isSingleton(msg.c) ? undefined : msg.id;
+      try {
+        let allowed = mayAsk === true;
+        if (typeof mayAsk === 'function' && shape.has(msg.c)) allowed = mayAsk(speaker.user, { c: msg.c, id, store: self }) === true;
+        if (!allowed) return refuse('forbidden', keeps ? 'This store does not let its clients read its history' : 'This store keeps no history');
+        const wait = throttle(bucketOf(speaker.user, speaker.replicaId));
+        if (wait > 0) return refuse('rate-limited', `Too many requests; try again in ${wait} ms`, { retryAfter: wait });
+        if (msg.when !== undefined) {
+          const record = self.recordAt(msg.c, id, msg.when);
+          return send({ t: 'history', ...tag, req, ...(record === undefined ? {} : { record }) });
+        }
+        const limit = Math.min(Number.isInteger(msg.limit) && msg.limit > 0 ? msg.limit : 50, HISTORY_PAGE);
+        return send({ t: 'history', ...tag, req, entries: self.history(msg.c, id, { limit, before: msg.before ?? undefined, path: msg.path ?? undefined }) });
+      } catch (err) {
+        // What the request asked could not be read as asked: a collection the store has not, a path that is none
+        if (!(err instanceof TypeError)) onError(err);
+        return refuse(err instanceof TypeError ? 'invalid' : 'unavailable', err instanceof TypeError ? err.message : 'The history could not be read');
+      }
+    }
+
     /** A live op, from the session itself or a client it speaks for */
     function liveOp(op, speaker, as) {
       const tag = as === undefined ? {} : { as };
@@ -1059,6 +1098,7 @@ export function createStore({
             return;
           }
           if (msg.t === 'leave') return s.ungrant(as);
+          if (msg.t === 'history') return askedHistory(msg, grant, as);
           return send({ t: 'error', as, message: `Unknown message type: ${msg.t}` });
         }
         switch (msg.t) {
@@ -1157,6 +1197,8 @@ export function createStore({
           }
           case 'op':
             return liveOp(msg.op, s);
+          case 'history':
+            return askedHistory(msg, s);
           case 'ping':
             return send({ t: 'pong' });
           default:

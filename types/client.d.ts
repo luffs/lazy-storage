@@ -1,7 +1,7 @@
 // Type declarations for `lazy-storage/client` (createClient, openClient)
 // and the client-side shapes the main entry builds on. Hand-written.
 import type { ChangeListener, ListenerOptions, Unsubscribe } from 'lazy-watch';
-import type { Change, ClosedCode, ErrorCode, Lost, Op, Peer, RecordClock, ServerMessage, Shape, ShapeOptions } from './core.js';
+import type { Change, ClosedCode, ErrorCode, HistoryEntry, Lost, Op, Path, Peer, When, RecordClock, ServerMessage, Shape, ShapeOptions } from './core.js';
 
 /** The socket's: `online` once it is open */
 export type ConnectionStatus = 'offline' | 'connecting' | 'online';
@@ -264,6 +264,8 @@ export interface ClientOptionsBase<S extends object = any> extends Omit<ShapeOpt
   /** Attach an undo manager (default true) */
   undo?: boolean;
   undoLimit?: number;
+  /** How long (ms) a request to the server (a record's history) waits for its answer before it rejects with code 'timeout' (default 30 000) */
+  requestTimeout?: number;
   /** Retry backoff for an owned connection; false disables automatic reconnects */
   reconnect?: ReconnectOptions | false;
   /** false asks the server not to send presence to this client, which then never has peers; it may still share (default true) */
@@ -447,6 +449,19 @@ export interface Client<S extends object = any> {
   /** Subscribe to state changes; `meta?.origin === 'remote'` marks the server's */
   watch(listener: ChangeListener<S>, options?: ListenerOptions): Unsubscribe;
   on<E extends keyof ClientEvents>(event: E, fn: (payload: ClientEvents[E]) => void): Unsubscribe;
+  /**
+   * A record's history, from the server (a store made with `history: { clients }`): newest first, `limit` (at
+   * most 100), `before` a version to page, `path` the writes that touched one field. Rejects with an error whose
+   * `code` is 'forbidden', 'offline' (not connected), 'unavailable' (behind a relay, the server away) or 'rate-limited'
+   */
+  historyOf(c: string, id: string, options?: { limit?: number; before?: number; path?: Path }): Promise<HistoryEntry[]>;
+  historyOf(singleton: string, options?: { limit?: number; before?: number; path?: Path }): Promise<HistoryEntry[]>;
+  /** A record as it was at a time or a version, from the server; undefined when it was not there */
+  recordAt(c: string, id: string, when: When): Promise<any>;
+  recordAt(singleton: string, when: When): Promise<any>;
+  /** Write a record back as it was then, as an edit of this client's: judged by the rules, one op, undone with `undo`. Resolves to the record as it was */
+  revert(c: string, id: string, when: When): Promise<any>;
+  revert(singleton: string, when: When): Promise<any>;
   undo(): boolean;
   redo(): boolean;
   checkpoint(): void;

@@ -104,6 +104,10 @@ bun examples/basic/server.js
   lines of plain declarations or a validator you already have (Zod,
   Valibot), and the store takes no write that leaves a record out of it,
   a client's or the server's own. ([Schemas](docs/model.md#schemas))
+- **History when you want it.** A store can keep every record as each
+  write left it, with when and who: read a record's past, see who
+  changed a field, and put it back as it was last Tuesday, from the
+  server or from a client. ([History](docs/server.md#history))
 - **Undo and redo** that only ever touch your own edits, not a
   teammate's. ([Undo](docs/model.md#undo))
 - **React and Vue bindings**, `lazy-storage/react` and `lazy-storage/vue`,

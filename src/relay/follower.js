@@ -247,6 +247,9 @@ export function createRelay({
       synced: false,
       retry: null,
       throttled: false,
+      // What its clients asked the server through it (a record's history): the relay's req -> { ss, req: the client's }
+      asked: 0,
+      asking: new Map(),
       lingering: null,
       // A browser's replica fetches a large snapshot over HTTP (client/snapshot-fetch.js)
       snapshots: createSnapshotFetcher({ onError: fault })
@@ -531,6 +534,9 @@ export function createRelay({
       },
       onClose() {
         edge.synced = false;
+        // What was asked over the link is not going to be answered
+        for (const { ss, req } of edge.asking.values()) if (edge.sessions.has(ss)) ss.send({ t: 'error', req, code: 'unavailable', message: 'The server went away before it answered' });
+        edge.asking.clear();
         // A snapshot being fetched belongs to the link that is gone
         edge.snapshots.cancel();
         for (const grant of edge.grants.values()) if (grant.state !== 'refused') grant.state = 'pending';
@@ -640,7 +646,20 @@ export function createRelay({
         persist(edge);
         return;
       }
+      case 'history': {
+        const asked = edge.asking.get(msg.req);
+        edge.asking.delete(msg.req);
+        if (asked && edge.sessions.has(asked.ss)) asked.ss.send({ t: 'history', req: asked.req, ...(msg.entries === undefined ? {} : { entries: msg.entries }), ...(msg.record === undefined ? {} : { record: msg.record }) });
+        return;
+      }
       case 'error': {
+        // The answer to what a client asked through the relay is that client's
+        if (Number.isInteger(msg.req)) {
+          const asked = edge.asking.get(msg.req);
+          edge.asking.delete(msg.req);
+          if (asked && edge.sessions.has(asked.ss)) asked.ss.send({ t: 'error', req: asked.req, code: msg.code, message: msg.message, ...(msg.retryAfter === undefined ? {} : { retryAfter: msg.retryAfter }) });
+          return;
+        }
         // A refusal for the rate is not a fault: of an op, or of the relay's own hello (or share), which names none
         const limited = msg.code === 'rate-limited' && (Number.isInteger(msg.seq) || msg.as === undefined);
         if (!Number.isInteger(msg.seq) && !limited) {
@@ -956,6 +975,17 @@ export function createRelay({
             if (local) edge.link.send({ t: 'share', data: msg.data });
             else if (edge.grants.get(ss.as)?.state === 'admitted') edge.link.send({ t: 'share', as: ss.as, data: msg.data });
             return;
+          case 'history': {
+            // History is the server's alone to tell: asked of it on the link, as the client (or, a browser's
+            // relay, as the browser), and answered to the session that asked
+            const admitted = local || edge.grants.get(ss.as)?.state === 'admitted';
+            if (!linkUp() || !edge.synced || !admitted) return ss.send({ t: 'error', req: msg.req, code: 'unavailable', message: 'History is the server\'s to tell, and it is away' });
+            const req = ++edge.asked;
+            edge.asking.set(req, { ss, req: msg.req });
+            const { c, id: record, limit, before, path, when } = msg;
+            edge.link.send({ t: 'history', req, ...(local ? {} : { as: ss.as }), c, id: record, limit, before, path, when });
+            return;
+          }
           default:
             return ss.send({ t: 'error', message: `Unknown message type: ${msg.t}` });
         }

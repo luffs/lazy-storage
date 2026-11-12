@@ -201,7 +201,11 @@ export interface StoreOptions<S extends object = any> extends Omit<ShapeOptions,
    * Keep every record as each write left it, with when and who, for `store.history`, `recordAt` and `revert`;
    * `keep` (ms) forgets what is older, but for the last form of each record before it. Off by default
    */
-  history?: boolean | { keep?: number };
+  history?: boolean | {
+    keep?: number;
+    /** Who of the clients may read a record's history (`db.historyOf`): true, or a function; nobody by default */
+    clients?: boolean | ((user: unknown, context: { c: string; id: string | undefined; store: Store<S> }) => boolean);
+  };
   presence?: boolean | PresenceOptions<S>;
   onError?(error: unknown): void;
   now?: () => number;

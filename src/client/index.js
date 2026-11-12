@@ -111,6 +111,7 @@ function build({
   cacheDelay = 1000,
   undo = !mirror,
   undoLimit = 100,
+  requestTimeout = 30_000,
   reconnect = { min: 500, max: 10_000 },
   presence: wantsPresence = !mirror,
   clocks: wantsClocks = true,
@@ -177,6 +178,9 @@ function build({
   let ended = null;
   let retryTimer = null;
   let throttled = false;
+  // What this client has asked the server and not been answered (a record's history): req -> { resolve, reject }
+  let asked = 0;
+  const asking = new Map();
   let relayed = false;
   let answeredByRelay = false;
   // A large snapshot fetched over HTTP (snapshot-fetch.js): what the link brings meanwhile waits for it
@@ -602,9 +606,23 @@ function build({
         emit('closed', ended);
         return;
       }
+      case 'history': {
+        const waiting = asking.get(msg.req);
+        asking.delete(msg.req);
+        waiting?.resolve(msg);
+        return;
+      }
       case 'error': {
         const err = new Error(msg.message);
         if (msg.code) err.code = msg.code;
+        // The answer to something asked is its asker's to hear, not everyone's
+        if (Number.isInteger(msg.req)) {
+          const waiting = asking.get(msg.req);
+          asking.delete(msg.req);
+          if (msg.code === 'rate-limited') err.retryAfter = msg.retryAfter;
+          waiting?.reject(err);
+          return;
+        }
         emit('error', err);
         if (msg.code === 'rate-limited') {
           if (Number.isInteger(msg.seq)) throttled = true;
@@ -637,6 +655,7 @@ function build({
     },
     onMessage: handle,
     onClose() {
+      unanswered();
       synced = false;
       snapshots.cancel();
       clearPresence();
@@ -656,7 +675,47 @@ function build({
     refreshStatus();
   }
 
+  /** The connection went: what was asked over it is not going to be answered */
+  function unanswered() {
+    const err = Object.assign(new Error('The connection closed before the server answered'), { code: 'offline' });
+    for (const waiting of asking.values()) waiting.reject(err);
+    asking.clear();
+  }
+
+  /** Ask the server for a record's history (see the store's `history.clients`); resolves to its answer */
+  function ask(c, id, query) {
+    return new Promise((resolve, reject) => {
+      if (!shape.has(c)) throw new TypeError(`"${c}" is not a collection or singleton of this store`);
+      if (!linked() || !synced) {
+        reject(Object.assign(new Error('History is the server\'s to tell: this client is not connected to it'), { code: 'offline' }));
+        return;
+      }
+      const req = ++asked;
+      // A server that never answers (one from before it knew the request, which names no `req` in its refusal) is not waited on for ever
+      const timer = setTimeout(() => {
+        if (asking.delete(req)) reject(Object.assign(new Error(`The server did not answer within ${requestTimeout} ms`), { code: 'timeout' }));
+      }, requestTimeout);
+      if (typeof timer?.unref === 'function') timer.unref();
+      const settled = fn => value => { clearTimeout(timer); fn(value); };
+      asking.set(req, { resolve: settled(resolve), reject: settled(reject) });
+      link.send({ t: 'history', req, c, ...(shape.isSingleton(c) ? {} : { id }), ...query });
+    });
+  }
+  /** A time as it travels: a Date as its milliseconds */
+  const wire = when => (when instanceof Date ? when.getTime() : Utils.isPlainObject(when) && when.ts instanceof Date ? { ts: when.ts.getTime() } : when);
+
+  /** Make a record of the state `target`, writing only what differs: fields it lacks deleted, an object both have gone into */
+  function writeAs(c, id, node, target, path) {
+    for (const key of Object.keys(node)) if (!Object.hasOwn(target, key)) delete node[key];
+    for (const [key, value] of Object.entries(target)) {
+      const here = [...path, key];
+      if (Utils.isPlainObject(value) && Utils.isPlainObject(node[key]) && !shape.isRegister(c, id, here)) writeAs(c, id, node[key], value, here);
+      else if (JSON.stringify(node[key]) !== JSON.stringify(value)) node[key] = value;
+    }
+  }
+
   function disconnect() {
+    unanswered();
     if (link) {
       link.detach();
       link = null;
@@ -783,6 +842,41 @@ function build({
       if (data !== null && data !== undefined && JSON.stringify(data) === undefined) throw new TypeError('share expects a JSON value, or null');
       shared = data === null ? undefined : data;
       link?.send({ t: 'share', data: shared === undefined ? null : shared });
+    },
+    /**
+     * A record's history, from the server: resolves to `[{ v, ts, replicaId, user?, changes, record? }]`, newest
+     * first (`limit`, at most 100; `before` a version, to page; `path` the writes that touched one field).
+     * For a store made with `history: { clients }`; rejects with code 'forbidden' on any other, and 'offline'
+     * while not connected. A singleton takes the options in the id's place
+     */
+    async historyOf(c, id, options) {
+      if (Utils.isPlainObject(id) && options === undefined) [id, options] = [undefined, id];
+      const { limit, before, path } = options ?? {};
+      return (await ask(c, id, { limit, before, path })).entries ?? [];
+    },
+    /** A record as it was at a time (ms, a Date, `{ ts }`) or a version (`{ v }`), from the server; undefined when it was not there */
+    async recordAt(c, id, when) {
+      if (shape.isSingleton(c)) [id, when] = [undefined, id];
+      if (when === undefined) throw new TypeError('recordAt takes a time or a version: the record as it is now is in db.state');
+      return (await ask(c, id, { when: wire(when) })).record;
+    },
+    /**
+     * Write a record back as it was then (see recordAt): an edit of this client's like any other, judged by the
+     * store's rules, sent as one op, and undone with `undo`. Only what differs is written. A record that was
+     * not there then is deleted. Resolves to the record as it was
+     */
+    async revert(c, id, when) {
+      if (shape.isSingleton(c)) [id, when] = [undefined, id];
+      if (when === undefined) throw new TypeError('revert takes a time or a version');
+      const target = (await ask(c, id, { when: wire(when) })).record;
+      if (shape.isSingleton(c)) {
+        if (target === undefined) throw new Error(`Nothing is known of ${c} then`);
+        if (Utils.isPlainObject(target) && Utils.isPlainObject(state[c])) writeAs(c, undefined, state[c], target, []);
+        else state[c] = target;
+      } else if (target === undefined) delete state[c][id];
+      else if (Utils.isPlainObject(target) && Utils.isPlainObject(state[c][id]) && !shape.isRegister(c, id)) writeAs(c, id, state[c][id], target, []);
+      else state[c][id] = target;
+      return target;
     },
     get closed() { return ended; },
     connect,

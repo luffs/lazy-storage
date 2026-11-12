@@ -91,8 +91,10 @@ seqs far ahead, timestamps far ahead and far behind, reserved names as
 collections, ids and path segments, changes of every wrong shape,
 deletions of collections and singletons, oversized ops and hellos, a
 follower's hello and ops under clients nobody vouched for, shares,
+requests for a record's history with every field wrong,
 churn, and garbage. After every step it checks that `Object.prototype` is
-untouched, the server's own writes land, no honest client hears an error
+untouched, the server's own writes land, the store reports no fault of
+its own, no honest client hears an error
 or diverges, the collections and singletons stand, nothing was loaded
 that nobody may open, sessions do not leak, and at the end that the store
 on disk equals the store in memory.

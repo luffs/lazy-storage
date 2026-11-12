@@ -25,6 +25,15 @@ const SHAPE = { initial: { tasks: {}, settings: { theme: 'light', order: [] as s
 
 // --- Client ---------------------------------------------------------------------
 
+async function past(client: Client<State>): Promise<number> {
+  const entries = await client.historyOf('tasks', 'a', { limit: 5, path: ['title'] });
+  await client.recordAt('settings', { v: 2 });
+  await client.revert('tasks', 'a', new Date());
+  return entries.length + (entries[0]?.v ?? 0);
+}
+void past;
+createStore({ history: { keep: 1000, clients: (user, { c, id }) => Boolean(user) && c === 'tasks' && id !== undefined } });
+
 const connection = createConnection({ transport: webSocketTransport(() => 'ws://localhost:3200/ws?token=x'), reconnect: { min: 500, max: 10_000 }, keepalive: false });
 const status: 'offline' | 'connecting' | 'online' = connection.status;
 

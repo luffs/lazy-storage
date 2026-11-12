@@ -4,6 +4,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createStore, memoryStorage } from '../src/server/index.js';
 import { sqliteStorage } from '../src/server/sqlite-node.js';
+import { createRelay } from '../src/relay/index.js';
 import { createNetwork, fakeTime } from './helpers.js';
 
 const DAY = 86_400_000;
@@ -228,5 +229,226 @@ test('a document that replaces the storage starts its history over; a store remo
   store.dispose();
   sqlite.remove('main');
   assert.equal(sqlite.db.prepare('SELECT count(*) AS n FROM history').get().n, 0);
+  sqlite.close();
+});
+
+// --- Clients ------------------------------------------------------------------------------
+
+/** What a promise that should reject rejects with */
+const refusal = promise => promise.then(() => assert.fail('it resolved'), err => err);
+
+test('a client reads a record\'s history and the record as it was, when the store lets its clients; not by default', async () => {
+  const now = fakeTime(1_000_000);
+  const closed = createStore({ ...SHAPE, now, history: true });
+  const closedNet = createNetwork(closed);
+  const shut = closedNet.client({ replicaId: 'a', ...SHAPE, now });
+  const none = createNetwork(createStore({ ...SHAPE, now })).client({ replicaId: 'a', ...SHAPE, now });
+  assert.equal((await refusal(shut.historyOf('tasks', 'k'))).code, 'offline', 'not connected yet');
+  await closedNet.settle();
+  const asked = [refusal(shut.historyOf('tasks', 'k')), refusal(shut.recordAt('tasks', 'k', 5))];
+  await closedNet.settle();
+  for (const err of await Promise.all(asked)) assert.deepEqual([err.code, err.message], ['forbidden', 'This store does not let its clients read its history']);
+  none.connect();
+  const errors = [];
+  shut.on('error', err => errors.push(err));
+  assert.deepEqual(errors, [], 'a refusal is its asker\'s to hear, not an error event');
+
+  const store = createStore({ ...SHAPE, now, history: { clients: true } });
+  const net = createNetwork(store);
+  const a = net.client({ replicaId: 'a', ...SHAPE, now }, { user: { id: 'alice' } });
+  const b = net.client({ replicaId: 'b', ...SHAPE, now }, { user: { id: 'bob' } });
+  await net.settle();
+  a.state.tasks.k = { title: 'Milk' };
+  await net.settle();
+  now.advance(1000);
+  b.state.tasks.k.title = 'Oat milk';
+  b.state.settings.theme = 'dark';
+  await net.settle();
+  now.advance(1000);
+  delete a.state.tasks.k;
+  await net.settle();
+
+  const answers = [
+    b.historyOf('tasks', 'k'),
+    b.historyOf('tasks', 'k', { limit: 1 }),
+    b.historyOf('tasks', 'k', { path: ['title'], limit: 500 }),
+    b.recordAt('tasks', 'k', 1_000_500),
+    b.recordAt('tasks', 'k', new Date(1_001_500)),
+    b.recordAt('tasks', 'k', { ts: new Date(1_002_500) }),
+    b.historyOf('settings', { limit: 5 }),
+    b.recordAt('settings', 1_000_500),
+    refusal(b.historyOf('tasks', 'k', { path: 'title' })),
+    refusal(b.recordAt('tasks', 'k', 'yesterday'))
+  ];
+  await net.settle();
+  const [all, one, titles, first, second, gone, settings, theme, badPath, badWhen] = await Promise.all(answers);
+  assert.deepEqual(all.map(e => [e.replicaId, e.user, e.record]), [['a', 'alice', undefined], ['b', 'bob', { title: 'Oat milk' }], ['a', 'alice', { title: 'Milk' }]]);
+  assert.deepEqual(all[1].changes, [{ c: 'tasks', id: 'k', path: ['title'], set: 'Oat milk' }]);
+  assert.equal(one.length, 1);
+  assert.equal(titles.length, 3);
+  assert.deepEqual([first, second, gone], [{ title: 'Milk' }, { title: 'Oat milk' }, undefined]);
+  assert.deepEqual(settings.map(e => e.record.theme), ['dark', 'light']);
+  assert.deepEqual(theme, { theme: 'light' });
+  assert.deepEqual([badPath.code, badWhen.code], ['invalid', 'invalid']);
+  await assert.rejects(b.historyOf('nope', 'k'), /not a collection/);
+  await assert.rejects(b.recordAt('tasks', 'k'), /takes a time or a version/);
+
+  // What is asked when the connection goes is not left waiting
+  const hanging = refusal(b.historyOf('tasks', 'k'));
+  b.link.goOffline();
+  await net.settle();
+  assert.equal((await hanging).code, 'offline');
+});
+
+test('history.clients as a function says who may read which record; a request draws on the rate limit', async () => {
+  const seen = [];
+  const store = createStore({
+    ...SHAPE,
+    rateLimit: { burst: 4, perSecond: 1 },
+    history: { clients: (user, { c, id }) => { seen.push([user.id, c, id]); return c === 'tasks' && user.id === 'alice'; } }
+  });
+  const net = createNetwork(store);
+  const a = net.client({ replicaId: 'a', ...SHAPE }, { user: { id: 'alice' } });
+  const b = net.client({ replicaId: 'b', ...SHAPE }, { user: { id: 'bob' } });
+  await net.settle();
+  store.patch({ tasks: { k: { title: 'Milk' } } });
+  const answers = [a.historyOf('tasks', 'k'), refusal(b.historyOf('tasks', 'k')), refusal(a.historyOf('settings')), a.historyOf('tasks', 'k'), a.historyOf('tasks', 'k'), refusal(a.historyOf('tasks', 'k'))];
+  await net.settle();
+  const [mine, theirs, settings, again, third, limited] = await Promise.all(answers);
+  assert.equal(mine.length, 1);
+  assert.deepEqual([theirs.code, settings.code], ['forbidden', 'forbidden']);
+  assert.deepEqual(seen.slice(0, 3), [['alice', 'tasks', 'k'], ['bob', 'tasks', 'k'], ['alice', 'settings', undefined]]);
+  assert.equal(again.length + third.length, 2);
+  assert.equal(limited.code, 'rate-limited', 'the hello and three requests spent the bucket');
+  assert.ok(limited.retryAfter > 0);
+  assert.throws(() => createStore({ ...SHAPE, history: { clients: 'all' } }), /history.clients/);
+});
+
+test('a client reverts a record as an edit of its own: judged by the rules, one op, undone with undo', async () => {
+  const now = fakeTime(1_000_000);
+  const store = createStore({
+    ...SHAPE,
+    now,
+    history: { clients: true },
+    rules: { tasks: (user, before, after) => (before ?? after).owner === user.id }
+  });
+  const net = createNetwork(store);
+  const a = net.client({ replicaId: 'a', ...SHAPE, now }, { user: { id: 'alice' } });
+  const b = net.client({ replicaId: 'b', ...SHAPE, now }, { user: { id: 'bob' } });
+  await net.settle();
+  a.state.tasks.k = { owner: 'alice', title: 'Milk', meta: { color: 'red' }, geo: { x: 1, y: 2 } };
+  await net.settle();
+  now.advance(1000);
+  a.state.tasks.k.title = 'Oat milk';
+  a.state.tasks.k.meta = { size: 2 };
+  a.state.tasks.k.geo = { x: 9 };
+  a.state.tasks.k.added = true;
+  a.state.settings.theme = 'dark';
+  await net.settle();
+  const version = store.version;
+
+  const settle = async promise => { await net.settle(); const value = await promise; await net.settle(); return value; };
+  assert.deepEqual(await settle(a.revert('tasks', 'k', 1_000_500)), { owner: 'alice', title: 'Milk', meta: { color: 'red' }, geo: { x: 1, y: 2 } });
+  assert.deepEqual(store.state.tasks.k, { owner: 'alice', title: 'Milk', meta: { color: 'red' }, geo: { x: 1, y: 2 } });
+  assert.equal(store.version, version + 1, 'one op');
+  assert.equal(store.history('tasks', 'k')[0].replicaId, 'a', 'the client\'s write, not the server\'s');
+  a.undo();
+  await net.settle();
+  assert.equal(store.state.tasks.k.title, 'Oat milk', 'undone like any edit');
+
+  // Another user's revert is refused as its edit would be, and taken back
+  const rejected = [];
+  b.on('rejected', e => rejected.push(e.code));
+  await settle(b.revert('tasks', 'k', 1_000_500));
+  assert.deepEqual(rejected, ['forbidden']);
+  assert.equal(b.state.tasks.k.title, 'Oat milk');
+
+  // A singleton, and a record that was not there then
+  await settle(a.revert('settings', 1_000_500));
+  assert.equal(store.state.settings.theme, 'light');
+  a.state.tasks.late = { owner: 'alice', title: 'Late' };
+  await net.settle();
+  assert.equal(await settle(a.revert('tasks', 'late', 1_000_500)), undefined);
+  assert.equal(store.state.tasks.late, undefined);
+  await assert.rejects(a.revert('tasks', 'k'), /takes a time or a version/);
+});
+
+for (const acknowledge of ['upstream', 'local']) {
+  test(`behind a relay (${acknowledge}) a client's history request is asked of the server and answered to it; with the server away it is refused`, async () => {
+    const now = fakeTime(1_000_000);
+    const store = createStore({ ...SHAPE, now, history: { clients: (user, { c }) => c === 'tasks' } });
+    const central = createNetwork(store, { vouch: credential => credential });
+    const uplink = central.link({ user: { id: 'relay' } });
+    const errors = [];
+    const relay = createRelay({ shapeOf: () => SHAPE, link: uplink.factory, acknowledge, grace: 0, reconnect: false, keepalive: false, now, onError: err => errors.push(err) });
+    const site = createNetwork(relay);
+    const settle = async () => { for (let i = 0; i < 20; i++) { await central.settle(); await site.settle(); if (central.pending === 0 && site.pending === 0) return; } };
+    const a = site.client({ replicaId: 'a', ...SHAPE, now }, { user: { id: 'alice' } });
+    const other = site.client({ replicaId: 'o', ...SHAPE, now }, { user: { id: 'olga' } });
+    await settle();
+    a.state.tasks.k = { title: 'Milk' };
+    await settle();
+    now.advance(1000);
+    a.state.tasks.k.title = 'Oat milk';
+    await settle();
+
+    const answers = [a.historyOf('tasks', 'k'), other.recordAt('tasks', 'k', 1_000_500), refusal(a.historyOf('settings'))];
+    await settle();
+    const [entries, was, refused] = await Promise.all(answers);
+    assert.deepEqual(entries.map(e => e.record), [{ title: 'Oat milk' }, { title: 'Milk' }]);
+    assert.equal(entries[0].user, acknowledge === 'upstream' ? 'alice' : 'relay', 'who wrote: the client, or the browser its tabs are');
+    assert.deepEqual(was, { title: 'Milk' });
+    assert.equal(refused.code, 'forbidden');
+    assert.deepEqual(errors, [], 'a refusal is the client\'s to hear, and no fault of the relay\'s');
+
+    uplink.goOffline();
+    await settle();
+    const away = refusal(a.historyOf('tasks', 'k'));
+    await settle();
+    assert.equal((await away).code, 'unavailable');
+    relay.close();
+  });
+}
+
+test('a request the server never answers is given up on, and one with fields that are not what they say is refused as invalid, no fault of the server\'s', async () => {
+  const faults = [];
+  const sqlite = sqliteStorage();
+  const store = createStore({ ...SHAPE, history: { clients: true }, storage: sqlite.store('main'), onError: err => faults.push(err) });
+  store.patch({ tasks: { k: { title: 'Milk' } } });
+  const session = store.session;
+  let deaf = false;
+  store.session = options => {
+    const made = session(options);
+    const receive = made.receive;
+    made.receive = message => { if (!(deaf && message.t === 'history')) receive(message); };
+    return made;
+  };
+  const net = createNetwork(store);
+  const a = net.client({ replicaId: 'a', ...SHAPE, requestTimeout: 30 });
+  await net.settle();
+
+  const asked = [
+    refusal(a.historyOf('tasks', 'k', { before: {} })),
+    refusal(a.historyOf('tasks', 'k', { before: 'x' })),
+    refusal(a.historyOf('tasks', 'k', { path: [1] })),
+    refusal(a.recordAt('tasks', 'k', { ts: {} })),
+    refusal(a.recordAt('tasks', 'k', { v: 1.5 })),
+    a.historyOf('tasks', 'k', { limit: 'many' })
+  ];
+  await net.settle();
+  const answers = await Promise.all(asked);
+  assert.deepEqual(answers.slice(0, 5).map(err => err.code), ['invalid', 'invalid', 'invalid', 'invalid', 'invalid']);
+  assert.equal(answers[5].length, 1, 'a limit that is none is the default');
+  assert.deepEqual(faults, []);
+  assert.throws(() => store.history('tasks', 'k', { before: {} }), /before is a version/);
+  assert.throws(() => store.history('tasks', 'k', { limit: 1.5 }), /limit/);
+  assert.throws(() => store.recordAt('tasks', 'k', NaN), /When is a time/);
+
+  deaf = true;
+  const unanswered = refusal(a.historyOf('tasks', 'k'));
+  await net.settle();
+  const err = await unanswered;
+  assert.deepEqual([err.code, err.message], ['timeout', 'The server did not answer within 30 ms']);
+  store.dispose();
   sqlite.close();
 });

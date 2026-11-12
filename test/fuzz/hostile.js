@@ -60,12 +60,16 @@ export async function runHostile({ seed = 1, runs = 20, steps = 40, log = () => 
     const rng = seededRandom(seed * 7919 + run);
     const time = fakeTime(1_000_000_000);
     const storage = memoryStorage();
+    const faults = [];
     const storeOptions = {
       ...SHAPE,
       rules: { tasks: user => user?.id !== ATTACKER.id },
       readOnly: ['locked'],
       presence: true,
       maxChanges: 200,
+      history: { clients: true },
+      // What the store itself reports is a fault of the server's: nothing a client sends should be one
+      onError: err => faults.push(err),
       now: time
     };
     const store = createStore({ ...storeOptions, storage });
@@ -155,7 +159,7 @@ export async function runHostile({ seed = 1, runs = 20, steps = 40, log = () => 
       : { replica: someReplica(), seq: someSeq(), ts: someTs(), changes: someChanges() });
 
     const attack = () => {
-      const roll = rng.int(11);
+      const roll = rng.int(12);
       if (roll < 4) {
         const op = someOp();
         send({ t: 'op', store: 'main', op });
@@ -202,6 +206,14 @@ export async function runHostile({ seed = 1, runs = 20, steps = 40, log = () => 
         ]);
         send(garbage);
         return `attacker garbage ${JSON.stringify(garbage).slice(0, 40)}`;
+      }
+      if (roll < 11) {
+        // A record's history asked for in every wrong way: what is not there, and fields that are not what they say
+        const odd = () => rng.pick([undefined, null, 0, -1, 1.5, 1e308, 'x', {}, [], { v: 'x' }, { ts: {} }, own('__proto__', { v: 1 }), true]);
+        const request = { t: 'history', store: 'main', req: rng.pick([rng.int(1000), 'x', undefined, 1.5]), c: rng.pick(['tasks', 'notes', 'settings', 'locked', 'nope', '__proto__', 5]), id: rng.pick(['t0', 'x', '', 7, undefined]) };
+        for (const field of ['limit', 'before', 'path', 'when']) if (rng.chance(0.6)) request[field] = field === 'path' && rng.chance(0.3) ? rng.pick([['title'], ['__proto__'], [1], []]) : odd();
+        send(request);
+        return `attacker history ${JSON.stringify(request).slice(0, 60)}`;
       }
       freshAttacker();
       return 'attacker reconnects';
@@ -253,6 +265,7 @@ export async function runHostile({ seed = 1, runs = 20, steps = 40, log = () => 
       const mark = `mark-${step}`;
       store.patch({ settings: { mark } });
       if (store.state.settings.mark !== mark) throw fail(`the server's own write did not land after step ${step}`);
+      if (faults.length) throw fail(`the store reported a fault of its own: ${faults[0]?.message ?? faults[0]}`);
       for (const c of honest) {
         if (c.errors.length) throw fail(`${c.name} heard: ${c.errors[0].code ?? ''} ${c.errors[0].message}`);
       }

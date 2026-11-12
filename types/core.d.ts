@@ -236,6 +236,7 @@ export type ClientMessage =
   | { t: 'op'; store?: string; op: Op; as?: string }
   | { t: 'leave'; store?: string; as?: string }
   | { t: 'share'; store?: string; data: unknown; as?: string }
+  | { t: 'history'; store?: string; req: number; c: string; id?: string; limit?: number; before?: number; path?: Path; when?: number | { ts: number } | { v: number }; as?: string }
   | { t: 'vouch'; store?: string; as: string; credential: unknown; replica: string }
   | { t: 'ping' };
 
@@ -263,7 +264,8 @@ export type ServerMessage =
   | { t: 'delta'; store?: string; ops: Array<{ v: number; ts: Timestamp; changes: Change[] }>; v: number; epoch: string | null; seq: number; now: number; shape: string; lost?: Array<{ seq: number; lost: Lost[] }>; relay?: true }
   | { t: 'patch'; store?: string; changes: Change[]; v: number; ts: Timestamp }
   | { t: 'ack'; store?: string; seq: number; v: number; now: number; lost?: Lost[]; as?: string; replica?: string }
-  | { t: 'error'; store?: string; seq?: number; code?: string; message: string; retryAfter?: number; as?: string; replica?: string }
+  | { t: 'history'; store?: string; req: number; entries?: HistoryEntry[]; record?: unknown; as?: string }
+  | { t: 'error'; store?: string; seq?: number; req?: number; code?: string; message: string; retryAfter?: number; as?: string; replica?: string }
   | { t: 'presence'; store?: string; peers?: Peer[]; left?: string[]; joined?: Peer[]; shared?: Array<{ replicaId: string; data?: unknown }> }
   | { t: 'relay'; store?: string; status: 'local' | 'through' }
   | { t: 'closed'; store?: string; code: string; message: string }
