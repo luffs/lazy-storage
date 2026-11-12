@@ -212,3 +212,35 @@ test('a page on a port follows the browser\'s replica for the stores it is given
   port2.close();
   b.close();
 });
+
+test('a tab reads a record\'s history through the browser\'s one socket, whichever tab holds it', async () => {
+  const now = fakeTime();
+  const store = createStore({ ...SHAPE, now, history: { clients: true } });
+  const net = createNetwork(store);
+  const b = browser(net, { now });
+  const one = b.tab('one');
+  const two = b.tab('two');
+  await b.until(() => one.db.status === 'online' && two.db.status === 'online', 'online');
+  one.db.state.tasks.k = { title: 'Milk' };
+  await b.until(() => store.state.tasks.k, 'the server has it');
+  now.advance(1000);
+  two.db.state.tasks.k.title = 'Oat milk';
+  await b.until(() => store.state.tasks.k.title === 'Oat milk', 'and the edit');
+
+  const answered = async promise => {
+    let done = false;
+    const settled = promise.finally(() => { done = true; });
+    await b.until(() => done, 'the answer');
+    return settled;
+  };
+  // The leader's tab asks on its own socket, the other through the leader
+  for (const tab of [one, two]) {
+    const entries = await answered(tab.db.historyOf('tasks', 'k'));
+    assert.deepEqual(entries.map(e => e.record), [{ title: 'Oat milk' }, { title: 'Milk' }], `tab ${tab.id}`);
+    // By version: the two writes may bear one time, the relay's clock being the wall's and the test's standing still
+    assert.deepEqual(await answered(tab.db.recordAt('tasks', 'k', { v: entries[1].v })), { title: 'Milk' });
+  }
+  await answered(two.db.revert('tasks', 'k', { v: (await answered(two.db.historyOf('tasks', 'k'))).at(-1).v }));
+  await b.until(() => store.state.tasks.k.title === 'Milk' && one.db.state.tasks.k.title === 'Milk', 'reverted, for the server and the other tab');
+  b.close();
+});

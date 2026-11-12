@@ -27,9 +27,13 @@ const SHAPE = { initial: { tasks: {}, settings: { theme: 'light', order: [] as s
 
 async function past(client: Client<State>): Promise<number> {
   const entries = await client.historyOf('tasks', 'a', { limit: 5, path: ['title'] });
+  const further = await client.historyOf(entries[0].c, entries[0].id ?? '', { cursor: entries[entries.length - 1], until: Date.now() });
+  void further;
   await client.recordAt('settings', { v: 2 });
   await client.revert('tasks', 'a', new Date());
-  return entries.length + (entries[0]?.v ?? 0);
+  const feed = await client.activity({ since: new Date(0), user: 'u1', collection: 'tasks', deleted: true, limit: 10 });
+  const older = await client.activity({ cursor: feed[feed.length - 1], oldestFirst: false });
+  return entries.length + (entries[0]?.v ?? 0) + older.filter(e => e.c === 'tasks' && e.id !== undefined).length;
 }
 void past;
 createStore({ history: { keep: 1000, clients: (user, { c, id }) => Boolean(user) && c === 'tasks' && id !== undefined } });
@@ -164,10 +168,12 @@ const dup: boolean = result.duplicate;
 const recordClock: RecordClock = store.clock('tasks', 'a');
 store.on((changed, meta) => { void [changed.tasks, meta.origin, meta.changes]; });
 store.observe('op', (e: OpEvent) => { void [e.replicaId, e.changes]; });
-const entries: number[] = store.history('tasks', 'a', { limit: 10, path: ['title'] }).map(e => e.v + e.ts + e.changes.length + (e.user ?? e.replicaId).length);
-const was: unknown = [store.recordAt('tasks', 'a', new Date()), store.recordAt('settings', { v: 3 }), store.revert('tasks', 'a', 1000), store.revert('settings', { ts: 5 }), store.history('settings', { limit: 1 })];
+const entries: number[] = store.historyOf('tasks', 'a', { limit: 10, path: ['title'], since: new Date(0), user: 'u1' }).map(e => e.v + e.ts + e.changes.length + (e.user ?? e.replicaId).length);
+const was: unknown = [store.recordAt('tasks', 'a', new Date()), store.recordAt('settings', { v: 3 }), store.revert('tasks', 'a', 1000), store.revert('settings', { ts: 5 }), store.historyOf('settings', { limit: 1 })];
 void [entries, was];
 createStore({ history: { keep: 90 * 86_400_000 } });
+const recent: string[] = store.activity({ after: 3, oldestFirst: true, until: Date.now() }).map(e => `${e.c}/${e.id ?? ''}@${e.v} by ${e.user ?? e.replicaId}`);
+void recent;
 const exported: StoreDocument = store.export();
 const records: number = store.stats().records;
 void [dup, recordClock, exported, records];

@@ -107,7 +107,7 @@ bun examples/basic/server.js
 - **History when you want it.** A store can keep every record as each
   write left it, with when and who: read a record's past, see who
   changed a field, and put it back as it was last Tuesday, from the
-  server or from a client. ([History](docs/server.md#history))
+  server or from a client. ([History](docs/history.md))
 - **Undo and redo** that only ever touch your own edits, not a
   teammate's. ([Undo](docs/model.md#undo))
 - **React and Vue bindings**, `lazy-storage/react` and `lazy-storage/vue`,
@@ -175,7 +175,8 @@ your own ([Examples, benchmarks, and tests](docs/development.md)).
 | [The model](docs/model.md) | Collections, records and singletons, lists, how conflicts resolve, undo, UI frameworks, scope |
 | [Offline](docs/offline.md) | The outbox, storage adapters, what a reconnect does |
 | [Multiple stores](docs/stores.md) | Many stores over one socket, one socket per browser |
-| [The server](docs/server.md) | Persistence, migrations, backups, state the server owns, embedding, Node |
+| [The server](docs/server.md) | Persistence, reading the file with SQL, migrations, backups, state the server owns, embedding, Node |
+| [History](docs/history.md) | A record's past, the store's activity, the record as it was, and putting it back |
 | [Authentication, presence, and eviction](docs/auth.md) | Who may open and write what, who is here, ending sessions |
 | [Relays](docs/relays.md) | A store that follows the server: working while it is away, spreading the load, compression |
 | [Limits, memory, and observability](docs/limits.md) | The ceilings a public server needs, and what to watch |

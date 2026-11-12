@@ -1,7 +1,7 @@
 // Type declarations for `lazy-storage/client` (createClient, openClient)
 // and the client-side shapes the main entry builds on. Hand-written.
 import type { ChangeListener, ListenerOptions, Unsubscribe } from 'lazy-watch';
-import type { Change, ClosedCode, ErrorCode, HistoryEntry, Lost, Op, Path, Peer, When, RecordClock, ServerMessage, Shape, ShapeOptions } from './core.js';
+import type { ActivityOptions, Change, ClosedCode, ErrorCode, HistoryEntry, HistoryOptions, Lost, Op, Path, Peer, When, RecordClock, ServerMessage, Shape, ShapeOptions } from './core.js';
 
 /** The socket's: `online` once it is open */
 export type ConnectionStatus = 'offline' | 'connecting' | 'online';
@@ -454,9 +454,14 @@ export interface Client<S extends object = any> {
    * most 100), `before` a version to page, `path` the writes that touched one field. Rejects with an error whose
    * `code` is 'forbidden', 'offline' (not connected), 'unavailable' (behind a relay, the server away) or 'rate-limited'
    */
-  historyOf(c: string, id: string, options?: { limit?: number; before?: number; path?: Path }): Promise<HistoryEntry[]>;
-  historyOf(singleton: string, options?: { limit?: number; before?: number; path?: Path }): Promise<HistoryEntry[]>;
+  historyOf(c: string, id: string, options?: HistoryOptions): Promise<HistoryEntry[]>;
+  historyOf(singleton: string, options?: HistoryOptions): Promise<HistoryEntry[]>;
   /** A record as it was at a time or a version, from the server; undefined when it was not there */
+  /**
+   * The writes to every record of the store, from the server, newest first (50 unless `limit` says otherwise):
+   * the records this client may not read the history of are left out. Rejects as `historyOf` does
+   */
+  activity(options?: ActivityOptions): Promise<HistoryEntry[]>;
   recordAt(c: string, id: string, when: When): Promise<any>;
   recordAt(singleton: string, when: When): Promise<any>;
   /** Write a record back as it was then, as an edit of this client's: judged by the rules, one op, undone with `undo`. Resolves to the record as it was */

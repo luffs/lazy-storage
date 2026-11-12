@@ -289,9 +289,17 @@ export function sqliteStorageOn({ exec, prepare, transaction, close, db, driver 
       ON CONFLICT (store, collection, id, v) DO UPDATE SET ts = excluded.ts, user = excluded.user, replica = excluded.replica, data = excluded.data, changes = excluded.changes`),
     history: prepare(`
       SELECT v, ts, user, replica, data, changes FROM history
-      WHERE store = ? AND collection = ? AND id = ? AND v < ? AND v <= ? AND ts <= ?
-      ORDER BY v DESC LIMIT ?`),
+      WHERE store = ?1 AND collection = ?2 AND id = ?3 AND v < ?4 AND v <= ?5 AND ts <= ?6 AND ts >= ?7 AND (?8 IS NULL OR user = ?8)
+      ORDER BY v DESC LIMIT ?9`),
     historyOfVersion: prepare('SELECT collection, id, v, ts, user, replica, data, changes FROM history WHERE store = ? AND v = ?'),
+    // Every record's rows, newest first or oldest (see storage.js): a bound that is not asked for is as wide as it
+    // goes, and the cursor (?9 its version, ?10 and ?11 its record) is the row to read on after, in the order asked
+    ...Object.fromEntries([['DESC', '<'], ['ASC', '>']].map(([order, past]) => [`activity${order}`, prepare(`
+      SELECT collection, id, v, ts, user, replica, data, changes FROM history
+      WHERE store = ?1 AND v < ?2 AND v > ?3 AND ts >= ?4 AND ts <= ?5
+        AND (?6 IS NULL OR user = ?6) AND (?7 IS NULL OR collection = ?7) AND (?8 = 0 OR data IS NULL)
+        AND (?9 IS NULL OR v ${past} ?9 OR (v = ?9 AND (collection > ?10 OR (collection = ?10 AND id > ?11))))
+      ORDER BY v ${order}, collection, id LIMIT ?12`)])),
     historyCount: prepare('SELECT count(*) AS n FROM history WHERE store = ?'),
     // Each record's last row before the time stays: what the record was then. Unless it was deleted then: no
     // row says the same, and a record made and deleted would otherwise leave one for ever
@@ -460,11 +468,19 @@ export function sqliteStorageOn({ exec, prepare, transaction, close, db, driver 
         commitMany,
         flush() {},
         /** A record's history rows, newest first (see storage.js) */
-        history({ c, id: rid, before, upToV, upToTs, limit }) {
+        history({ c, id: rid, before, upToV, upToTs, fromTs, user, limit }) {
           const most = Number.MAX_SAFE_INTEGER;
-          return q.history.all(id, c, rowId(rid), before ?? most, upToV ?? most, upToTs ?? most, limit ?? most).map(row => ({ ...row }));
+          return q.history.all(id, c, rowId(rid), before ?? most, upToV ?? most, upToTs ?? most, fromTs ?? -most, user ?? null, limit ?? most).map(row => ({ ...row }));
         },
         historyOfVersion: v => q.historyOfVersion.all(id, v).map(({ collection, id: rid, ...row }) => ({ c: collection, id: rid === '' ? null : rid, ...row })),
+        activity({ before, after, fromTs, toTs, user, c, deleted, ascending, cursor, limit } = {}) {
+          const most = Number.MAX_SAFE_INTEGER;
+          const rows = (ascending ? q.activityASC : q.activityDESC).all(
+            id, before ?? most, after ?? -most, fromTs ?? -most, toTs ?? most, user ?? null, c ?? null, deleted ? 1 : 0,
+            cursor ? cursor.v : null, cursor ? cursor.c : null, cursor ? rowId(cursor.id) : null, Number.isFinite(limit) ? limit : most
+          );
+          return rows.map(({ collection, id: rid, ...row }) => ({ c: collection, id: rid === '' ? null : rid, ...row }));
+        },
         historyCount: () => q.historyCount.get(id).n,
         pruneHistory(before) {
           q.pruneHistory.run(id, before);

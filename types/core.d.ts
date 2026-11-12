@@ -236,12 +236,16 @@ export type ClientMessage =
   | { t: 'op'; store?: string; op: Op; as?: string }
   | { t: 'leave'; store?: string; as?: string }
   | { t: 'share'; store?: string; data: unknown; as?: string }
-  | { t: 'history'; store?: string; req: number; c: string; id?: string; limit?: number; before?: number; path?: Path; when?: number | { ts: number } | { v: number }; as?: string }
+  | { t: 'history'; store?: string; req: number; c: string; id?: string; limit?: number; before?: number; cursor?: HistoryCursor; path?: Path; since?: number; until?: number; user?: string; when?: number | { ts: number } | { v: number }; as?: string }
+  | { t: 'history'; store?: string; req: number; all: true; limit?: number; before?: number; after?: number; since?: number; until?: number; user?: string; collection?: string; deleted?: boolean; oldestFirst?: boolean; cursor?: HistoryCursor; as?: string }
   | { t: 'vouch'; store?: string; as: string; credential: unknown; replica: string }
   | { t: 'ping' };
 
-/** One write to a record, as `store.history` and a client's `db.historyOf` tell it */
+/** One write to a record, as `historyOf` and `activity` tell it, the store's and a client's alike */
 export interface HistoryEntry {
+  /** The record it is of: its collection (or singleton), and its id, which a singleton has none of */
+  c: string;
+  id?: string;
   /** The store's version the write made, and its time on the store's clock */
   v: number;
   ts: Timestamp;
@@ -257,6 +261,41 @@ export interface HistoryEntry {
 /** A time on the store's clock (ms, a Date, `{ ts }`) or a version (`{ v }`) */
 export type When = number | Date | { ts: number | Date } | { v: number };
 
+/** Where an answer stopped, to read on after: an entry's version and record. The last entry of an answer will do */
+export interface HistoryCursor { v: number; c: string; id?: string | null }
+
+/** What `historyOf` and `activity` both take: how many, from when to when, whose, and where to read on from */
+export interface HistoryRange {
+  /** How many entries (default 50) */
+  limit?: number;
+  /** Times on the store's clock */
+  since?: number | Date;
+  until?: number | Date;
+  /** Older than this version */
+  before?: number;
+  /** A user's key, as presence keys users */
+  user?: string;
+  /** The last entry of an answer, to read on after it */
+  cursor?: HistoryCursor;
+}
+
+/** Which of one record's writes */
+export interface HistoryOptions extends HistoryRange {
+  /** Only the writes at, above or beneath this path in the record */
+  path?: Path;
+}
+
+/** Which of the store's writes */
+export interface ActivityOptions extends HistoryRange {
+  /** Newer than this version */
+  after?: number;
+  collection?: string;
+  /** The deletions alone */
+  deleted?: boolean;
+  /** Oldest first: with `after`, the store followed from a version on */
+  oldestFirst?: boolean;
+}
+
 export interface Peer { replicaId: string; user?: unknown; key?: string; data?: unknown }
 
 export type ServerMessage =
@@ -264,7 +303,7 @@ export type ServerMessage =
   | { t: 'delta'; store?: string; ops: Array<{ v: number; ts: Timestamp; changes: Change[] }>; v: number; epoch: string | null; seq: number; now: number; shape: string; lost?: Array<{ seq: number; lost: Lost[] }>; relay?: true }
   | { t: 'patch'; store?: string; changes: Change[]; v: number; ts: Timestamp }
   | { t: 'ack'; store?: string; seq: number; v: number; now: number; lost?: Lost[]; as?: string; replica?: string }
-  | { t: 'history'; store?: string; req: number; entries?: HistoryEntry[]; record?: unknown; as?: string }
+  | { t: 'history'; store?: string; req: number; entries?: HistoryEntry[]; more?: HistoryCursor; record?: unknown; as?: string }
   | { t: 'error'; store?: string; seq?: number; req?: number; code?: string; message: string; retryAfter?: number; as?: string; replica?: string }
   | { t: 'presence'; store?: string; peers?: Peer[]; left?: string[]; joined?: Peer[]; shared?: Array<{ replicaId: string; data?: unknown }> }
   | { t: 'relay'; store?: string; status: 'local' | 'through' }

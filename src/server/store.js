@@ -59,6 +59,13 @@ export const HELLO_OPS = 1000;
 
 /** The most entries one answer to a client's history request carries; it asks again, `before` the oldest, for more */
 const HISTORY_PAGE = 100;
+/** How many entries a history or an activity is, asked for without a limit: the store's own and a client's alike */
+const HISTORY_DEFAULT = 50;
+/** The most rows one such request reads, looking for the writes that touch a path */
+const HISTORY_SCAN = 1000;
+
+/** How many rows of a record's history are read at a time, looking for the writes that touch a path */
+const HISTORY_READ = 200;
 
 /** The most changes one commit groups: a turn that merges more is stored this many at a time */
 const GROUP_MAX = 256;
@@ -116,7 +123,7 @@ function presenceOptions(presence) {
  * @param {boolean} [options.groupCommit=true]
  * @param {Function[]} [options.migrations] - `(state, { store }) => diff` each, run once, in order
  * @param {boolean|{ keep?: number, clients?: boolean|Function }} [options.history=false] - keep every record as
- *   each write left it, with when and who, for `store.history`, `store.recordAt` and `store.revert`; `keep` (ms)
+ *   each write left it, with when and who, for `store.historyOf`, `store.recordAt`, `store.revert` and `store.activity`; `keep` (ms)
  *   forgets what is older, but for the last form of each record before it. `clients` lets clients ask for a
  *   record's history (`db.historyOf`): true for every client that has the store open, or
  *   `(user, { c, id, store }) => boolean`; off by default, since what a record was may be what was taken out of
@@ -175,8 +182,8 @@ export function createStore({
   // Who of the clients may read a record's history: nobody (the default), or whom the app says
   const mayAsk = keeps && Utils.isPlainObject(historyOption) ? historyOption.clients ?? false : false;
   if (mayAsk !== false && mayAsk !== true && typeof mayAsk !== 'function') throw new TypeError('history.clients must be true, false, or a function');
-  if (keeps && ['history', 'historyOfVersion', 'historyCount', 'pruneHistory'].some(method => typeof storage[method] !== 'function')) {
-    throw new TypeError("This store's storage keeps no history (it has no history(query), historyOfVersion(v), historyCount() and pruneHistory(before))");
+  if (keeps && ['history', 'historyOfVersion', 'activity', 'historyCount', 'pruneHistory'].some(method => typeof storage[method] !== 'function')) {
+    throw new TypeError("This store's storage keeps no history (it has no history(query), historyOfVersion(v), activity(query), historyCount() and pruneHistory(before))");
   }
   const time = now ?? Date.now;
   const saved = storage.load();
@@ -562,7 +569,7 @@ export function createStore({
    * commit is stored at the end of the turn, and by then a later write of
    * the same turn may have changed the record again: its row is its own
    */
-  function historyOf(applied, { upserts, deletes }, ts, replicaId, user) {
+  function historyRowsOf(applied, { upserts, deletes }, ts, replicaId, user) {
     const changesOf = new Map();
     for (const change of applied) {
       const key = shape.recordKey(change.c, change.id);
@@ -597,7 +604,7 @@ export function createStore({
         replica: replicaEntry ? { id: replicaId, ...replicaEntry } : undefined,
         log: entry,
         logFloor: log[0]?.v ?? version,
-        ...(keeps ? { history: historyOf(applied, rows, ts, replicaId, user) } : {})
+        ...(keeps ? { history: historyRowsOf(applied, rows, ts, replicaId, user) } : {})
       });
       broadcast({ t: 'patch', changes: applied, v: version, ts });
       // Heard on the next microtask, as a batch is: a listener that writes (closes a session, patches) does so
@@ -809,14 +816,101 @@ export function createStore({
     return storage.history({ c, id: shape.isSingleton(c) ? null : id, ...query });
   }
 
-  const entryOf = row => ({
+  /** A row as it is told: one write to one record, with the record it is of (a singleton has no id) */
+  const entryOf = (c, id, row, changes = JSON.parse(row.changes)) => ({
+    c,
+    ...(id === null || id === undefined ? {} : { id }),
     v: row.v,
     ts: row.ts,
     replicaId: row.replica,
     ...(row.user === null || row.user === undefined ? {} : { user: row.user }),
-    changes: JSON.parse(row.changes),
+    changes,
     record: row.data === null ? undefined : JSON.parse(row.data)
   });
+
+  /** The row to read on after, from what a caller gives as `cursor`: an entry, or its v, c and id */
+  function cursorOf(cursor) {
+    if (cursor === undefined || cursor === null) return undefined;
+    if (Utils.isPlainObject(cursor) && Number.isSafeInteger(cursor.v) && typeof cursor.c === 'string' && (cursor.id === undefined || cursor.id === null || typeof cursor.id === 'string')) {
+      return { v: cursor.v, c: cursor.c, id: cursor.id ?? null };
+    }
+    throw new TypeError('cursor is the entry to read on after: its v, c and id');
+  }
+
+  /**
+   * A record's history, newest first (see store.historyOf):
+   * `{ entries, more }`. With a `path` the rows are read on, a page at a
+   * time, until `limit` of the writes that touch it are found; `scan` is
+   * how many rows that may take. `more` is the row it stopped at, to read
+   * on after as `cursor`, when it stopped for the limit or the scan and
+   * not for the end. A row's record is decoded only for an entry that is
+   * told
+   */
+  function readHistory(c, id, { limit = HISTORY_DEFAULT, before, cursor, path, since, until, user, scan = Infinity } = {}) {
+    if (!(Number.isInteger(limit) && limit >= 1)) throw new TypeError('history takes a limit of one or more');
+    if (before !== undefined && !Number.isSafeInteger(before)) throw new TypeError('before is a version: a whole number');
+    if (path !== undefined && !(Array.isArray(path) && path.every(seg => typeof seg === 'string'))) throw new TypeError('A path is an array of keys');
+    if (user !== undefined && typeof user !== 'string') throw new TypeError("user is a user's key: a string");
+    const from = cursorOf(cursor);
+    const query = { fromTs: timeOf(since, 'since'), upToTs: timeOf(until, 'until'), user };
+    const entries = [];
+    const page = path ? Math.min(HISTORY_READ, scan) : limit;
+    // A record has one row a version, so the row to read on after is a version to read on before
+    let upper = from === undefined ? before : Math.min(from.v, before ?? Infinity);
+    for (let read = 0; ;) {
+      const rows = historyRows(c, id, { ...query, before: upper, limit: page });
+      for (const row of rows) {
+        read++;
+        upper = row.v;
+        const changes = JSON.parse(row.changes);
+        if (!path || changes.length === 0 || changes.some(change => touches(change, path))) entries.push(entryOf(c, id, row, changes));
+        if (entries.length === limit) return { entries, more: { v: row.v, c, id: id ?? null } };
+      }
+      if (rows.length < page) return { entries };
+      if (read >= scan) return { entries, more: { v: upper, c, id: id ?? null } };
+    }
+  }
+
+  /** A time as the storage is asked for it: milliseconds, from a number or a Date; undefined when none is given */
+  function timeOf(when, name) {
+    if (when === undefined || when === null) return undefined;
+    if ((typeof when === 'number' || when instanceof Date) && Number.isFinite(Number(when))) return Number(when);
+    throw new TypeError(`${name} is a time: a number of milliseconds or a Date`);
+  }
+
+  /**
+   * The writes to every record, newest first (see store.activity):
+   * `{ entries, more }`, an entry per record a write wrote, in order of
+   * version, then collection, then id. `allow(c, id)` leaves out the
+   * records a client may not read; `scan` is how many rows may be read
+   * looking for `limit` that are told. `more` is the row it stopped at
+   * ({ v, c, id }), to read on after as `cursor`, when it stopped for the
+   * limit or the scan and not for the end
+   */
+  function readActivity({ limit = HISTORY_DEFAULT, before, after, since, until, user, collection, deleted = false, oldestFirst = false, cursor } = {}, { scan = Infinity, allow } = {}) {
+    if (!keeps) throw new TypeError('History is off on this store: make it with history: true');
+    if (!(Number.isInteger(limit) && limit >= 1)) throw new TypeError('activity takes a limit of one or more');
+    for (const [name, v] of [['before', before], ['after', after]]) if (v !== undefined && !Number.isSafeInteger(v)) throw new TypeError(`${name} is a version: a whole number`);
+    if (user !== undefined && typeof user !== 'string') throw new TypeError("user is a user's key: a string");
+    if (collection !== undefined && !(typeof collection === 'string' && shape.has(collection))) throw new TypeError(`"${collection}" is not a collection or singleton of this store`);
+    if (typeof deleted !== 'boolean' || typeof oldestFirst !== 'boolean') throw new TypeError('deleted and oldestFirst are true or false');
+    const query = { before, after, fromTs: timeOf(since, 'since'), toTs: timeOf(until, 'until'), user, c: collection, deleted, ascending: oldestFirst };
+    commitNow();
+    const page = Math.min(HISTORY_READ, scan);
+    const entries = [];
+    let at = cursorOf(cursor);
+    for (let read = 0; ;) {
+      const rows = storage.activity({ ...query, cursor: at, limit: page });
+      for (const row of rows) {
+        read++;
+        at = { v: row.v, c: row.c, id: row.id };
+        if (!allow || allow(row.c, row.id ?? undefined)) entries.push(entryOf(row.c, row.id, row));
+        if (entries.length === limit) return { entries, more: at };
+      }
+      if (rows.length < page) return { entries };
+      if (read >= scan) return { entries, more: at };
+    }
+  }
 
   /** Whether a change is at, above or beneath a path in its record */
   const touches = (change, path) => {
@@ -1012,18 +1106,29 @@ export function createStore({
       if (req === undefined) return refuse('invalid', 'A history request has a req to be answered by');
       if (!speaker.replicaId) return refuse('forbidden', 'Say hello first');
       const id = shape.isSingleton(msg.c) ? undefined : msg.id;
+      const may = (c, rid) => mayAsk === true || (typeof mayAsk === 'function' && mayAsk(speaker.user, { c, id: rid, store: self }) === true);
       try {
-        let allowed = mayAsk === true;
-        if (typeof mayAsk === 'function' && shape.has(msg.c)) allowed = mayAsk(speaker.user, { c: msg.c, id, store: self }) === true;
+        // The whole store's writes are asked for as one, and each record's told or not by the same rule
+        const allowed = msg.all === true ? mayAsk !== false : shape.has(msg.c) && may(msg.c, id);
         if (!allowed) return refuse('forbidden', keeps ? 'This store does not let its clients read its history' : 'This store keeps no history');
         const wait = throttle(bucketOf(speaker.user, speaker.replicaId));
         if (wait > 0) return refuse('rate-limited', `Too many requests; try again in ${wait} ms`, { retryAfter: wait });
+        if (msg.all === true) {
+          const { before, after, since, until, user: by, collection, deleted, oldestFirst, cursor } = msg;
+          const options = { cursor: cursor ?? undefined, limit: Math.min(Number.isInteger(msg.limit) && msg.limit > 0 ? msg.limit : HISTORY_DEFAULT, HISTORY_PAGE), before: before ?? undefined, after: after ?? undefined, since, until, user: by ?? undefined, collection: collection ?? undefined, deleted: deleted ?? false, oldestFirst: oldestFirst ?? false };
+          const { entries, more } = readActivity(options, { scan: HISTORY_SCAN, allow: mayAsk === true ? undefined : may });
+          return send({ t: 'history', ...tag, req, entries, ...(more === undefined ? {} : { more }) });
+        }
         if (msg.when !== undefined) {
           const record = self.recordAt(msg.c, id, msg.when);
           return send({ t: 'history', ...tag, req, ...(record === undefined ? {} : { record }) });
         }
-        const limit = Math.min(Number.isInteger(msg.limit) && msg.limit > 0 ? msg.limit : 50, HISTORY_PAGE);
-        return send({ t: 'history', ...tag, req, entries: self.history(msg.c, id, { limit, before: msg.before ?? undefined, path: msg.path ?? undefined }) });
+        const limit = Math.min(Number.isInteger(msg.limit) && msg.limit > 0 ? msg.limit : HISTORY_DEFAULT, HISTORY_PAGE);
+        // One request reads so many rows and no more: a path few writes touch would otherwise have it read the
+        // record's whole history for one token. `more` says where it stopped, for the client to ask on from
+        const { before, cursor, path, since, until, user: by } = msg;
+        const { entries, more } = readHistory(msg.c, id, { limit, before: before ?? undefined, cursor: cursor ?? undefined, path: path ?? undefined, since, until, user: by ?? undefined, scan: HISTORY_SCAN });
+        return send({ t: 'history', ...tag, req, entries, ...(more === undefined ? {} : { more }) });
       } catch (err) {
         // What the request asked could not be read as asked: a collection the store has not, a path that is none
         if (!(err instanceof TypeError)) onError(err);
@@ -1392,31 +1497,24 @@ export function createStore({
       return { version, epoch, schema, sessions: sessions.size, replicas: replicas.size, records, log: log.length, sent: out };
     },
     /**
-     * A record's history, newest first: `[{ v, ts, replicaId, user?, changes, record }]`, a write each, `record`
-     * as that write left it (undefined: deleted) and `changes` what it did to it. `limit` (default 100) entries,
-     * older than version `before` when given, and with `path` only the writes at, above or beneath that path in
-     * the record. A singleton takes the options in the id's place
+     * A record's history, newest first: `[{ c, id?, v, ts, replicaId, user?, changes, record }]`, a write each,
+     * `record` as that write left it (undefined: deleted) and `changes` what it did to it. `limit` entries
+     * (default 50); `since` and `until` (times) and `user` (a user's key) narrow it, and `path` to the writes
+     * at, above or beneath that path in the record; `before` bounds it by version; `cursor`, the last entry of
+     * one answer, reads on after it. A singleton takes the options in the id's place
      */
-    history(c, id, options) {
+    historyOf(c, id, options) {
       if (Utils.isPlainObject(id) && options === undefined) [id, options] = [undefined, id];
-      const { limit = 100, before, path } = options ?? {};
-      if (!(Number.isInteger(limit) && limit >= 1)) throw new TypeError('history takes a limit of one or more');
-      if (before !== undefined && !Number.isSafeInteger(before)) throw new TypeError('before is a version: a whole number');
-      if (path !== undefined && !(Array.isArray(path) && path.every(seg => typeof seg === 'string'))) throw new TypeError('A path is an array of keys');
-      const out = [];
-      let cursor = before;
-      // With a path, read on until enough of the writes that touch it are found
-      for (;;) {
-        const rows = historyRows(c, id, { before: cursor, limit: path ? 200 : limit });
-        for (const row of rows) {
-          const entry = entryOf(row);
-          if (!path || entry.changes.some(change => touches(change, path)) || entry.changes.length === 0) out.push(entry);
-          if (out.length === limit) return out;
-        }
-        if (!path || rows.length < 200) return out;
-        cursor = rows[rows.length - 1].v;
-      }
+      return readHistory(c, id, options ?? {}).entries;
     },
+    /**
+     * The writes to every record, newest first: `[{ c, id?, v, ts, replicaId, user?, changes, record }]`, a
+     * history entry per record a write wrote, `limit` of them (default 50). `since`
+     * and `until` (times), `user` (a user's key), `collection` and `deleted: true` (the deletions alone) narrow
+     * it; `before` and `after` bound it by version; `oldestFirst` turns it round, to follow the store from a
+     * version on (`after`). `cursor`, the last entry of one answer, reads on after it
+     */
+    activity: options => readActivity(options).entries,
     /**
      * A record as it was: at a time on the store's clock (a number of ms, a Date, `{ ts }`) or at a version
      * (`{ v }`). undefined when it was not there then, or when that is before the store kept history

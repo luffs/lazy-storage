@@ -1,7 +1,7 @@
 // Type declarations for `lazy-storage/server`: stores, storage adapters,
 // the registry, and hubs. Hand-written; the runtime is plain JS.
 import type { Unsubscribe } from 'lazy-watch';
-import type { Change, ClientMessage, HistoryEntry, Lost, Op, Path, Peer, RecordClock, Schema, When, ServerMessage, Shape, ShapeOptions, Tagged, Timestamp } from './core.js';
+import type { ActivityOptions, Change, ClientMessage, HistoryCursor, HistoryEntry, HistoryOptions, Lost, Op, Path, Peer, RecordClock, Schema, When, ServerMessage, Shape, ShapeOptions, Tagged, Timestamp } from './core.js';
 
 export type { ClientMessage, ServerMessage, Tagged, Schema, SchemaCheck } from './core.js';
 export { optional, oneOf, listItem, defineSchemas } from './core.js';
@@ -63,10 +63,12 @@ export interface ServerStorage {
   close?(): void;
   /** Take a document as the whole storage, under a new epoch and no log; never under a live store */
   replace?(doc: StorageDocument): void;
-  /** A record's history rows, newest first: older than version `before`, no later than `upToV` or the time `upToTs` (for a store made with `history`) */
-  history?(query: { c: string; id: string | null; before?: number; upToV?: number; upToTs?: number; limit?: number }): HistoryRow[];
+  /** A record's history rows, newest first: older than version `before`, no later than `upToV` or the time `upToTs`, no earlier than `fromTs`, of one user's writes (for a store made with `history`) */
+  history?(query: { c: string; id: string | null; before?: number; upToV?: number; upToTs?: number; fromTs?: number; user?: string; limit?: number }): HistoryRow[];
   /** The rows one write left, each with its `c` and `id` */
   historyOfVersion?(v: number): Array<HistoryRow & { c: string; id: string | null }>;
+  /** Every record's rows, each with its `c` and `id`, in order of version (newest first, or oldest with `ascending`), collection and id; `cursor` a row to read on after */
+  activity?(query: { before?: number; after?: number; fromTs?: number; toTs?: number; user?: string; c?: string; deleted?: boolean; ascending?: boolean; cursor?: HistoryCursor; limit?: number }): Array<HistoryRow & { c: string; id: string | null }>;
   /** How many history rows it holds */
   historyCount?(): number;
   /** Forget the rows older than that time, but for each record's last one before it (not kept when that is a deletion) */
@@ -85,7 +87,7 @@ export interface HistoryRow {
   changes: string;
 }
 
-export type { HistoryEntry, When } from './core.js';
+export type { HistoryEntry, When, HistoryOptions, ActivityOptions, HistoryCursor } from './core.js';
 
 export function memoryStorage(): ServerStorage & { replace(doc: StorageDocument): void };
 export function assertDocument(doc: unknown): asserts doc is StorageDocument;
@@ -292,10 +294,16 @@ export interface Store<S extends object = any> {
   stats(): StoreStats;
   /** Forget what the retention window no longer needs */
   compact(): { deletions: number; replicas: number };
-  /** A record's history, newest first: `limit` entries (default 100), older than version `before`, with `path` the writes at, above or beneath it */
-  history(c: string, id: string, options?: { limit?: number; before?: number; path?: Path }): HistoryEntry[];
-  history(singleton: string, options?: { limit?: number; before?: number; path?: Path }): HistoryEntry[];
+  /** A record's history, newest first: `limit` entries (default 50); `since`, `until`, `user` and `path` narrow it, and `cursor`, the last entry of an answer, reads on after it */
+  historyOf(c: string, id: string, options?: HistoryOptions): HistoryEntry[];
+  historyOf(singleton: string, options?: HistoryOptions): HistoryEntry[];
   /** A record as it was then (now, without `when`); undefined when it was not there, or that is before the store kept history */
+  /**
+   * The writes to every record, newest first, an entry per record a write wrote: narrowed by time, user,
+   * collection or to the deletions; `oldestFirst` and `after` follow the store from a version on; `cursor`, the
+   * last entry of one answer, reads on after it
+   */
+  activity(options?: ActivityOptions): HistoryEntry[];
   recordAt(c: string, id: string, when?: When): any;
   recordAt(singleton: string, when?: When): any;
   /**

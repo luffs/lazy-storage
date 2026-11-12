@@ -38,7 +38,7 @@ for (const [kind, makeStorage] of Object.entries(storages)) {
     delete a.state.tasks.k;
     await net.settle();
 
-    const history = store.history('tasks', 'k');
+    const history = store.historyOf('tasks', 'k');
     assert.deepEqual(history.map(e => [e.replicaId, e.user, e.record]), [
       ['a', 'alice', undefined],
       ['server', undefined, { title: 'Oat milk', meta: { color: 'green' } }],
@@ -51,11 +51,11 @@ for (const [kind, makeStorage] of Object.entries(storages)) {
     assert.deepEqual(history[0].changes, [{ c: 'tasks', id: 'k', del: true }]);
 
     // A page at a time, and the writes to one path
-    assert.deepEqual(store.history('tasks', 'k', { limit: 2 }).map(e => e.v), history.slice(0, 2).map(e => e.v));
-    assert.deepEqual(store.history('tasks', 'k', { limit: 2, before: history[1].v }).map(e => e.v), history.slice(2).map(e => e.v));
-    assert.deepEqual(store.history('tasks', 'k', { path: ['meta', 'color'] }).map(e => e.replicaId), ['a', 'server', 'a'], 'the record made and deleted touch every path in it');
-    assert.deepEqual(store.history('tasks', 'k', { path: ['title'] }).map(e => e.replicaId), ['a', 'b', 'a']);
-    assert.deepEqual(store.history('tasks', 'never'), []);
+    assert.deepEqual(store.historyOf('tasks', 'k', { limit: 2 }).map(e => e.v), history.slice(0, 2).map(e => e.v));
+    assert.deepEqual(store.historyOf('tasks', 'k', { limit: 2, before: history[1].v }).map(e => e.v), history.slice(2).map(e => e.v));
+    assert.deepEqual(store.historyOf('tasks', 'k', { path: ['meta', 'color'] }).map(e => e.replicaId), ['a', 'server', 'a'], 'the record made and deleted touch every path in it');
+    assert.deepEqual(store.historyOf('tasks', 'k', { path: ['title'] }).map(e => e.replicaId), ['a', 'b', 'a']);
+    assert.deepEqual(store.historyOf('tasks', 'never'), []);
 
     // As it was: by time, by version, and now
     assert.deepEqual(store.recordAt('tasks', 'k', 1_000_500), { title: 'Milk', meta: { color: 'red' } });
@@ -81,13 +81,13 @@ for (const [kind, makeStorage] of Object.entries(storages)) {
     assert.ok(!landed.some(change => change.path?.join('/') === 'meta/color'), 'what did not change is not written');
     assert.deepEqual(store.state.subtasks, { s: { taskId: 'k', n: 1 } }, 'its children are left alone');
     assert.deepEqual(store.revert('tasks', 'k', 1_000_500), [], 'already as it was: nothing to write');
-    assert.equal(store.history('tasks', 'k')[0].replicaId, 'server', 'a revert is a write, and in the history as one');
+    assert.equal(store.historyOf('tasks', 'k')[0].replicaId, 'server', 'a revert is a write, and in the history as one');
 
     // A singleton, by time in the id's place
     store.revert('settings', 1_000_500);
     assert.deepEqual(store.state.settings, { theme: 'light' });
     assert.deepEqual(store.recordAt('settings', 1_001_000), { theme: 'dark', size: 2 });
-    assert.deepEqual(store.history('settings', { limit: 1 })[0].record, { theme: 'light' });
+    assert.deepEqual(store.historyOf('settings', { limit: 1 })[0].record, { theme: 'light' });
 
     // A record deleted since is made again; one that was not there then is deleted
     now.advance(1000);
@@ -97,7 +97,7 @@ for (const [kind, makeStorage] of Object.entries(storages)) {
     assert.deepEqual(store.state.tasks.k, { title: 'Milk', meta: { color: 'red', size: 1 }, geo: { x: 1, y: 2 }, tags: ['a'] });
     store.patch({ tasks: { late: { title: 'Late' } } });
     assert.throws(() => store.revert('tasks', 'late', 1_000_500), /Nothing is known of tasks\/late then/);
-    store.revert('tasks', 'k', { v: store.history('tasks', 'k').find(e => e.record === undefined).v });
+    store.revert('tasks', 'k', { v: store.historyOf('tasks', 'k').find(e => e.record === undefined).v });
     assert.equal(store.state.tasks.k, undefined);
     store.dispose();
   });
@@ -141,14 +141,14 @@ for (const [kind, makeStorage] of Object.entries(storages)) {
     before.dispose();
     now.advance(DAY);
     let store = createStore({ ...SHAPE, now, history: true, storage });
-    assert.deepEqual(store.history('tasks', 'old').map(e => [e.changes, e.record]), [[[], { title: 'From before' }]], 'a row as it stands, with no changes');
+    assert.deepEqual(store.historyOf('tasks', 'old').map(e => [e.changes, e.record]), [[[], { title: 'From before' }]], 'a row as it stands, with no changes');
     assert.deepEqual(store.recordAt('tasks', 'old'), { title: 'From before' });
     assert.equal(store.recordAt('tasks', 'old', 1_000_500), undefined, 'before the store kept history, nothing is known');
     assert.deepEqual(store.recordAt('settings'), { theme: 'light' }, 'a singleton too, though nobody has written it');
     store.patch({ tasks: { old: { done: true } } });
     store.dispose();
     store = createStore({ ...SHAPE, now, history: true, storage });
-    assert.equal(store.history('tasks', 'old').length, 2, 'loaded again, nothing is added');
+    assert.equal(store.historyOf('tasks', 'old').length, 2, 'loaded again, nothing is added');
     store.dispose();
   });
 
@@ -167,7 +167,7 @@ for (const [kind, makeStorage] of Object.entries(storages)) {
     store.flush();
     assert.equal(storage.historyCount(), settled + 2, 'of the twenty made and deleted, nothing; of the one deleted since, its last form and its deletion');
     assert.equal(store.recordAt('tasks', 'gone3', 100 * DAY + 1), undefined);
-    assert.deepEqual(store.history('tasks', 'old').map(e => e.record), [undefined, { title: 'Written long ago' }]);
+    assert.deepEqual(store.historyOf('tasks', 'old').map(e => e.record), [undefined, { title: 'Written long ago' }]);
     store.revert('tasks', 'old', now() - DAY);
     assert.deepEqual(store.state.tasks.old, { title: 'Written long ago' });
     store.dispose();
@@ -183,7 +183,7 @@ for (const [kind, makeStorage] of Object.entries(storages)) {
     store.patch({ tasks: { k: { n: 3 } } });
     now.advance(20 * DAY);
     store.patch({ tasks: { k: { n: 4 } } });   // an hour and more since the last compaction: forgotten as it arrives
-    assert.deepEqual(store.history('tasks', 'k').map(e => e.record.n), [4, 3]);
+    assert.deepEqual(store.historyOf('tasks', 'k').map(e => e.record.n), [4, 3]);
     assert.deepEqual(store.recordAt('tasks', 'k', 112 * DAY), { n: 3 }, 'what it was at the edge of what is kept');
     assert.deepEqual(store.recordAt('tasks', 'quiet'), { n: 1 }, 'a record nobody has written since keeps its one row');
     store.dispose();
@@ -196,23 +196,23 @@ test('who: a write is told with the key of its user, as presence keys users, and
   // The same turn of the event loop: one commit for both, and each row its own record
   const two = store.apply({ replica: 'r2', seq: 1, ts: Date.now(), changes: [{ c: 'tasks', id: 'k', path: ['n'], set: 2 }] }, {});
   assert.ok(one && two);
-  assert.deepEqual(store.history('tasks', 'k').map(e => [e.replicaId, e.user, e.record]), [['r2', undefined, { n: 2 }], ['r1', 'a@x', { n: 1 }]]);
+  assert.deepEqual(store.historyOf('tasks', 'k').map(e => [e.replicaId, e.user, e.record]), [['r2', undefined, { n: 2 }], ['r1', 'a@x', { n: 1 }]]);
   store.dispose();
 });
 
 test('history is off unless asked for, needs a storage that keeps it, and says what it does not take', () => {
   const plain = createStore(SHAPE);
-  assert.throws(() => plain.history('tasks', 'k'), /History is off on this store/);
+  assert.throws(() => plain.historyOf('tasks', 'k'), /History is off on this store/);
   assert.throws(() => plain.recordAt('tasks', 'k'), /History is off/);
   assert.throws(() => plain.revert('tasks', 'k', 1), /History is off/);
   assert.throws(() => createStore({ ...SHAPE, history: true, storage: { load: () => null, commit() {}, flush() {} } }), /storage keeps no history/);
   assert.throws(() => createStore({ ...SHAPE, history: 'yes' }), /history must be true, false, or \{ keep \}/);
   assert.throws(() => createStore({ ...SHAPE, history: { keep: 0 } }), /history.keep/);
   const store = createStore({ ...SHAPE, history: true });
-  assert.throws(() => store.history('nope', 'k'), /not a collection or singleton/);
-  assert.throws(() => store.history('tasks'), /named by its id/);
-  assert.throws(() => store.history('tasks', 'k', { limit: 0 }), /limit/);
-  assert.throws(() => store.history('tasks', 'k', { path: 'title' }), /path is an array/);
+  assert.throws(() => store.historyOf('nope', 'k'), /not a collection or singleton/);
+  assert.throws(() => store.historyOf('tasks'), /named by its id/);
+  assert.throws(() => store.historyOf('tasks', 'k', { limit: 0 }), /limit/);
+  assert.throws(() => store.historyOf('tasks', 'k', { path: 'title' }), /path is an array/);
   assert.throws(() => store.recordAt('tasks', 'k', 'yesterday'), /When is a time/);
 });
 
@@ -225,7 +225,7 @@ test('a document that replaces the storage starts its history over; a store remo
   store.dispose();
   sqlite.store('main').replace(doc);
   store = createStore({ ...SHAPE, history: true, storage: sqlite.store('main') });
-  assert.deepEqual(store.history('tasks', 'k').map(e => e.changes), [[]], 'one row, the record as the document has it');
+  assert.deepEqual(store.historyOf('tasks', 'k').map(e => e.changes), [[]], 'one row, the record as the document has it');
   store.dispose();
   sqlite.remove('main');
   assert.equal(sqlite.db.prepare('SELECT count(*) AS n FROM history').get().n, 0);
@@ -351,7 +351,7 @@ test('a client reverts a record as an edit of its own: judged by the rules, one 
   assert.deepEqual(await settle(a.revert('tasks', 'k', 1_000_500)), { owner: 'alice', title: 'Milk', meta: { color: 'red' }, geo: { x: 1, y: 2 } });
   assert.deepEqual(store.state.tasks.k, { owner: 'alice', title: 'Milk', meta: { color: 'red' }, geo: { x: 1, y: 2 } });
   assert.equal(store.version, version + 1, 'one op');
-  assert.equal(store.history('tasks', 'k')[0].replicaId, 'a', 'the client\'s write, not the server\'s');
+  assert.equal(store.historyOf('tasks', 'k')[0].replicaId, 'a', 'the client\'s write, not the server\'s');
   a.undo();
   await net.settle();
   assert.equal(store.state.tasks.k.title, 'Oat milk', 'undone like any edit');
@@ -440,8 +440,8 @@ test('a request the server never answers is given up on, and one with fields tha
   assert.deepEqual(answers.slice(0, 5).map(err => err.code), ['invalid', 'invalid', 'invalid', 'invalid', 'invalid']);
   assert.equal(answers[5].length, 1, 'a limit that is none is the default');
   assert.deepEqual(faults, []);
-  assert.throws(() => store.history('tasks', 'k', { before: {} }), /before is a version/);
-  assert.throws(() => store.history('tasks', 'k', { limit: 1.5 }), /limit/);
+  assert.throws(() => store.historyOf('tasks', 'k', { before: {} }), /before is a version/);
+  assert.throws(() => store.historyOf('tasks', 'k', { limit: 1.5 }), /limit/);
   assert.throws(() => store.recordAt('tasks', 'k', NaN), /When is a time/);
 
   deaf = true;
@@ -452,3 +452,212 @@ test('a request the server never answers is given up on, and one with fields tha
   store.dispose();
   sqlite.close();
 });
+
+test('a path few writes touch is read a thousand rows a request: the client asks on by itself, and each request is one the rate limit counts', async () => {
+  const store = createStore({ ...SHAPE, history: { clients: true }, rateLimit: { burst: 4, perSecond: 1 } });
+  store.patch({ tasks: { k: { title: 'Milk', n: 0 } } });
+  store.patch({ tasks: { k: { title: 'Oat milk' } } });
+  for (let i = 1; i <= 2500; i++) store.patch({ tasks: { k: { n: i } } });
+  let requests = 0;
+  const session = store.session;
+  store.session = options => {
+    const made = session(options);
+    const receive = made.receive;
+    made.receive = message => { if (message.t === 'history') requests++; receive(message); };
+    return made;
+  };
+  const net = createNetwork(store);
+  const a = net.client({ replicaId: 'a', ...SHAPE });
+  await net.settle();
+  const settle = async promise => { for (let i = 0; i < 10; i++) await net.settle(); return promise; };
+
+  const titles = await settle(a.historyOf('tasks', 'k', { path: ['title'] }));
+  assert.deepEqual(titles.map(e => e.record.title), ['Oat milk', 'Milk'], 'the two writes that touched it, 2500 rows down');
+  assert.equal(requests, 3, 'a thousand rows a request');
+  assert.equal(store.historyOf('tasks', 'k', { path: ['title'] }).length, 2, 'the server reads its own through');
+
+  // The hello and three requests spent the bucket: asking on is not free
+  const limited = await settle(refusal(a.historyOf('tasks', 'k', { path: ['title'] })));
+  assert.equal(limited.code, 'rate-limited');
+  store.dispose();
+});
+
+// --- The store's activity ---------------------------------------------------------------------
+
+for (const [kind, makeStorage] of Object.entries(storages)) {
+  test(`${kind}: activity is every record's writes, newest first: narrowed by time, user, collection and deletions, and read on by a cursor`, () => {
+    const now = fakeTime(1_000_000);
+    const store = createStore({ ...SHAPE, now, history: true, storage: makeStorage() });
+    const op = (replica, seq, changes, user) => store.apply({ replica, seq, ts: now(), changes }, { user: { id: user } });
+    op('a', 1, [{ c: 'tasks', id: 'k', put: { title: 'Milk' } }, { c: 'tasks', id: 'j', put: { title: 'Eggs' } }], 'alice');
+    now.advance(1000);
+    op('b', 1, [{ c: 'tasks', id: 'k', path: ['title'], set: 'Oat milk' }, { c: 'settings', path: ['theme'], set: 'dark' }], 'bob');
+    now.advance(1000);
+    store.patch({ subtasks: { s: { taskId: 'k', n: 1 } } });
+    now.advance(1000);
+    op('a', 2, [{ c: 'tasks', id: 'k', del: true }], 'alice');
+
+    const told = entries => entries.map(e => `${e.c}/${e.id ?? ''}@${e.replicaId}${e.record === undefined ? ' gone' : ''}`);
+    const all = store.activity();
+    assert.deepEqual(told(all), [
+      'subtasks/s@a gone', 'tasks/k@a gone',       // one write: the task, and the child it took
+      'subtasks/s@server',
+      'settings/@b', 'tasks/k@b',
+      'tasks/j@a', 'tasks/k@a',
+      'settings/@server'                            // as it stood when history began
+    ]);
+    assert.deepEqual([all[1].user, all[2].user, all[3].user], ['alice', undefined, 'bob']);
+    assert.deepEqual(all[4].changes, [{ c: 'tasks', id: 'k', path: ['title'], set: 'Oat milk' }]);
+    assert.deepEqual(all[4].record, { title: 'Oat milk' });
+    assert.ok(!('id' in all[3]), 'a singleton has no id');
+
+    assert.deepEqual(told(store.activity({ user: 'alice' })), ['subtasks/s@a gone', 'tasks/k@a gone', 'tasks/j@a', 'tasks/k@a']);
+    assert.deepEqual(told(store.activity({ collection: 'tasks' })), ['tasks/k@a gone', 'tasks/k@b', 'tasks/j@a', 'tasks/k@a']);
+    assert.deepEqual(told(store.activity({ deleted: true })), ['subtasks/s@a gone', 'tasks/k@a gone'], 'what was deleted, with no id to ask by');
+    assert.deepEqual(told(store.activity({ since: 1_000_500, until: new Date(1_002_500) })), ['subtasks/s@server', 'settings/@b', 'tasks/k@b']);
+    assert.deepEqual(told(store.activity({ before: all[2].v, after: all[5].v })), ['settings/@b', 'tasks/k@b']);
+    assert.deepEqual(told(store.activity({ oldestFirst: true, after: all[5].v })), ['settings/@b', 'tasks/k@b', 'subtasks/s@server', 'subtasks/s@a gone', 'tasks/k@a gone'], 'the store followed from a version on');
+
+    // A page at a time, the last entry the cursor: a write of several records is split and nothing is told twice
+    const paged = [];
+    for (let cursor; ;) {
+      const page = store.activity({ limit: 3, cursor });
+      paged.push(...page);
+      if (page.length < 3) break;
+      cursor = page[page.length - 1];
+    }
+    assert.deepEqual(told(paged), told(all));
+
+    // What was deleted is made again from what the feed says
+    const gone = store.activity({ deleted: true, collection: 'tasks' })[0];
+    store.revert(gone.c, gone.id, { v: gone.v - 1 });
+    assert.deepEqual([store.state.tasks.k, store.state.subtasks.s], [{ title: 'Oat milk' }, { taskId: 'k', n: 1 }]);
+
+    assert.throws(() => store.activity({ limit: 0 }), /limit/);
+    assert.throws(() => store.activity({ before: 'x' }), /before is a version/);
+    assert.throws(() => store.activity({ since: 'yesterday' }), /since is a time/);
+    assert.throws(() => store.activity({ user: 5 }), /user is a user's key/);
+    assert.throws(() => store.activity({ collection: 'nope' }), /not a collection/);
+    assert.throws(() => store.activity({ deleted: 'yes' }), /true or false/);
+    assert.throws(() => store.activity({ cursor: { v: 'x' } }), /cursor is the entry/);
+    assert.throws(() => createStore(SHAPE).activity(), /History is off/);
+    store.dispose();
+  });
+}
+
+test('a client reads the store\'s activity: the records it may not read the history of are left out, a large answer comes a request at a time', async () => {
+  const now = fakeTime(1_000_000);
+  const store = createStore({ ...SHAPE, now, history: { clients: (user, { c }) => user.id === 'admin' || c === 'tasks' } });
+  for (let i = 0; i < 130; i++) store.patch({ tasks: { [`t${i}`]: { n: i } }, subtasks: { [`s${i}`]: { taskId: `t${i}` } } });
+  let requests = 0;
+  const session = store.session;
+  store.session = options => {
+    const made = session(options);
+    const receive = made.receive;
+    made.receive = message => { if (message.t === 'history') requests++; receive(message); };
+    return made;
+  };
+  const net = createNetwork(store);
+  const a = net.client({ replicaId: 'a', ...SHAPE, now }, { user: { id: 'alice' } });
+  const admin = net.client({ replicaId: 'r', ...SHAPE, now }, { user: { id: 'admin' } });
+  await net.settle();
+  const settle = async promise => { for (let i = 0; i < 12; i++) await net.settle(); return promise; };
+
+  const mine = await settle(a.activity({ limit: 120 }));
+  assert.equal(mine.length, 120);
+  assert.ok(mine.every(e => e.c === 'tasks'), 'what alice may not read the history of is not told');
+  assert.deepEqual(mine.slice(0, 2).map(e => e.id), ['t129', 't128']);
+  assert.equal(requests, 2, 'a hundred an answer');
+  const everything = await settle(admin.activity({ limit: 4 }));
+  assert.deepEqual(everything.map(e => `${e.c}/${e.id}`), ['subtasks/s129', 'tasks/t129', 'subtasks/s128', 'tasks/t128']);
+  assert.equal((await settle(a.activity())).length, 50, 'fifty unless asked for more');
+  const first = await settle(a.activity({ oldestFirst: true, limit: 2, since: new Date(0) }));
+  assert.deepEqual(first.map(e => e.id), ['t0', 't1']);
+  const next = await settle(a.activity({ oldestFirst: true, limit: 2, cursor: first[1] }));
+  assert.deepEqual(next.map(e => e.id), ['t2', 't3']);
+  assert.deepEqual((await settle(a.activity({ deleted: true }))), []);
+  assert.equal((await settle(refusal(a.activity({ user: 5 })))).code, 'invalid');
+  await assert.rejects(a.activity({ collection: 'nope' }), /not a collection/);
+
+  const shut = createNetwork(createStore({ ...SHAPE, history: true }));
+  const b = shut.client({ replicaId: 'b', ...SHAPE });
+  await shut.settle();
+  const refused = refusal(b.activity());
+  await shut.settle();
+  assert.equal((await refused).code, 'forbidden');
+});
+
+test('behind a relay a client\'s request for the store\'s activity is the server\'s to answer', async () => {
+  const now = fakeTime(1_000_000);
+  const store = createStore({ ...SHAPE, now, history: { clients: true } });
+  const central = createNetwork(store, { vouch: credential => credential });
+  const uplink = central.link({ user: { id: 'relay' } });
+  const relay = createRelay({ shapeOf: () => SHAPE, link: uplink.factory, grace: 0, reconnect: false, keepalive: false, now });
+  const site = createNetwork(relay);
+  const settle = async () => { for (let i = 0; i < 20; i++) { await central.settle(); await site.settle(); if (central.pending === 0 && site.pending === 0) return; } };
+  const a = site.client({ replicaId: 'a', ...SHAPE, now }, { user: { id: 'alice' } });
+  await settle();
+  a.state.tasks.k = { title: 'Milk' };
+  await settle();
+  const asked = a.activity({ user: 'alice' });
+  await settle();
+  assert.deepEqual((await asked).map(e => [e.c, e.id, e.user]), [['tasks', 'k', 'alice']]);
+  relay.close();
+});
+
+// --- One shape, one way to read on ------------------------------------------------------------
+
+for (const [kind, makeStorage] of Object.entries(storages)) {
+  test(`${kind}: a record's history and the store's activity tell the same entries, take the same narrowing, and are read on the same way`, async () => {
+    const now = fakeTime(1_000_000);
+    const store = createStore({ ...SHAPE, now, history: { clients: true }, storage: makeStorage() });
+    const write = (n, user) => store.apply({ replica: `r-${user}`, seq: n, ts: now(), changes: [{ c: 'tasks', id: 'k', path: ['n'], set: n }] }, { user: { id: user } });
+    store.patch({ tasks: { k: { n: 0 } } });
+    for (let n = 1; n <= 120; n++) {
+      now.advance(1000);
+      write(n, n % 2 ? 'alice' : 'bob');
+    }
+    const of = store.historyOf('tasks', 'k');
+    const all = store.activity({ collection: 'tasks' });
+    assert.equal(of.length, 50, 'fifty unless asked for more');
+    assert.deepEqual(of, all, 'the same entries, each with the record it is of');
+    assert.deepEqual([of[0].c, of[0].id, of[0].record], ['tasks', 'k', { n: 120 }]);
+    assert.ok(!('id' in store.historyOf('settings')[0]) && store.historyOf('settings')[0].c === 'settings');
+
+    // The last entry of one answer reads on after it, in either
+    for (const read of [cursor => store.historyOf('tasks', 'k', { limit: 30, cursor }), cursor => store.activity({ collection: 'tasks', limit: 30, cursor })]) {
+      const pages = [];
+      for (let cursor; ;) {
+        const page = read(cursor);
+        pages.push(...page);
+        if (page.length < 30) break;
+        cursor = page[page.length - 1];
+      }
+      assert.deepEqual(pages.map(e => e.record.n), Array.from({ length: 121 }, (_, i) => 120 - i));
+    }
+    assert.deepEqual(store.historyOf('tasks', 'k', { before: of[3].v, limit: 2 }).map(e => e.record.n), [116, 115], 'before bounds it by version');
+
+    // The same narrowing
+    const narrowing = { since: 1_100_000, until: new Date(1_110_000), user: 'bob' };
+    const narrowed = store.historyOf('tasks', 'k', narrowing);
+    assert.deepEqual(narrowed.map(e => e.record.n), [110, 108, 106, 104, 102, 100]);
+    assert.deepEqual(store.activity(narrowing), narrowed);
+    assert.throws(() => store.historyOf('tasks', 'k', { since: 'x' }), /since is a time/);
+    assert.throws(() => store.historyOf('tasks', 'k', { user: 5 }), /user is a user's key/);
+    assert.throws(() => store.historyOf('tasks', 'k', { cursor: 5 }), /cursor is the entry/);
+
+    // And so for a client
+    const net = createNetwork(store);
+    const a = net.client({ replicaId: 'a', ...SHAPE, now });
+    await net.settle();
+    const settle = async promise => { for (let i = 0; i < 12; i++) await net.settle(); return promise; };
+    assert.deepEqual(await settle(a.historyOf('tasks', 'k')), of);
+    assert.deepEqual(await settle(a.historyOf('tasks', 'k', narrowing)), narrowed);
+    const whole = await settle(a.historyOf('tasks', 'k', { limit: 121 }));
+    assert.equal(whole.length, 121, 'more than an answer carries, asked on by itself');
+    const next = await settle(a.historyOf('tasks', 'k', { limit: 2, cursor: of[of.length - 1] }));
+    assert.deepEqual(next.map(e => e.record.n), [70, 69]);
+    assert.deepEqual(await settle(a.recordAt(next[0].c, next[0].id, { v: next[0].v })), { n: 70 }, 'an entry says what to ask of');
+    store.dispose();
+  });
+}

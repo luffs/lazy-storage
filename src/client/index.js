@@ -55,6 +55,8 @@ const SNAPSHOT = { origin: 'remote', snapshot: true };
 const HISTORY = new Set(['undo', 'redo']);
 const EVENTS = ['status', 'error', 'sync', 'closed', 'presence', 'peers', 'history', 'lost', 'rejected', 'reset', 'relay'];
 const HELLO_LIMIT = 1000;
+/** How many entries a history or an activity is, asked for without a limit (the store's default too) */
+const HISTORY_DEFAULT = 50;
 const clone = value => (value === null || typeof value !== 'object' ? value : structuredClone(value));
 const plain = value => (value === null || typeof value !== 'object' ? value : LazyWatch.isProxy(value) ? LazyWatch.snapshot(value) : structuredClone(value));
 
@@ -683,9 +685,9 @@ function build({
   }
 
   /** Ask the server for a record's history (see the store's `history.clients`); resolves to its answer */
-  function ask(c, id, query) {
+  function ask(query) {
     return new Promise((resolve, reject) => {
-      if (!shape.has(c)) throw new TypeError(`"${c}" is not a collection or singleton of this store`);
+      if (query.c !== undefined && !shape.has(query.c)) throw new TypeError(`"${query.c}" is not a collection or singleton of this store`);
       if (!linked() || !synced) {
         reject(Object.assign(new Error('History is the server\'s to tell: this client is not connected to it'), { code: 'offline' }));
         return;
@@ -698,9 +700,11 @@ function build({
       if (typeof timer?.unref === 'function') timer.unref();
       const settled = fn => value => { clearTimeout(timer); fn(value); };
       asking.set(req, { resolve: settled(resolve), reject: settled(reject) });
-      link.send({ t: 'history', req, c, ...(shape.isSingleton(c) ? {} : { id }), ...query });
+      link.send({ t: 'history', req, ...query });
     });
   }
+  /** A record as a request names it: a singleton by its collection alone */
+  const of = (c, id) => (shape.isSingleton(c) ? { c } : { c, id });
   /** A time as it travels: a Date as its milliseconds */
   const wire = when => (when instanceof Date ? when.getTime() : Utils.isPlainObject(when) && when.ts instanceof Date ? { ts: when.ts.getTime() } : when);
 
@@ -844,21 +848,50 @@ function build({
       link?.send({ t: 'share', data: shared === undefined ? null : shared });
     },
     /**
-     * A record's history, from the server: resolves to `[{ v, ts, replicaId, user?, changes, record? }]`, newest
-     * first (`limit`, at most 100; `before` a version, to page; `path` the writes that touched one field).
-     * For a store made with `history: { clients }`; rejects with code 'forbidden' on any other, and 'offline'
-     * while not connected. A singleton takes the options in the id's place
+     * A record's history, from the server, as the store's `historyOf` tells it: resolves to
+     * `[{ c, id?, v, ts, replicaId, user?, changes, record? }]`, newest first, `limit` of them (default 50).
+     * `since`, `until`, `user` and `path` narrow it, `before` bounds it by version, and `cursor`, the last entry
+     * of one answer, reads on after it. For a store made with `history: { clients }`; rejects with code
+     * 'forbidden' on any other, and 'offline' while not connected. A singleton takes the options in the id's place
      */
     async historyOf(c, id, options) {
       if (Utils.isPlainObject(id) && options === undefined) [id, options] = [undefined, id];
-      const { limit, before, path } = options ?? {};
-      return (await ask(c, id, { limit, before, path })).entries ?? [];
+      const { limit, before, path, since, until, user } = options ?? {};
+      const entries = [];
+      // An answer carries so many, and the server reads so far for one: it says where it stopped, and is asked on
+      // from there, a request each (and a token of the rate limit each), until enough are told or there are no more
+      for (let { cursor } = options ?? {}; ;) {
+        const answer = await ask({ ...of(c, id), limit: limit === undefined ? undefined : limit - entries.length, before, cursor, path, since: wire(since), until: wire(until), user });
+        entries.push(...(answer.entries ?? []));
+        if (answer.more === undefined || entries.length >= (limit ?? HISTORY_DEFAULT)) return entries;
+        cursor = answer.more;
+      }
+    },
+    /**
+     * The writes to every record of the store, from the server, newest first: resolves to
+     * `[{ c, id?, v, ts, replicaId, user?, changes, record? }]`. `since` and `until` (times), `user` (a user's
+     * key), `collection` and `deleted: true` narrow it; `before` and `after` bound it by version; `oldestFirst`
+     * turns it round; `cursor`, the last entry of one answer, reads on after it (`limit` 50 unless given). The records this client may not read the history of are left out. Rejects
+     * as `historyOf` does
+     */
+    async activity(options = {}) {
+      const { limit, before, after, since, until, user, collection, deleted, oldestFirst } = options;
+      if (collection !== undefined && !shape.has(collection)) throw new TypeError(`"${collection}" is not a collection or singleton of this store`);
+      const entries = [];
+      // An answer carries so many and says where it stopped: asked on from there, a request each (and a token of
+      // the rate limit each), until enough are told or there are no more
+      for (let { cursor } = options; ;) {
+        const answer = await ask({ all: true, limit: limit === undefined ? undefined : limit - entries.length, before, after, since: wire(since), until: wire(until), user, collection, deleted, oldestFirst, cursor });
+        entries.push(...(answer.entries ?? []));
+        if (answer.more === undefined || entries.length >= (limit ?? HISTORY_DEFAULT)) return entries;
+        cursor = answer.more;
+      }
     },
     /** A record as it was at a time (ms, a Date, `{ ts }`) or a version (`{ v }`), from the server; undefined when it was not there */
     async recordAt(c, id, when) {
       if (shape.isSingleton(c)) [id, when] = [undefined, id];
       if (when === undefined) throw new TypeError('recordAt takes a time or a version: the record as it is now is in db.state');
-      return (await ask(c, id, { when: wire(when) })).record;
+      return (await ask({ ...of(c, id), when: wire(when) })).record;
     },
     /**
      * Write a record back as it was then (see recordAt): an edit of this client's like any other, judged by the
@@ -868,7 +901,7 @@ function build({
     async revert(c, id, when) {
       if (shape.isSingleton(c)) [id, when] = [undefined, id];
       if (when === undefined) throw new TypeError('revert takes a time or a version');
-      const target = (await ask(c, id, { when: wire(when) })).record;
+      const target = (await ask({ ...of(c, id), when: wire(when) })).record;
       if (shape.isSingleton(c)) {
         if (target === undefined) throw new Error(`Nothing is known of ${c} then`);
         if (Utils.isPlainObject(target) && Utils.isPlainObject(state[c])) writeAs(c, undefined, state[c], target, []);

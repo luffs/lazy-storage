@@ -263,92 +263,10 @@ write what](auth.md#who-may-write-what)).
 
 ### History
 
-A store keeps what its records are, not what they were. Made with
-`history: true` it keeps both: every write leaves, for each record it
-wrote, the record as it was left, the changes to it, when, and who.
-
-```js
-const store = createStore({ initial, history: { keep: 90 * DAY }, storage: sqlite.store(id) });
-
-store.history('tasks', 'k');                  // newest first: [{ v, ts, replicaId, user, changes, record }]
-store.history('tasks', 'k', { path: ['title'], limit: 10 });   // who changed the title, and when
-store.recordAt('tasks', 'k', lastTuesday);    // the record as it was: a time, a Date, or { v } a version
-store.revert('tasks', 'k', lastTuesday);      // and put back so
-```
-
-- **`store.history(c, id, { limit, before, path })`** is a record's
-  writes, newest first, `limit` of them (default 100) and older than
-  version `before`, to page. Each says the store's version and time
-  (`v`, `ts`), the replica that wrote (`'server'` for the store's own
-  write) and its `user`, the key presence gives the user (`user.id`
-  unless `presence.key` says otherwise); `changes`, what the write did
-  to this record; and `record`, the record as it left it, `undefined`
-  for a deletion. With `path`, only the writes at, above or beneath that
-  path: who changed a field. A singleton has no id:
-  `store.history('settings', { limit: 10 })`.
-- **`store.recordAt(c, id, when)`** is the record as it was at a time on
-  the store's clock (milliseconds, a `Date`, `{ ts }`) or at a version
-  (`{ v }`); `undefined` when it was not there.
-- **`store.revert(c, id, when)`** puts the record back as it was then, as
-  a write of the server's own: the fields it had are written, the ones it
-  has gained since are deleted, and what did not change is not touched,
-  so an edit a client makes to another field at the same moment still
-  lands. A record deleted since is made again, and with it the children
-  its deletion took (and theirs), each as it was just before, in the same
-  write; `{ children: false }` as a fourth argument makes the record
-  alone. One that was not there then is deleted, its children with it. It is a write like
-  any other: clients hear it as a patch, it is held to the
-  [schemas](model.md#schemas) as they are now, and it is in the history
-  itself, so a revert can be reverted.
-
-**Clients** read history when the store lets them, which it does not
-by default: what a record was may be exactly what was taken out of it.
-
-```js
-createStore({ ..., history: { keep: 90 * DAY, clients: true } });   // or (user, { c, id, store }) => boolean
-
-const entries = await db.historyOf('tasks', 'k', { limit: 20 });    // the same entries, newest first
-const was = await db.recordAt('tasks', 'k', entries[3].ts);
-await db.revert('tasks', 'k', { v: entries[3].v });
-```
-
-`clients: true` lets every client that has the store open read every
-record's history; a function decides per record, with the user the
-socket authenticated as. `db.historyOf` and `db.recordAt` ask the server
-and resolve to its answer (at most 100 entries a request; `before` the
-oldest `v` asks for more), and reject with an error whose `code` says
-why: `forbidden`, `offline` while the client is not connected (history
-is not kept on the client), `unavailable` behind a relay whose server
-is away, `rate-limited` (a request draws on the rate limit as an op
-does), `timeout` when the server has not answered within the client's
-`requestTimeout` (30 s by default). `db.revert` is not the server's `revert`: it reads the record as
-it was and writes it to `db.state`, an edit of this client's like any
-other. So the store's rules judge it, it is one op, `db.undo()` undoes
-it, and it does not bring back a deleted record's children; an app that
-wants that calls `store.revert` behind an endpoint of its own. On the
-client the names are `historyOf` and `revert` because `db` already has a
-history of its own, the undo manager's.
-
-What it costs: a row per record per write, holding the record whole, so
-a record of 2 KB written a thousand times is 2 MB of history. `keep`
-(milliseconds) forgets what is older, at the hourly compaction, but for
-each record's last form before it, so `recordAt` still answers at the
-edge, and a record deleted within `keep` can be made again however long
-ago it was last written. A record deleted longer ago than `keep` leaves
-nothing. Without `keep` everything is kept. History begins when it is
-turned on: a store that already has records gets a row for each as it
-stands (with no `changes`), and before that row nothing is known, so
-`recordAt` is `undefined` and `revert` throws. A
-[restore](#backups-restores-and-moving-a-store) starts it over, and
-`store.export()` does not carry it; a SQLite backup does.
-
-The memory and SQLite adapters keep history; another adapter does by
-taking the `history` rows a commit carries and answering `history(query)`,
-`historyOfVersion(v)`, `historyCount()` and `pruneHistory(before)` (see
-[storage.js](../src/server/storage.js)). In SQLite the rows are the table
-`history` (`store`, `collection`, `id`, `v`, `ts`, `user`, `replica`,
-`data`, `changes`), there to be read with SQL like the rest: `SELECT user,
-count(*) FROM history WHERE ts > ? GROUP BY user`.
+Made with `history: true`, a store keeps every record as each write
+left it, with when and who: a record's past, the store's activity, the
+record as it was at a time, and a way to put it back. It has a page of
+its own: [History](history.md).
 
 ### Backups, restores, and moving a store
 

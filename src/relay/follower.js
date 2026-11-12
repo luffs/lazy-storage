@@ -649,7 +649,7 @@ export function createRelay({
       case 'history': {
         const asked = edge.asking.get(msg.req);
         edge.asking.delete(msg.req);
-        if (asked && edge.sessions.has(asked.ss)) asked.ss.send({ t: 'history', req: asked.req, ...(msg.entries === undefined ? {} : { entries: msg.entries }), ...(msg.record === undefined ? {} : { record: msg.record }) });
+        if (asked && edge.sessions.has(asked.ss)) asked.ss.send({ t: 'history', req: asked.req, ...(msg.entries === undefined ? {} : { entries: msg.entries }), ...(msg.record === undefined ? {} : { record: msg.record }), ...(msg.more === undefined ? {} : { more: msg.more }) });
         return;
       }
       case 'error': {
@@ -982,8 +982,9 @@ export function createRelay({
             if (!linkUp() || !edge.synced || !admitted) return ss.send({ t: 'error', req: msg.req, code: 'unavailable', message: 'History is the server\'s to tell, and it is away' });
             const req = ++edge.asked;
             edge.asking.set(req, { ss, req: msg.req });
-            const { c, id: record, limit, before, path, when } = msg;
-            edge.link.send({ t: 'history', req, ...(local ? {} : { as: ss.as }), c, id: record, limit, before, path, when });
+            // What it asks is the server's to read: passed on as it is, under the relay's own req and the client's name
+            const { t: _t, store: _store, req: _req, as: _as, ...query } = msg;
+            edge.link.send({ t: 'history', req, ...(local ? {} : { as: ss.as }), ...query });
             return;
           }
           default:

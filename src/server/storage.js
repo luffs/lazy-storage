@@ -27,9 +27,16 @@
 // was left, as JSON (null: deleted), and `changes` the changes to it, as
 // JSON. It keeps them, by record and version, and answers:
 //
-//   history({ c, id, before?, upToV?, upToTs?, limit })   a record's rows, newest first: older than
-//                         version `before`, no later than version `upToV` or time `upToTs`
+//   history({ c, id, before?, upToV?, upToTs?, fromTs?, user?, limit })   a record's rows, newest first:
+//                         older than version `before`, no later than version `upToV` or time `upToTs`,
+//                         no earlier than time `fromTs`, of one user's writes
 //   historyOfVersion(v)   the rows one write left, each with its `c` and `id`
+//   activity({ before?, after?, fromTs?, toTs?, user?, c?, deleted?, ascending?, cursor?, limit? })
+//                         the rows of every record, each with its `c` and `id`, newest first (oldest
+//                         first with `ascending`): of versions under `before` and over `after`, from
+//                         time `fromTs` to `toTs`, of one user's writes, of one collection, or the
+//                         deletions alone. In order of version, then collection, then id;
+//                         `cursor` ({ v, c, id }) is a row to read on after
 //   historyCount()        how many rows it holds
 //   pruneHistory(before)  forget the rows older than that time, but for each
 //                         record's last one before it: what the record was
@@ -75,16 +82,24 @@ export function memoryStorage() {
   let history = [];   // rows as committed, oldest first
   const sameRecord = (row, c, id) => row.c === c && row.id === (id ?? null);
   return {
-    history({ c, id, before = Infinity, upToV = Infinity, upToTs = Infinity, limit = Infinity }) {
+    history({ c, id, before = Infinity, upToV = Infinity, upToTs = Infinity, fromTs = -Infinity, user, limit = Infinity }) {
       const out = [];
       for (let i = history.length - 1; i >= 0 && out.length < limit; i--) {
         const row = history[i];
-        if (sameRecord(row, c, id) && row.v < before && row.v <= upToV && row.ts <= upToTs) out.push({ ...row });
+        if (sameRecord(row, c, id) && row.v < before && row.v <= upToV && row.ts <= upToTs && row.ts >= fromTs && (user === undefined || row.user === user)) out.push({ ...row });
       }
       return out;
     },
     historyCount: () => history.length,
     historyOfVersion: v => history.filter(row => row.v === v).map(row => ({ ...row })),
+    activity({ before = Infinity, after = -Infinity, fromTs = -Infinity, toTs = Infinity, user, c, deleted = false, ascending = false, cursor, limit = Infinity } = {}) {
+      const order = (x, y) => (x.v !== y.v ? (ascending ? x.v - y.v : y.v - x.v) : x.c !== y.c ? (x.c < y.c ? -1 : 1) : (x.id ?? '') < (y.id ?? '') ? -1 : (x.id ?? '') > (y.id ?? '') ? 1 : 0);
+      const rows = history.filter(row => row.v < before && row.v > after && row.ts >= fromTs && row.ts <= toTs &&
+        (user === undefined || row.user === user) && (c === undefined || row.c === c) && (!deleted || row.data === null) &&
+        (!cursor || order(row, cursor) > 0)).sort(order);
+      return rows.slice(0, limit).map(row => ({ ...row }));
+    },
+    historyCount: () => history.length,
     pruneHistory(before) {
       // Each record's last row before the time stays: what the record was then. Unless it was deleted then:
       // no row says the same, and a record made and deleted would otherwise leave one for ever
