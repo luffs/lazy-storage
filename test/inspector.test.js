@@ -531,3 +531,14 @@ test('createHandlers.request answers a request it took, whatever the inspector m
   assert.deepEqual(answered.map(([status]) => status), [200, 200], 'the request that was routed, answered');
   await handlers.close();
 });
+
+test('the script of the page declares nothing by a name the window has of its own: a browser refuses to run a script that declares top', async () => {
+  const { get } = setup();
+  const script = /<script nonce="[^"]+">([\s\S]*?)<\/script>/.exec((await get('')).body)[1];
+  // What a script declares at its top level becomes a property of the window, and these the window does not let be
+  // redeclared (top, window, document, location) or are better left as they are; a DOM in a test lets them all by
+  const taken = new Set(['top', 'window', 'document', 'location', 'self', 'parent', 'frames', 'history', 'name', 'status', 'length', 'closed', 'opener', 'origin', 'event', 'screen', 'navigator']);
+  const declared = [...script.matchAll(/^(?:async\s+)?(?:function\*?|const|let|var|class)\s+([A-Za-z_$][\w$]*)/gm)].map(([, name]) => name);
+  assert.ok(declared.length > 30, 'the declarations were found');
+  assert.deepEqual(declared.filter(name => taken.has(name)), []);
+});

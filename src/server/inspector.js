@@ -705,7 +705,7 @@ const pick = tried(async id => {
 });
 
 // The line at the top: what the store is at, from the last look at it
-function top() {
+function topLine() {
   const o = state.overview;
   $('meta').textContent = o ? 'version ' + o.version + ' · ' + o.records + ' records · ' + o.sessions + ' sessions · history ' + (o.history ? 'on' : 'off') : '';
 }
@@ -719,7 +719,7 @@ const show = () => panel($('main'), async () => {
   state.overview = await ask('store', { store: state.store });
   counted = Date.now();
   uncounted = false;
-  top();
+  topLine();
   $('main').className = state.tab === 'records' ? '' : 'wide';
   if (state.tab === 'records') await records();
   else if (state.tab === 'activity') await activity(true);
@@ -927,7 +927,7 @@ const glance = async () => {
     if (store !== state.store || !state.overview) return true;
     const written = g.version !== state.overview.version;
     Object.assign(state.overview, g);
-    top();
+    topLine();
     for (const node of document.querySelectorAll('.ago[data-at]')) node.textContent = ago(Number(node.dataset.at));
     // The store has been written since the page last looked. The record that is shown, when it is not what it
     // was; and how many records there are, which costs the server a look at every record's key, and is asked
@@ -944,7 +944,7 @@ const glance = async () => {
     const o = await ask('store', { store });
     if (store !== state.store) return true;
     state.overview = o;
-    top();
+    topLine();
     for (const node of document.querySelectorAll('li.pick[data-c]')) {
       const found = o.collections.find(({ c }) => c === node.dataset.c);
       if (found && !found.singleton) node.lastElementChild.textContent = String(found.records);
