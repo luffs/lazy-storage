@@ -188,6 +188,8 @@ export class SchemaError extends Error {
   code: 'invalid';
   path: Path;
 }
+/** The fields a record's schema names, each by its path, and whether it lets in others (`'*'`); null for a schema that is not an object of fields */
+export function fieldsOf(schema: Schema): { fields: Path[]; open: boolean } | null;
 /** A field that may be absent, for a schema that is not a type's name */
 export function optional<const S extends Schema>(schema: S): OptionalSchema<S>;
 /** One of these values and no other */

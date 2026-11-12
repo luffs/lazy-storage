@@ -43,6 +43,13 @@
 // commit's first write, which takes the file's write lock, so it sees the
 // lease as it stands: no other process can take it in between.
 //
+// A record's row holds its data as JSON, which the store alone reads. For
+// everything else that opens the file (a report, an admin script, a SQL
+// shell) `views(schemas)` lays the records out by their schemas: a VIEW
+// per collection or singleton, a column per field the schema names, read
+// out of the JSON as it is asked for. A view stores nothing and costs a
+// commit nothing; the rows stay as they are.
+//
 // The driver is abstracted to what bun:sqlite and node:sqlite both offer:
 // `exec(sql)`, `prepare(sql)` giving a statement with run/get/all, and a
 // `transaction(fn)` wrapper. sqlite-bun.js and sqlite-node.js supply them.
@@ -51,6 +58,7 @@ import { hostname } from 'node:os';
 import { Worker } from 'node:worker_threads';
 import { randomId } from '../core/ids.js';
 import { createShape } from '../core/shape.js';
+import { fieldsOf } from '../core/schema.js';
 import { assertDocument, newEpoch } from './storage.js';
 
 /** How far a store's log floor moves before the rows under it are deleted (see the header) */
@@ -151,6 +159,41 @@ const SCHEMA = `
     until  INTEGER NOT NULL
   ) WITHOUT ROWID;
 `;
+
+/** An identifier and a string as SQL writes them */
+const ident = name => `"${String(name).replaceAll('"', '""')}"`;
+const literal = text => `'${String(text).replaceAll("'", "''")}'`;
+/** A view of this adapter's making says so in its own text, with the prefix it was made under: what `views` may drop and make again */
+const viewMark = prefix => `/* lazy-storage view${prefix ? `: ${prefix}` : ''} */`;
+
+/**
+ * The SELECT of a collection's or singleton's view: the store (unless the
+ * view is of one store), the record's id (a collection's), a column per
+ * field its schema names, and the record whole as `data` where the schema
+ * names no fields or lets in others. A field inside an object is named
+ * with its path (`meta_color`); a name taken already gets a trailing `_`.
+ * A collection's own `id` field is left out: the row's id is the record's
+ */
+function viewSelect(c, schema, { single, store }) {
+  const taken = new Set();
+  const named = name => {
+    while (taken.has(name)) name += '_';
+    taken.add(name);
+    return ident(name);
+  };
+  const columns = [];
+  if (store === undefined) columns.push(`store AS ${named('store')}`);
+  if (!single) columns.push(`id AS ${named('id')}`);
+  const laid = fieldsOf(schema);
+  for (const path of laid?.fields ?? []) {
+    // SQLite's JSON paths have no way to write a key with a quote in it
+    if (path.some(seg => seg.includes('"'))) continue;
+    if (!single && path.length === 1 && path[0] === 'id') continue;
+    columns.push(`json_extract(data, ${literal(`$${path.map(seg => `."${seg}"`).join('')}`)}) AS ${named(path.join('_'))}`);
+  }
+  if (!laid || laid.open) columns.push(`data AS ${named('data')}`);
+  return `SELECT ${columns.join(', ')} FROM records WHERE collection = ${literal(c)}${store === undefined ? '' : ` AND store = ${literal(store)}`}`;
+}
 
 /** A record's id in its row: '' for a singleton's */
 const rowId = id => (id === null || id === undefined ? '' : id);
@@ -414,6 +457,40 @@ export function sqliteStorageOn({ exec, prepare, transaction, close, db, driver 
           } catch { /* the lease runs out on its own */ }
         }
       };
+    },
+    /**
+     * Lay the records out by their schemas, for whatever else reads the
+     * file: a view per collection or singleton `schemas` names (the object
+     * createStore takes), called `prefix` and its name, with a column per
+     * field (see viewSelect). `singletons` are the keys that are one record
+     * each, as the store declares them; `store` makes the views of that
+     * store alone, and without it they hold every store in the file, each
+     * row with its `store`. Views made under the same prefix before are
+     * dropped first, so calling it again with other schemas brings them up
+     * to date; anything else by a view's name (a table of yours, or of this
+     * adapter's: `records`, `stores`) refuses with a TypeError that says to
+     * pick a prefix. Returns the views' names
+     */
+    views(schemas, { singletons = [], prefix = '', store } = {}) {
+      if (schemas === null || typeof schemas !== 'object' || Array.isArray(schemas)) throw new TypeError('views takes the schemas of a store, by collection');
+      if (typeof prefix !== 'string' || !/^[A-Za-z0-9_]*$/.test(prefix)) throw new TypeError('A view prefix is letters, digits and underscores');
+      if (store !== undefined) assertId(store);
+      const single = new Set(singletons);
+      const mark = viewMark(prefix);
+      const names = [];
+      transaction(() => {
+        const ours = prepare("SELECT name FROM sqlite_master WHERE type = 'view' AND instr(sql, ?) > 0").all(mark).map(r => r.name);
+        for (const name of ours) exec(`DROP VIEW ${ident(name)};`);
+        const existing = prepare('SELECT type FROM sqlite_master WHERE name = ?');
+        for (const [c, schema] of Object.entries(schemas)) {
+          const name = `${prefix}${c}`;
+          const there = existing.get(name);
+          if (there) throw new TypeError(`A view called "${name}" cannot be made: the file has a ${there.type} of that name already. Give views a prefix`);
+          exec(`CREATE VIEW ${ident(name)} AS ${mark} ${viewSelect(c, schema, { single: single.has(c), store })};`);
+          names.push(name);
+        }
+      })();
+      return names;
     },
     /** Ids of every store that has committed at least once */
     ids: () => q.ids.all().map(r => r.store),

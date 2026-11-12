@@ -174,6 +174,54 @@ is the store's clock when its last op arrived, and the store's `epoch`, a
 random id minted once per life of the storage (it is how a client's
 version is told apart from one that belongs to storage since wiped).
 
+### Reading the file with SQL
+
+A record's row holds its data as JSON, which suits the store and nothing
+else. For a report, an admin script or a SQL shell, the SQLite adapters
+lay the records out by the store's [schemas](model.md#schemas), as views:
+
+```js
+const sqlite = sqliteStorage('data/app.sqlite');
+sqlite.views(schemas, { singletons: ['settings'] });   // once, when the server starts
+```
+
+```sql
+SELECT store, count(*) FROM tasks WHERE done IS NOT 1 GROUP BY store;
+SELECT id, title, meta_color FROM tasks WHERE store = 'team-1' ORDER BY pos;
+```
+
+Each collection or singleton with a schema becomes a view of its name: a
+row a record, with the `store` it belongs to, its `id` (a collection's),
+and a column per field the schema names. A field inside an object of
+named fields is a column of its own, named with its path (`meta_color`);
+a list, a map (`'*'`) or a field checked by a function is one column,
+holding JSON text where the value is a list or an object. `true` and
+`false` read as 1 and 0, and a field a record does not have as NULL. A
+schema that lets in fields it does not name (`'*'`), or names none (a
+check, a Zod schema), also gets the record whole in a `data` column, for
+`json_extract`. A record's own `id` field is left out, the row's being
+the same, and a name taken already gets a trailing `_`.
+
+- `prefix` names the views apart from tables of yours, or from this
+  adapter's own (`records`, `stores`, `replicas`, `oplog`, `leases`): a
+  name the file has already is refused, and a collection called `records`
+  needs one. `store: 'team-1'` makes the views of that store alone,
+  without the `store` column.
+- Calling it again drops the views it made under that prefix before and
+  makes them from the schemas it is given, so a schema that changed is
+  followed at the next start.
+- A view stores nothing: it reads the rows as they are when it is asked,
+  commits cost what they did, and a backup carries the views with it.
+  Reading is safe while the server runs (the file is in WAL mode, where
+  readers and the writer do not wait on each other). Do not write
+  through anything but the store: it holds the state in memory and would
+  not hear of it.
+- A query that filters on a field reads every record of the collection:
+  the views have no indexes. That is fine for reports and for thousands
+  of records; for more, copy what you need into tables of your own.
+- A singleton nobody has written is its `initial` value, which lives in
+  the code: it has no row until its first write.
+
 ### Migrations
 
 `initial` covers a collection or singleton added to the store; a change

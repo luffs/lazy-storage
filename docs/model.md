@@ -185,6 +185,10 @@ refuses it. To check a form before writing, `createSchemas(shape,
 schemas).check(c, id, record)` from `lazy-storage/core` returns the same
 error, or null.
 
+On SQLite the schemas also name the columns of SQL views over the
+records, for whatever else reads the file: see [Reading the file with
+SQL](server.md#reading-the-file-with-sql).
+
 In TypeScript the schemas are also the state's type, so a record's form
 is declared once. `defineSchemas` returns what it is given and keeps its
 literal types; `Infer` is the type of what one schema lets through, and

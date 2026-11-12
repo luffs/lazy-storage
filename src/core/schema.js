@@ -198,6 +198,36 @@ function compile(spec, where) {
   };
 }
 
+/** Whether a schema is an object of fields: not a validator of another library, which is an object too */
+const isFields = spec => isObj(spec) && !Object.hasOwn(spec, OPTIONAL) && !(spec['~standard'] !== null && typeof spec['~standard'] === 'object') &&
+  typeof spec.safeParse !== 'function' && typeof spec.parse !== 'function';
+const required = spec => (spec !== null && typeof spec === 'object' && Object.hasOwn(spec, OPTIONAL) ? required(spec[OPTIONAL]) : spec);
+
+/**
+ * The fields a record's schema names, for what lays records out by them (a
+ * SQL view, sqlite-shared.js): `{ fields: [path, ...], open }`, a path per
+ * named field, an object of named fields followed into its own (`meta`
+ * with a `color` is ['meta', 'color']), anything else (a type, a list, a
+ * map, a check) the field whole. `open` says the record may hold fields
+ * the schema does not name (`'*'`). null for a schema that is not an
+ * object of fields: a check, another library's validator, a type's name
+ */
+export function fieldsOf(schema) {
+  const top = required(schema);
+  if (!isFields(top)) return null;
+  const fields = [];
+  const walk = (spec, path) => {
+    for (const [key, field] of Object.entries(spec)) {
+      if (key === '*') continue;
+      const inner = required(field);
+      if (isFields(inner) && !Object.hasOwn(inner, '*') && Object.keys(inner).length) walk(inner, [...path, key]);
+      else fields.push([...path, key]);
+    }
+  };
+  walk(top, []);
+  return { fields, open: Object.hasOwn(top, '*') };
+}
+
 /**
  * @param {Object} shape - from createShape
  * @param {Object} [schemas] - a schema per collection or singleton (see the header)

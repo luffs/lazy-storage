@@ -46,7 +46,7 @@
 - `toJSON(message)` — a message's JSON, encoded once however many sockets it goes to (`tagStore(message, id)` is what a hub does); `RefusedError`, `HELLO_OPS`
 
 **SQLite** (`lazy-storage/server/sqlite`, Bun): `sqliteStorage(file, { wal, lease: { ttl } | false, checkpoints: 'worker' | 'inline', onError })` →
-`store(id)` (whose load takes the store's lease, `close()` gives it up, and `replace(doc)` takes a document), `ids()`, `remove(id)`, `backup(file)`, `fromLeaves(shapeOf)` (a file from before 1.0, see [Persistence](server.md#persistence)), `db`, `close()` (gives up every lease). `memoryStorage()` takes a document with `replace(doc)` too.
+`store(id)` (whose load takes the store's lease, `close()` gives it up, and `replace(doc)` takes a document), `ids()`, `remove(id)`, `backup(file)`, `views(schemas, { singletons, prefix, store })` → the names of the SQL views it made, the records laid out by their schemas (see [Reading the file with SQL](server.md#reading-the-file-with-sql)), `fromLeaves(shapeOf)` (a file from before 1.0, see [Persistence](server.md#persistence)), `db`, `close()` (gives up every lease). `memoryStorage()` takes a document with `replace(doc)` too.
 
 **Bun adapter** (`lazy-storage/server/bun`): `serve({ stores, port, path, fetch, authenticate, authorizeId, authorize, expiresAt, minSession, maxPayload, perMessageDeflate, httpSnapshots, maxBuffered, relays, onError })` —
 `stores` is a registry or `id => store|null` (for one store, `() => store`); the
@@ -76,6 +76,6 @@ pieces both sides share — `createShape`, `createDoc`, `docFromRecords`,
 `compile` (a lazy-watch batch to changes), `diffOf` (changes to a diff in
 the tree's shape), `changeFor`, `assertChange`, `createClock`, `clamp`,
 `isTimestamp`, `createSchemas(shape, schemas)` (→ `check(c, id, record)`: a
-`SchemaError` or null), `optional`, `oneOf`, `listItem`, `defineSchemas`, the path helpers, `randomId`, `PROTOCOL`, and the position
+`SchemaError` or null), `optional`, `oneOf`, `listItem`, `defineSchemas`, `fieldsOf(schema)` (the paths of the fields a schema names), the path helpers, `randomId`, `PROTOCOL`, and the position
 keys: `keyBetween(a, b)`, `keysBetween(a, b, n)`, `comparePositions`,
 `isPositionKey`.

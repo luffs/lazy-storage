@@ -192,6 +192,8 @@ createStore({ schemas: { tasks: { title: 'text' } } });
 // @ts-expect-error readOnly is true or a list of collections
 createStore({ readOnly: 'settings' });
 
+const viewNames: string[] = sqliteStorage(':memory:').views(declared, { singletons: ['settings'], prefix: 'v_', store: 'team-1' });
+void viewNames;
 const commits: StorageCommit[] = [];
 const mine: ServerStorage = { load: () => null, commit: change => { commits.push(change); }, flush: () => {} };
 createStore({ storage: mine });

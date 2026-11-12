@@ -1,5 +1,6 @@
 // Type declarations for `lazy-storage/server/sqlite` (Bun only)
 import type { ServerStorage, StorageDocument } from './server.js';
+import type { Schema } from './core.js';
 
 export interface SqliteStorage {
   /** The storage adapter for one store (created on its first commit); loading it takes the store's lease */
@@ -12,6 +13,15 @@ export interface SqliteStorage {
      */
     replace(doc: StorageDocument): void;
   };
+  /**
+   * Lay the records out by their schemas, as SQL views, for whatever else reads the file: a view per
+   * collection or singleton `schemas` names, a column per field (a field inside an object named with its
+   * path, `meta_color`), and the record whole as `data` where the schema names no fields or lets in others.
+   * `singletons` are the keys that are one record each; `prefix` names the views apart from what the file
+   * has already (a name taken is refused); `store` makes them of that store alone, without the `store`
+   * column. Views made under the same prefix before are dropped first. Returns the views' names
+   */
+  views(schemas: Record<string, Schema>, options?: { singletons?: string[]; prefix?: string; store?: string }): string[];
   /** Ids of every store that has committed at least once */
   ids(): string[];
   /** Delete a store's records, replicas, log, version, and lease */
