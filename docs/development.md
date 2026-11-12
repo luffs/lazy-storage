@@ -8,7 +8,8 @@ What runs from a checkout of the repository.
 shared list in the browser over a Bun server (`bun examples/basic/server.js`),
 the same page served by Node (`node examples/node/server.js`), and a
 client that follows a store from a Bun or Node process
-(`bun examples/mirror.js`). See `examples/README.md`.
+(`bun examples/mirror.js`), and a server to try the inspector on
+(`node examples/inspector/server.js`). See `examples/README.md`.
 
 `npm run bench` times the paths that matter: deciding an op with and
 without the gates, a broadcast to a hundred and a thousand sockets, a client's

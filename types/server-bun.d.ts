@@ -41,6 +41,12 @@ export interface HandlerOptions {
    */
   httpSnapshots?: boolean | { threshold?: number; origins?: '*' | false | string[] };
   /**
+   * Serve the inspector at `<path>/inspect`: a page of the stores, their records, history, activity and
+   * sessions, for whom `authorize(request, { write })` lets in (`write`: a revert, a disconnect); answer with the user to have a
+   * revert told as theirs. No inspector without it
+   */
+  inspector?: { authorize: (request: Request, context: { write: boolean }) => unknown };
+  /**
    * Close a socket whose unsent output passes this many bytes, with code
    * 1013; the client reconnects and catches up with a delta. Default 16 MB.
    * false lets it grow (on Bun, until Bun's own limit, past which it drops

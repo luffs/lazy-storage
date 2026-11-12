@@ -108,6 +108,10 @@ bun examples/basic/server.js
   write left it, with when and who: read a record's past, see who
   changed a field, and put it back as it was last Tuesday, from the
   server or from a client. ([History](docs/history.md))
+- **A page to look into it.** The server can serve an inspector: its
+  stores and records, a record's history with a button to put it back,
+  the activity as it lands, and who is connected, for whoever you say
+  may look. ([The inspector](docs/inspector.md))
 - **Undo and redo** that only ever touch your own edits, not a
   teammate's. ([Undo](docs/model.md#undo))
 - **React and Vue bindings**, `lazy-storage/react` and `lazy-storage/vue`,
@@ -179,6 +183,7 @@ your own ([Examples, benchmarks, and tests](docs/development.md)).
 | [History](docs/history.md) | A record's past, the store's activity, the record as it was, and putting it back |
 | [Authentication, presence, and eviction](docs/auth.md) | Who may open and write what, who is here, ending sessions |
 | [Relays](docs/relays.md) | A store that follows the server: working while it is away, spreading the load, compression |
+| [The inspector](docs/inspector.md) | A page of the server's stores, records, history, activity and sessions |
 | [Limits, memory, and observability](docs/limits.md) | The ceilings a public server needs, and what to watch |
 | [API](docs/api.md) | Every export, in brief |
 | [Wire protocol](docs/protocol.md) | The messages, refusal and close codes, a relay's link |

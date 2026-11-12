@@ -5,13 +5,14 @@ import type { CloseOptions, HandlerOptions, SocketInfo, SocketStats } from './se
 
 export type { CloseOptions, HandlerOptions, SocketInfo, SocketStats } from './server-bun.js';
 
-/** A Web Request for an incoming Node request, headers included; what `authenticate` receives */
+/** A Web Request for an incoming Node request, headers included; what `authenticate` receives. With `body`, a promise of one with its body (up to 64 KB) */
 export function toRequest(req: IncomingMessage): Request;
+export function toRequest(req: IncomingMessage, options: { body: true }): Promise<Request>;
 
 export interface NodeHandlers {
   /** Handle an http server's 'upgrade' event; resolves to false when the URL is not ours */
   upgrade(req: IncomingMessage, socket: Duplex, head: Buffer): Promise<boolean>;
-  /** Handle a plain request when it is ours (the snapshot route); resolves to false when it is not, for the app to answer */
+  /** Handle a plain request when it is ours (the snapshot route, the inspector); resolves to false when it is not, for the app to answer */
   request(req: IncomingMessage, res: ServerResponse): Promise<boolean>;
   /** Refuse new sockets, close the open ones with code 1001, dispose the registry (flushing every store) */
   close(options?: CloseOptions): Promise<void>;

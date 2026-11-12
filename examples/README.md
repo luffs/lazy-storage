@@ -27,6 +27,11 @@ no build step.
 - **`node/`** — the same page served by Node instead of Bun, with the `ws`
   package for sockets and `node:sqlite` for storage (Node 22.13 or later).
   `node examples/node/server.js`.
+- **`inspector/`** — a server with something to look at and the
+  [inspector](../docs/inspector.md) to look at it with: two stores with
+  schemas and history, and a writer that goes on changing them.
+  `node examples/inspector/server.js`, then
+  `http://127.0.0.1:3210/ws/inspect`.
 - **`podman-caddy/`** — the same page served for as many clients as one
   machine takes: the server alone on 127.0.0.1, relays on the other
   cores sharing the public port, Caddy ending TLS, all in a podman pod.

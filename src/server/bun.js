@@ -33,6 +33,7 @@ import { createHub } from './hub.js';
 import { followerHub, credentialRequest } from './follow.js';
 import { toJSON, closeUnauthorized, deflateOptions, TOO_FAR_BEHIND, REAUTHENTICATE, MIN_SESSION_MS, expiryOf, runAt, rollUpSockets } from './wire.js';
 import { snapshotOptions, snapshotId, serveSnapshot } from './snapshot.js';
+import { createInspector } from './inspector.js';
 
 /**
  * @param {Object} options
@@ -132,6 +133,7 @@ export function createHandlers({
   maxPayload = 4 * 1024 * 1024,
   perMessageDeflate = true,
   httpSnapshots = true,
+  inspector,
   maxBuffered = 16 * 1024 * 1024,
   relays,
   onError = err => console.error('lazy-storage:', err)
@@ -142,6 +144,9 @@ export function createHandlers({
   const resolveStore = typeof stores === 'function' ? stores : id => stores.get(id);
   const deflate = deflateOptions(perMessageDeflate);
   const snapshots = snapshotOptions(httpSnapshots);
+  // The inspector's page and its requests, at <path>/inspect, when the app says who may look (see inspector.js)
+  const inspect = inspector ? createInspector({ stores, authorize: inspector.authorize, sockets: () => sockets(), disconnect: filter => disconnect(filter), onError }) : null;
+  const inspectPath = `${path}/inspect`;
   // Where the hub points a client that can fetch for a large snapshot
   const snapshotRoute = snapshots && { threshold: snapshots.threshold, url: id => `${path}/snapshot/${id}` };
   // Bun compresses a frame only when asked per send; every message is
@@ -214,9 +219,18 @@ export function createHandlers({
   async function upgrade(req, server) {
     bunServer = server;
     const { pathname } = new URL(req.url);
-    const snapshotOf = snapshots ? snapshotId(pathname, path) : null;
-    if (pathname !== path && snapshotOf === null && pathname !== relayPath) return null;
+    const inspected = inspect !== null && (pathname === inspectPath || pathname.startsWith(`${inspectPath}/`));
+    const snapshotOf = snapshots && !inspected ? snapshotId(pathname, path) : null;
+    if (pathname !== path && snapshotOf === null && pathname !== relayPath && !inspected) return null;
     if (closing) return new Response('Server shutting down', { status: 503, headers: { 'retry-after': '1' } });
+    if (inspected) {
+      try {
+        return await inspect.handle(req, inspectPath);
+      } catch (err) {
+        onError(err);
+        return new Response('Something went wrong', { status: 500 });
+      }
+    }
     if (pathname === relayPath) {
       const turnAwayRelay = () => (server.upgrade(req, { data: { unauthorized: true } }) ? undefined : new Response('Unauthorized', { status: 401 }));
       const relay = await relays.authenticate(req);

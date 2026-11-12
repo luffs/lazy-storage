@@ -131,6 +131,9 @@ A public server needs a few ceilings, all on by default:
   N sessions then costs N small messages per window however many of
   them join, leave, or share.
 
+To look into a running server by eye (its stores, records, history,
+activity and sessions), it can serve [the inspector](inspector.md).
+
 **Memory follows the stores in use** when the registry is given an idle
 time: `createStores(factory, { idle: 30 * 60_000 })` releases a store
 that has had no session for that long (its storage is flushed first) and

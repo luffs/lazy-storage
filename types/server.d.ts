@@ -312,9 +312,10 @@ export interface Store<S extends object = any> {
   recordAt(singleton: string, when?: When): any;
   /**
    * Put a record back as it was then, as a write of the server's; returns the changes that landed. A record
-   * made again brings back the children its deletion took with it, as they were just before, unless `children: false`
+   * made again brings back the children its deletion took with it, as they were just before, unless `children: false`.
+   * `by` is the user the server makes the write for (an administrator), told with it in the history
    */
-  revert(c: string, id: string, when: When, options?: { children?: boolean }): Change[];
+  revert(c: string, id: string, when: When, options?: { children?: boolean; by?: unknown }): Change[];
   revert(singleton: string, when: When): Change[];
   export(): StoreDocument;
   restore(doc: StorageDocument): void;
@@ -405,3 +406,26 @@ export interface RelayCredential {
 export function toJSON(message: object): string;
 export function tagStore<M extends object>(message: M, store: string): M & { store: string };
 export function snapshotResponse(store: Store, request: Request, options?: { origins?: '*' | false | string[] }): Response;
+
+/**
+ * Who may look into the server with the inspector, and with `write` change (a revert, a disconnect): a falsy answer,
+ * or a throw, turns the request away. An answer that is a user (an object, or a string for its key) is who a revert
+ * is told as in the store's history
+ */
+export type InspectorAuthorize = (request: Request, context: { write: boolean }) => unknown;
+
+export interface InspectorOptions {
+  stores: StoreRegistry | StoreResolver;
+  /** Required: the inspector shows every record of every store, and lets nobody in by default */
+  authorize: InspectorAuthorize;
+  /** The server's open sockets, as an adapter's `sockets()` lists them, and its `disconnect`: the adapters give their own */
+  sockets?: () => Array<{ user?: unknown; relay?: unknown; stores: string[]; buffered: number; idleMs: number; openMs: number; expiresAt?: number | null }>;
+  disconnect?: (filter: (user: unknown) => boolean) => number;
+  onError?: (error: any) => void;
+}
+
+/**
+ * The inspector: a page of the server's stores, records, history, activity and sessions, and what the page asks.
+ * `handle` answers a request under `base` (the page at it, its requests beneath it), or null for another path
+ */
+export function createInspector(options: InspectorOptions): { handle(request: Request, base: string): Promise<Response | null> };

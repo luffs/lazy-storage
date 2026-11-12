@@ -9,7 +9,7 @@ import {
 import { createClient as createClientAgain, inOrder as inOrderAgain } from 'lazy-storage/client';
 import { sqliteClientStorage } from 'lazy-storage/client/sqlite';
 import {
-  createStore, createStores, createHub, memoryStorage, isStoreId, toJSON, tagStore, optional, oneOf, listItem, defineSchemas, type Infer, type InferState,
+  createStore, createStores, createHub, createInspector, memoryStorage, isStoreId, toJSON, tagStore, optional, oneOf, listItem, defineSchemas, type Infer, type InferState,
   type Store, type ServerStorage, type StorageCommit, type OpEvent, type StoreDocument
 } from 'lazy-storage/server';
 import { createHandlers, serve } from 'lazy-storage/server/bun';
@@ -213,6 +213,9 @@ createStore({ readOnly: 'settings' });
 
 const viewNames: string[] = sqliteStorage(':memory:').views(declared, { singletons: ['settings'], prefix: 'v_', store: 'team-1' });
 void viewNames;
+const registryForInspector = createStores(() => createStore());
+const looked: Promise<Response | null> = createInspector({ stores: registryForInspector, authorize: (request, { write }) => !write && request.headers.has('cookie') }).handle(new Request('http://x/ws/inspect'), '/ws/inspect');
+void looked;
 const commits: StorageCommit[] = [];
 const mine: ServerStorage = { load: () => null, commit: change => { commits.push(change); }, flush: () => {} };
 createStore({ storage: mine });

@@ -21,16 +21,38 @@ import { createHub } from './hub.js';
 import { followerHub, credentialRequest } from './follow.js';
 import { toJSON, closeUnauthorized, deflateOptions, TOO_FAR_BEHIND, REAUTHENTICATE, MIN_SESSION_MS, expiryOf, runAt, rollUpSockets } from './wire.js';
 import { snapshotOptions, snapshotId, serveSnapshot } from './snapshot.js';
+import { createInspector } from './inspector.js';
 
-/** A Web Request for an incoming Node request, headers included */
-export function toRequest(req) {
+/**
+ * A Web Request for an incoming Node request, headers included. With
+ * `body` its body too (a promise of the Request then): what a POST to the
+ * inspector carries, read up to 64 KB and no further
+ */
+export function toRequest(req, { body = false } = {}) {
   const headers = new Headers();
   for (const [name, value] of Object.entries(req.headers)) {
     if (Array.isArray(value)) for (const v of value) headers.append(name, v);
     else if (value !== undefined) headers.set(name, value);
   }
-  return new Request(`http://${req.headers.host ?? 'localhost'}${req.url}`, { method: req.method, headers });
+  const url = `http://${req.headers.host ?? 'localhost'}${req.url}`;
+  if (!body || req.method === 'GET' || req.method === 'HEAD') {
+    const request = new Request(url, { method: req.method, headers });
+    return body ? Promise.resolve(request) : request;
+  }
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+    req.on('data', chunk => {
+      size += chunk.length;
+      if (size <= BODY_MOST) chunks.push(chunk);
+    });
+    req.on('error', reject);
+    req.on('end', () => resolve(new Request(url, { method: req.method, headers, body: size > BODY_MOST ? 'x'.repeat(BODY_MOST + 1) : Buffer.concat(chunks) })));
+  });
 }
+
+/** The most of a request's body that is read (see toRequest) */
+const BODY_MOST = 64 * 1024;
 
 /** Answer an upgrade request with a plain HTTP response and close the socket */
 function refuse(socket, status, text) {
@@ -83,6 +105,7 @@ export function createHandlers({
   maxPayload = 4 * 1024 * 1024,
   perMessageDeflate = true,
   httpSnapshots = true,
+  inspector,
   idleTimeout = 120_000,
   maxBuffered = 16 * 1024 * 1024,
   relays,
@@ -93,6 +116,9 @@ export function createHandlers({
   const relayPath = relays ? relays.path ?? `${path}/relay` : null;
   const resolveStore = typeof stores === 'function' ? stores : id => stores.get(id);
   const snapshots = snapshotOptions(httpSnapshots);
+  // The inspector's page and its requests, at <path>/inspect, when the app says who may look (see inspector.js)
+  const inspect = inspector ? createInspector({ stores, authorize: inspector.authorize, sockets: () => sockets(), disconnect: filter => disconnect(filter), onError }) : null;
+  const inspectPath = `${path}/inspect`;
   const snapshotRoute = snapshots && { threshold: snapshots.threshold, url: id => `${path}/snapshot/${id}` };
   // Compression is decided per message, above `threshold` only, as the Bun
   // adapter does. ws is asked for no context takeover both ways, which
@@ -273,11 +299,19 @@ export function createHandlers({
       res.end('Bad request');
       return true;
     }
-    const id = snapshots ? snapshotId(pathname, path) : null;
-    if (id === null) return false;
+    const inspected = inspect !== null && (pathname === inspectPath || pathname.startsWith(`${inspectPath}/`));
+    const id = snapshots && !inspected ? snapshotId(pathname, path) : null;
+    if (id === null && !inspected) return false;
     let response;
     if (closing) {
       response = new Response('Server shutting down', { status: 503, headers: { 'retry-after': '1' } });
+    } else if (inspected) {
+      try {
+        response = await inspect.handle(await toRequest(req, { body: true }), inspectPath);
+      } catch (err) {
+        onError(err);
+        response = new Response('Something went wrong', { status: 500 });
+      }
     } else {
       try {
         response = await serveSnapshot(toRequest(req), id, { resolveStore, authenticate, authorizeId, authorize, onError, origins: snapshots.origins });

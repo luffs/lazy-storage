@@ -581,7 +581,7 @@ export function createStore({
       if (!changesOf.has(key)) changesOf.set(key, []);
       changesOf.get(key).push(change);
     }
-    const by = replicaId === 'server' ? null : ownerKey(user) ?? null;
+    const by = ownerKey(user) ?? null;
     // When it landed: the store's time, held to what the last row said, so that it never goes back from one version
     // to the next whatever the wall clock does. A write's own stamp does: an edit made offline lands with an old one
     landedAt = Math.max(landedAt, clock.time);
@@ -743,7 +743,7 @@ export function createStore({
     return run(list);
   }
 
-  function run(list) {
+  function run(list, { by } = {}) {
     for (const change of list) {
       try {
         assertChange(shape, change);
@@ -762,7 +762,8 @@ export function createStore({
       if (err instanceof SchemaError) throw new TypeError(err.message);
       throw err;
     }
-    landed(applied, ts, 'server', null, undefined, null);
+    // `by`: the user a write of the server's is made for (an administrator's revert), told with it in the history
+    landed(applied, ts, 'server', null, by, null);
     // As a replica's op does: a store only the server writes would otherwise forget nothing until it was loaded again
     maybeCompact();
     return applied;
@@ -1610,7 +1611,7 @@ export function createStore({
      * nothing is known of the record then, and what a patch throws (a form its schema no longer takes).
      * Returns the changes that landed
      */
-    revert(c, id, when, { children = true } = {}) {
+    revert(c, id, when, { children = true, by } = {}) {
       alive('write to');
       if (shape.isSingleton(c) && when === undefined) [id, when] = [undefined, id];
       const row = rowAt(c, id, when);
@@ -1619,15 +1620,15 @@ export function createStore({
       // Not there then: deleted by then, or not made yet
       if (!row || row.data === null) {
         if (shape.isSingleton(c)) throw new Error(`Nothing is known of ${c} then`);
-        return current === undefined ? [] : run([{ c, id, del: true }]);
+        return current === undefined ? [] : run([{ c, id, del: true }], { by });
       }
       const target = JSON.parse(row.data);
       // A record made again brings back the records its deletion took with it, in the same write
-      if (current === undefined) return run([changeFor({ c, id, path: [] }, target), ...(children ? takenWith(c, id) : [])]);
+      if (current === undefined) return run([changeFor({ c, id, path: [] }, target), ...(children ? takenWith(c, id) : [])], { by });
       const whole = !Utils.isPlainObject(target) || !Utils.isPlainObject(current) || shape.isRegister(c, id);
       const value = whole ? target : diffTo(c, id, current, target);
       if (!whole && Object.keys(value).length === 0) return [];
-      return run([changeFor(shape.isSingleton(c) ? { c, path: [] } : { c, id, path: [] }, value)]);
+      return run([changeFor(shape.isSingleton(c) ? { c, path: [] } : { c, id, path: [] }, value)], { by });
     },
     compact,
     export: () => {
