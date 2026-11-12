@@ -91,8 +91,8 @@ export function createInspector({ stores, authorize, sockets, disconnect, onErro
     if (!kept.by.has(c)) kept.by.set(c, Object.keys(store.state[c]).sort());
     return kept.by.get(c);
   }
-  /** Who a user is, as presence and the history key users: its id, or the whole of it */
-  const keyOf = user => (user !== null && typeof user === 'object' && user.id != null ? String(user.id) : typeof user === 'string' ? user : JSON.stringify(user));
+  /** Who a user is, as a store keys users unless it is told otherwise (`presence.key`): its id, or the whole of it as JSON */
+  const keyOf = user => (user !== null && typeof user === 'object' && user.id != null ? String(user.id) : JSON.stringify(user));
   /** Each entry with the record as it was before the write (`was`), so that a change can be shown beside what it replaced */
   const withBefore = (store, entries) => entries.map(e => {
     let was;
@@ -102,42 +102,71 @@ export function createInspector({ stores, authorize, sockets, disconnect, onErro
     return was === undefined ? e : { ...e, was };
   });
 
-  function storeOf(params) {
+  /**
+   * The store a request names. To look is not to load: a registry's store that no client has open is not made
+   * for a look (its factory may make a file for it, or take its lease), and says so; `load` is the change that
+   * loads it. A resolver function has no such list, and is asked
+   */
+  function storeOf(params, { load = false } = {}) {
     const id = params.get('store');
     if (!isStoreId(id)) throw new TypeError('store is a store id');
+    if (!load && typeof stores.has === 'function' && !stores.has(id)) {
+      throw Object.assign(new Error(`Store "${id}" is not loaded: no client has it open`), { status: 404, notLoaded: true });
+    }
     const store = resolve(id);
     if (!store) throw Object.assign(new Error(`No store "${id}"`), { status: 404 });
     return store;
   }
 
-  /** Whether the store keeps history: it says so only by refusing */
+  // Whether a store keeps history: it says so only by refusing, and is asked once
+  const keeps = new WeakMap();
   function keepsHistory(store) {
-    try {
-      store.activity({ limit: 1 });
-      return true;
-    } catch {
-      return false;
+    if (!keeps.has(store)) {
+      try {
+        store.activity({ limit: 1 });
+        keeps.set(store, true);
+      } catch {
+        keeps.set(store, false);
+      }
     }
+    return keeps.get(store);
+  }
+
+  // A store's collections with how many records each has: counted once for a version of the store, since to
+  // count them is to go through every record's key
+  const counted = new WeakMap();
+  function collectionsOf(store) {
+    let kept = counted.get(store);
+    if (!kept || kept.version !== store.version) {
+      const { shape } = store;
+      kept = {
+        version: store.version,
+        collections: [...shape.collections.map(c => ({ c, records: Object.keys(store.state[c]).length })), ...shape.singletons.map(c => ({ c, singleton: true }))]
+      };
+      counted.set(store, kept);
+    }
+    return kept.collections;
   }
 
   function overview(id, store) {
-    const { shape } = store;
-    const stats = store.stats();
+    const collections = collectionsOf(store);
     return {
       id,
       version: store.version,
       epoch: store.epoch,
       now: store.now(),
       history: keepsHistory(store),
-      sessions: stats.sessions,
-      replicas: stats.replicas,
-      records: stats.records,
-      sent: stats.sent,
-      collections: [
-        ...shape.collections.map(c => ({ c, records: Object.keys(store.state[c]).length })),
-        ...shape.singletons.map(c => ({ c, singleton: true }))
-      ]
+      sessions: store.sessions,
+      records: collections.reduce((sum, { records = 0 }) => sum + records, 0),
+      collections
     };
+  }
+
+  /** How many of a list are asked for: a hundred or so unless it says, one at the least, `most` at the most */
+  function limitOf(params, fallback, most = PAGE_MOST) {
+    const limit = numberOf(params.get('limit'), 'limit');
+    if (limit !== undefined && limit < 1) throw new TypeError('limit is a whole number of one or more');
+    return Math.min(limit ?? fallback, most);
   }
 
   const api = {
@@ -148,18 +177,22 @@ export function createInspector({ stores, authorize, sockets, disconnect, onErro
         listed: ids !== null,
         stores: (ids ?? []).map(id => {
           const store = resolve(id);
-          const stats = store.stats();
-          return { id, version: stats.version, sessions: stats.sessions, records: stats.records };
+          return { id, version: store.version, sessions: store.sessions };
         })
       };
     },
     store: params => overview(params.get('store'), storeOf(params)),
+    // What the page asks every two seconds, to know whether anything has changed: nothing that is counted
+    glance(params) {
+      const store = storeOf(params);
+      return { version: store.version, sessions: store.sessions };
+    },
     records(params) {
       const store = storeOf(params);
       const c = params.get('c');
       if (!store.shape.has(c)) throw new TypeError(`"${c}" is not a collection or singleton of this store`);
       if (store.shape.isSingleton(c)) return { singleton: true, record: store.state[c] };
-      const limit = Math.min(numberOf(params.get('limit'), 'limit') ?? 100, PAGE_MOST);
+      const limit = limitOf(params, 100);
       const after = params.get('after');
       const q = (params.get('q') ?? '').toLowerCase();
       const all = store.state[c];
@@ -199,19 +232,19 @@ export function createInspector({ stores, authorize, sockets, disconnect, onErro
       const c = params.get('c');
       if (!store.shape.has(c)) throw new TypeError(`"${c}" is not a collection or singleton of this store`);
       const id = store.shape.isSingleton(c) ? undefined : params.get('id');
-      const record = store.shape.isSingleton(c) ? store.state[c] : store.state[c][id];
+      const record = store.shape.isSingleton(c) ? store.state[c] : typeof id === 'string' && Object.hasOwn(store.state[c], id) ? store.state[c][id] : undefined;
       return { c, id, there: record !== undefined, record, clock: record === undefined ? undefined : store.clock(c, id) };
     },
     history(params) {
       const store = storeOf(params);
       const c = params.get('c');
       const id = store.shape?.isSingleton(c) ? undefined : params.get('id');
-      const limit = Math.min(numberOf(params.get('limit'), 'limit') ?? 50, PAGE_MOST);
+      const limit = limitOf(params, 50);
       return { entries: withBefore(store, store.historyOf(c, id, { limit, cursor: cursorOf(params.get('cursor')) })) };
     },
     activity(params) {
       const store = storeOf(params);
-      const limit = Math.min(numberOf(params.get('limit'), 'limit') ?? 50, PAGE_MOST);
+      const limit = limitOf(params, 50);
       return {
         version: store.version,
         entries: withBefore(store, store.activity({
@@ -232,7 +265,8 @@ export function createInspector({ stores, authorize, sockets, disconnect, onErro
       const q = (params.get('q') ?? '').toLowerCase();
       const all = store.peers();
       const found = q ? all.filter(peer => `${peer.replicaId} ${peer.key ?? ''} ${JSON.stringify(peer.user) ?? ''}`.toLowerCase().includes(q)) : all;
-      return { total: all.length, found: found.length, peers: found.slice(0, LIST_MOST) };
+      const stats = store.stats();
+      return { total: all.length, found: found.length, peers: found.slice(0, LIST_MOST), sessions: stats.sessions, replicas: stats.replicas, sent: stats.sent, epoch: store.epoch };
     },
     // The server's sockets, a page of them: the ones furthest behind first, since those are the ones to look at.
     // `store` narrows them to the sockets that have that store open, `q` to the users whose key has it
@@ -264,12 +298,28 @@ export function createInspector({ stores, authorize, sockets, disconnect, onErro
 
   /** The JSON a change is asked with, or the refusal: a change is taken from the inspector's own page */
   async function bodyOf(request) {
-    // A page of another origin can post a form, but not this: JSON, and a header a form cannot set
+    // A page of another origin can post a form, but not this: JSON, and a header a form cannot set (for a
+    // browser too old to say where its requests come from)
     if (request.headers.get('x-lazy-inspect') !== '1' || !(request.headers.get('content-type') ?? '').startsWith('application/json')) {
       return [null, refusal(400, 'A change is asked for by the inspector\'s own page')];
     }
-    const text = await request.text();
-    if (text.length > BODY_MOST) return [null, refusal(413, 'Too large')];
+    // So much of a body is read and no more: one that says it is larger is not read at all, and one that turns
+    // out to be is let go of where it passes the mark
+    if (Number(request.headers.get('content-length')) > BODY_MOST) return [null, refusal(413, 'Too large')];
+    const chunks = [];
+    let size = 0;
+    const reader = request.body?.getReader();
+    for (let read = await reader?.read(); read && !read.done; read = await reader.read()) {
+      size += read.value.length;
+      if (size > BODY_MOST) {
+        await reader.cancel().catch(() => {});
+        return [null, refusal(413, 'Too large')];
+      }
+      chunks.push(read.value);
+    }
+    const bytes = new Uint8Array(size);
+    chunks.reduce((at, chunk) => (bytes.set(chunk, at), at + chunk.length), 0);
+    const text = new TextDecoder().decode(bytes);
     try {
       const body = JSON.parse(text);
       return body !== null && typeof body === 'object' ? [body, null] : [null, refusal(400, 'Expected a JSON object')];
@@ -283,9 +333,17 @@ export function createInspector({ stores, authorize, sockets, disconnect, onErro
     revert(body, who) {
       if (!Number.isSafeInteger(body.v)) throw new TypeError('A revert names a store, a record and the version to put it back to');
       const store = storeOf(new URLSearchParams({ store: String(body.store) }));
-      const by = who !== null && typeof who === 'object' ? who : typeof who === 'string' ? { id: who } : undefined;
+      // Who is looking, as a key: a string is one, and an object's id. Anything else (a session with no id to
+      // it) is nobody the history should be handed whole
+      const id = who !== null && typeof who === 'object' ? who.id : who;
+      const by = typeof id === 'string' && id ? id : typeof id === 'number' ? String(id) : undefined;
       const landed = store.revert(body.c, store.shape.isSingleton(body.c) ? undefined : body.id, { v: body.v }, { children: body.children !== false, by });
       return { changes: landed, version: store.version };
+    },
+    /** Load a store no client has open, to look at it: what a look alone does not do (see storeOf) */
+    load(body) {
+      const store = storeOf(new URLSearchParams({ store: String(body.store) }), { load: true });
+      return { version: store.version };
     },
     /** Close the sockets of the user with this key: its clients come back and authenticate afresh */
     disconnect(body) {
@@ -309,10 +367,18 @@ export function createInspector({ stores, authorize, sockets, disconnect, onErro
       onError(err);
       allowed = false;
     }
+    // What turns a request away may be the app's own answer: a 401 that asks for credentials, a redirect to
+    // where one signs in
+    if (allowed instanceof Response) return allowed;
     if (!allowed) return new Response('Not allowed', { status: 401, headers: { 'cache-control': 'no-store' } });
     try {
       if (rest === '' && !write) return page(base);
       const name = rest.startsWith('api/') ? rest.slice(4) : null;
+      // What is asked of the inspector is asked by its own page, or by no page at all: a browser says where a
+      // request comes from (Sec-Fetch-Site, which a page cannot set), and one from a page of another site is
+      // not to be had with the credentials the browser adds to it. A program says nothing, and is let by
+      const site = request.headers.get('sec-fetch-site');
+      if (name !== null && site !== null && site !== 'same-origin' && site !== 'none') return refusal(403, 'Asked for from another site');
       if (write) {
         if (name === null || !Object.hasOwn(changes, name)) return refusal(404, 'Not found');
         const [body, refused] = await bodyOf(request);
@@ -324,7 +390,7 @@ export function createInspector({ stores, authorize, sockets, disconnect, onErro
       // What was asked could not be answered as asked (a store that is not, a collection it has not, history
       // that is off) is the asker's to hear; anything else is a fault
       if (err instanceof TypeError) return refusal(400, err.message);
-      if (err?.status === 404) return refusal(404, err.message);
+      if (err?.status === 404) return json({ error: err.message, ...(err.notLoaded ? { notLoaded: true } : {}) }, 404);
       if (/^Nothing is known/.test(err?.message ?? '')) return refusal(409, err.message);
       onError(err);
       return refusal(500, 'Something went wrong');
@@ -337,7 +403,7 @@ export function createInspector({ stores, authorize, sockets, disconnect, onErro
 /** The page: one document, its style and script inline under a nonce, and nothing else allowed to load or run */
 function page(base) {
   const nonce = randomId();
-  const html = PAGE.replaceAll('%NONCE%', nonce).replace('%BASE%', JSON.stringify(base).replaceAll('<', '\\u003c'));
+  const html = PAGE.replaceAll('%NONCE%', nonce).replace('%BASE%', () => JSON.stringify(base).replaceAll('<', '\\u003c'));
   return new Response(html, {
     headers: {
       'content-type': 'text/html; charset=utf-8',
@@ -525,7 +591,7 @@ function changed(change, was) {
 }
 
 let feedBody = null;
-const state = { store: null, tab: 'records', c: null, id: null, q: '', feed: [], feedV: 0, filters: { user: '', collection: '', deleted: false }, live: true, overview: null };
+const state = { store: null, tab: 'records', c: null, id: null, q: '', feed: [], feedAt: null, filters: { user: '', collection: '', deleted: false }, live: true, overview: null };
 
 async function ask(name, params = {}) {
   const query = new URLSearchParams(Object.entries(params).filter(([, value]) => value !== undefined && value !== null && value !== '' && value !== false).map(([key, value]) => [key, value === true ? '1' : String(value)]));
@@ -537,7 +603,7 @@ async function ask(name, params = {}) {
     throw Object.assign(new Error('The server is not answering'), { unreached: true });
   }
   const body = await response.json().catch(() => ({ error: response.statusText }));
-  if (!response.ok) throw new Error(body.error || response.statusText);
+  if (!response.ok) throw Object.assign(new Error(body.error || response.statusText), { notLoaded: body.notLoaded === true });
   return body;
 }
 function note(message) {
@@ -561,21 +627,26 @@ async function panel(node, fn, again) {
   try {
     return await fn();
   } catch (err) {
-    node.replaceChildren(el('section', {}, el('p', { class: 'bad' }, err.message), again && el('button', { on: { click: again } }, 'Try again')));
+    const load = err.notLoaded && el('button', { on: { click: tried(async () => { await post('load', { store: state.store }); await again(); }) } }, 'Load it');
+    node.replaceChildren(el('section', {}, el('p', { class: 'bad' }, err.message), load || (again && el('button', { on: { click: again } }, 'Try again'))));
   } finally {
     node.removeAttribute('aria-busy');
   }
 }
 
 // A question asked in the page, with what the answer will do laid out beneath it: resolves to yes or no
+let unasked = () => {};
 function sure(title, body, yes) {
   return new Promise(resolve => {
     const done = answer => {
       $('ask').hidden = true;
       $('ask').replaceChildren();
       removeEventListener('keydown', key);
+      unasked = () => {};
       resolve(answer);
     };
+    // The page going elsewhere (back, a link) is a no: what was asked about is no longer what is shown
+    unasked = () => done(false);
     const key = event => { if (event.key === 'Escape') done(false); };
     const no = el('button', { class: 'no', on: { click: () => done(false) } }, 'Cancel');
     $('ask').replaceChildren(el('div', { class: 'box', role: 'dialog', 'aria-modal': 'true', 'aria-label': title },
@@ -599,14 +670,20 @@ const TABS = [['records', 'Records'], ['activity', 'Activity'], ['sessions', 'Se
 // Where the page is, kept in its address: a record can be linked to, and the way back is the browser's
 const placed = () => '#' + new URLSearchParams(Object.entries({ store: state.store, tab: state.tab, c: state.tab === 'records' ? state.c : null, id: state.tab === 'records' ? state.id : null }).filter(([, value]) => value !== null && value !== undefined));
 function place() {
-  if (location.hash !== placed() && state.store) history.pushState(null, '', placed());
+  if (location.hash === placed() || !state.store) return;
+  // The address the page was opened at (none, or half of one) is not a place to go back to: the first place
+  // takes its place, and each after it is a step that back undoes
+  if (placedOnce) history.pushState(null, '', placed());
+  else history.replaceState(null, '', placed());
+  placedOnce = true;
 }
+let placedOnce = false;
 function placeFrom() {
   const params = new URLSearchParams(location.hash.slice(1));
   const tab = params.get('tab');
   const changed = params.get('store') !== state.store;
   Object.assign(state, { store: params.get('store') ?? state.store, tab: TABS.some(([name]) => name === tab) ? tab : 'records', c: params.get('c'), id: params.get('id') });
-  if (changed) Object.assign(state, { feed: [], feedV: 0 });
+  if (changed) Object.assign(state, { feed: [], feedAt: null });
   return params.has('store');
 }
 function tabs() {
@@ -623,13 +700,15 @@ const loadStores = tried(async () => {
 });
 
 const pick = tried(async id => {
-  state.store = id;
-  state.c = null;
-  state.id = null;
-  state.feed = [];
-  state.feedV = 0;
+  Object.assign(state, { store: id, c: null, id: null, feed: [], feedAt: null });
   await show();
 });
+
+// The line at the top: what the store is at, from the last look at it
+function top() {
+  const o = state.overview;
+  $('meta').textContent = o ? 'version ' + o.version + ' · ' + o.records + ' records · ' + o.sessions + ' sessions · history ' + (o.history ? 'on' : 'off') : '';
+}
 
 const show = () => panel($('main'), async () => {
   note('');
@@ -638,8 +717,9 @@ const show = () => panel($('main'), async () => {
   place();
   if ($('stores').value !== state.store) $('stores').value = state.store;
   state.overview = await ask('store', { store: state.store });
-  const o = state.overview;
-  $('meta').textContent = 'version ' + o.version + ' · ' + o.records + ' records · ' + o.sessions + ' sessions · history ' + (o.history ? 'on' : 'off');
+  counted = Date.now();
+  uncounted = false;
+  top();
   $('main').className = state.tab === 'records' ? '' : 'wide';
   if (state.tab === 'records') await records();
   else if (state.tab === 'activity') await activity(true);
@@ -727,7 +807,9 @@ const putBack = tried(async (e, v) => {
   // What the record was then is in the entry: as the write left it, or for a deletion as it was just before
   const restoring = e.record === undefined;
   const target = restoring ? e.was : e.record;
-  const now = (await ask('record', { store: state.store, c: e.c, id: e.id ?? undefined })).record;
+  // Of the store the entry was shown in: the page may be elsewhere by the time the answer is given
+  const store = state.store;
+  const now = (await ask('record', { store, c: e.c, id: e.id ?? undefined })).record;
   const differ = differences(now, target);
   const body = [
     el('p', {}, 'Every client of the store sees the change, and it is told in the history as yours.'),
@@ -739,7 +821,8 @@ const putBack = tried(async (e, v) => {
     restoring && now === undefined && el('p', { class: 'dim' }, 'The records its deletion took with it come back too.')
   ];
   if (!await sure((restoring ? 'Restore ' : 'Revert ') + what + ' to version ' + v + '?', body, restoring ? 'Restore' : 'Revert')) return;
-  await post('revert', { store: state.store, c: e.c, id: e.id, v });
+  await post('revert', { store, c: e.c, id: e.id, v });
+  if (state.store !== store) return;
   state.c = e.c;
   state.id = e.id ?? null;
   state.tab = 'records';
@@ -764,7 +847,8 @@ async function activity(fresh) {
   if (fresh) {
     const { entries, version } = await ask('activity', { store: state.store, user: f.user, collection: f.collection, deleted: f.deleted });
     state.feed = entries;
-    state.feedV = version;
+    // Where the feed has read to: its newest entry, or the end of the store's last write where there is none
+    state.feedAt = entries.length ? { v: entries[0].v, n: entries.filter(e => e.v === entries[0].v).reduce((most, e) => Math.max(most, e.n), 0) } : { v: version, n: Number.MAX_SAFE_INTEGER };
   }
   const older = el('button', { on: { click: tried(async () => {
     const last = state.feed[state.feed.length - 1];
@@ -777,20 +861,39 @@ async function activity(fresh) {
 }
 
 // What has landed since the page last looked, oldest first, put at the top
+// How many entries the feed shows: older ones go as newer ones come, from the page as from its memory
+const FEED_MOST = 500;
 const follow = tried(async () => {
-  if (!state.store || state.tab !== 'activity' || !state.live || !state.overview?.history || document.hidden) return;
+  if (!state.store || state.tab !== 'activity' || !state.live || !state.overview?.history || !state.feedAt || document.hidden) return;
   const f = state.filters;
-  const { entries, version } = await ask('activity', { store: state.store, user: f.user, collection: f.collection, deleted: f.deleted, after: state.feedV, oldestFirst: true, limit: 200 });
-  state.feedV = entries.length === 200 ? entries[entries.length - 1].v : version;
+  const asked = { store: state.store, user: f.user, collection: f.collection, deleted: f.deleted };
+  const { entries } = await ask('activity', { ...asked, cursor: state.feedAt.v + '.' + state.feedAt.n, oldestFirst: true, limit: 200 });
+  // The page has gone elsewhere, or is narrowed otherwise, since this was asked: it is not what is shown
+  if (state.tab !== 'activity' || asked.store !== state.store || asked.user !== f.user || asked.collection !== f.collection || asked.deleted !== f.deleted) return;
   if (!entries.length) return;
+  // Read on from the last row, not the last version: a write of several records may be half in this page
+  const last = entries[entries.length - 1];
+  const before = state.feedAt.v;
+  state.feedAt = { v: last.v, n: last.n };
   // Newest first, as the rest: by version, and within a write in the order it wrote
-  const fresh = entries.sort((a, b) => b.v - a.v || a.n - b.n);
+  // The rest of a write the last page ended inside goes beneath what is shown of it, the newer writes above
+  const rest = entries.filter(e => e.v === before).sort((a, b) => a.n - b.n);
+  const fresh = entries.filter(e => e.v !== before).sort((a, b) => b.v - a.v || a.n - b.n);
   const empty = state.feed.length === 0;
+  let begun = 0;
+  while (begun < state.feed.length && state.feed[begun].v === before) begun++;
+  state.feed.splice(begun, 0, ...rest);
   state.feed.unshift(...fresh);
-  state.feed.length = Math.min(state.feed.length, 500);
+  state.feed.length = Math.min(state.feed.length, FEED_MOST);
   // Put above what is shown, which stays as it is: an entry someone has open is not shut under them
-  if (empty || !feedBody?.isConnected) await activity(false);
-  else feedBody.prepend(...fresh.map(e => entry(e, { where: true, revert: true })));
+  if (empty || !feedBody?.isConnected) return activity(false);
+  const made = list => list.map(e => entry(e, { where: true, revert: true }));
+  const after = feedBody.querySelectorAll(':scope > .entry')[begun - 1];
+  if (after) after.after(...made(rest));
+  else feedBody.prepend(...made(rest));
+  feedBody.prepend(...made(fresh));
+  const shown = feedBody.querySelectorAll(':scope > .entry');
+  for (let i = FEED_MOST; i < shown.length; i++) shown[i].remove();
 });
 
 // The line at the top, whatever is shown beneath it
@@ -812,26 +915,40 @@ async function reached() {
   await show();
 }
 
+// When the collections were last counted: on a store that is written all the time, not at every look
+let counted = 0;
+let uncounted = false;
 const glance = async () => {
   if (!state.store || document.hidden) return false;
+  const store = state.store;
   try {
-    const before = state.overview?.version;
-    const o = await ask('store', { store: state.store });
-    state.overview = o;
-    $('meta').textContent = 'version ' + o.version + ' · ' + o.records + ' records · ' + o.sessions + ' sessions · history ' + (o.history ? 'on' : 'off');
-    for (const node of document.querySelectorAll('.ago[data-at]')) node.textContent = ago(Number(node.dataset.at));
+    const g = await ask('glance', { store });
     await reached();
-    if (before === undefined || o.version === before || state.tab !== 'records') return true;
-    // The store has been written since the page last looked: the counts beside the collections, and the record
-    // that is shown, when it is not what it was
+    if (store !== state.store || !state.overview) return true;
+    const written = g.version !== state.overview.version;
+    Object.assign(state.overview, g);
+    top();
+    for (const node of document.querySelectorAll('.ago[data-at]')) node.textContent = ago(Number(node.dataset.at));
+    // The store has been written since the page last looked. The record that is shown, when it is not what it
+    // was; and how many records there are, which costs the server a look at every record's key, and is asked
+    // for no more often than every ten seconds: until then the count is of a moment ago
+    if (written) uncounted = true;
+    const l = looking;
+    if (written && state.tab === 'records' && l?.into.isConnected && l.store === store && l.c === state.c && l.id === state.id) {
+      const r = await ask('record', { store, c: l.c, id: l.id });
+      if (JSON.stringify(r.record) !== l.json && looking === l && store === state.store) await record(l.into, true);
+    }
+    if (!uncounted || Date.now() - counted < 10000 || store !== state.store) return true;
+    counted = Date.now();
+    uncounted = false;
+    const o = await ask('store', { store });
+    if (store !== state.store) return true;
+    state.overview = o;
+    top();
     for (const node of document.querySelectorAll('li.pick[data-c]')) {
       const found = o.collections.find(({ c }) => c === node.dataset.c);
       if (found && !found.singleton) node.lastElementChild.textContent = String(found.records);
     }
-    const l = looking;
-    if (!l?.into.isConnected || l.store !== state.store || l.c !== state.c || l.id !== state.id) return true;
-    const r = await ask('record', { store: l.store, c: l.c, id: l.id });
-    if (JSON.stringify(r.record) !== l.json && looking === l) await record(l.into, true);
     return true;
   } catch (err) {
     if (err.unreached) unreached();
@@ -878,11 +995,11 @@ async function sessions() {
   const rows = people.peers.map(p => el('tr', {}, el('td', { class: 'mono' }, p.replicaId), el('td', { class: 'mono' }, p.key ?? ''), el('td', { class: 'mono' }, brief(p.user, 120)), el('td', { class: 'mono' }, brief(p.data, 120))));
   $('main').replaceChildren(el('section', {},
     el('h2', {}, 'Sessions'),
-    el('p', {}, o.sessions + ' sessions, ' + o.replicas + ' replicas remembered. Epoch ' + o.epoch + '.'),
+    el('p', {}, people.sessions + ' sessions, ' + people.replicas + ' replicas remembered. Epoch ' + people.epoch + '.'),
     el('div', { class: 'row' }, find, el('label', {}, every, ' sockets of every store')),
     people.total
       ? el('div', {}, el('p', { class: 'dim' }, of(people.peers.length, people.found, people.total, 'connected')), el('table', {}, el('thead', {}, el('tr', {}, ['Replica', 'User key', 'User', 'Shares'].map(h => el('th', {}, h)))), el('tbody', {}, rows)))
-      : el('p', { class: 'dim' }, o.sessions ? 'Presence is off on this store: who is connected is not told. Make it with presence: true.' : 'Nobody is connected.'),
+      : el('p', { class: 'dim' }, people.sessions ? 'Presence is off on this store: who is connected is not told. Make it with presence: true.' : 'Nobody is connected.'),
     el('h2', {}, seen.everyStore ? 'Sockets, of every store' : 'Sockets with this store open'),
     !wires.listed
       ? el('p', { class: 'dim' }, 'This server does not tell the inspector of its sockets.')
@@ -890,7 +1007,7 @@ async function sessions() {
         ? el('div', {}, el('p', { class: 'dim' }, of(wires.sockets.length, wires.found, wires.total, 'sockets') + (wires.sockets.length < wires.found ? ', the furthest behind first' : '')), wires.sockets.length ? el('table', {}, el('thead', {}, el('tr', {}, ['User key', 'Stores', 'Open', 'Quiet', 'Unsent', 'Session ends', ''].map(h => el('th', {}, h)))), el('tbody', {}, socketRows)) : null)
         : el('p', { class: 'dim' }, 'No socket is open.'),
     el('h2', {}, 'Sent, by message'),
-    el('table', {}, el('thead', {}, el('tr', {}, ['Message', 'Count', 'Bytes'].map(h => el('th', {}, h)))), el('tbody', {}, Object.entries(o.sent).map(([type, { messages, bytes }]) => el('tr', {}, el('td', { class: 'mono' }, type), el('td', {}, String(messages)), el('td', {}, String(bytes))))))));
+    el('table', {}, el('thead', {}, el('tr', {}, ['Message', 'Count', 'Bytes'].map(h => el('th', {}, h)))), el('tbody', {}, Object.entries(people.sent).map(([type, { messages, bytes }]) => el('tr', {}, el('td', { class: 'mono' }, type), el('td', {}, String(messages)), el('td', {}, String(bytes))))))));
 }
 
 // The address changed under the page (back, forward, a link, a hash typed in): it goes where the address says.
@@ -898,6 +1015,7 @@ async function sessions() {
 // the page is already is acted on
 const moved = () => {
   if (location.hash === placed()) return;
+  unasked();
   placeFrom();
   show();
 };
@@ -906,7 +1024,17 @@ addEventListener('popstate', moved);
 placeFrom();
 $('stores').addEventListener('change', () => pick($('stores').value));
 $('storeId').addEventListener('change', () => pick($('storeId').value.trim()));
-setInterval(async () => { if (Date.now() >= down.until && await glance()) await follow(); }, 2000);
+// One look at a time: a server that takes longer than the two seconds to answer is not asked again meanwhile
+let lookingNow = false;
+setInterval(async () => {
+  if (lookingNow || Date.now() < down.until) return;
+  lookingNow = true;
+  try {
+    if (await glance()) await follow();
+  } finally {
+    lookingNow = false;
+  }
+}, 2000);
 loadStores();
 </script>
 </body>

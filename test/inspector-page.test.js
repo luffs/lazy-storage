@@ -8,6 +8,17 @@ import { createStore, createStores, createInspector } from '../src/server/index.
 const SHAPE = { initial: { tasks: {}, subtasks: {}, settings: { theme: 'light' } }, singletons: ['settings'], parents: { subtasks: { taskId: 'tasks' } } };
 const BASE = '/ws/inspect';
 const placeAgain = () => dispatchEvent(new Event('popstate'));
+/** Run with a clock that is moved by hand: `later(ms)` moves it on */
+async function clocked(fn) {
+  const real = Date.now;
+  let now = real();
+  Date.now = () => now;
+  try {
+    return await fn(ms => { now += ms; });
+  } finally {
+    Date.now = real;
+  }
+}
 // The page is quiet when nothing it asked is unanswered, and has stayed so for a few turns of the event loop
 let unanswered = 0;
 const settle = async () => {
@@ -31,12 +42,14 @@ async function open({ hash = '', sockets, disconnect } = {}) {
   const store = stores.get('team-1');
   const inspector = createInspector({ stores, authorize: () => ({ id: 'admin' }), sockets, disconnect });
   const asked = [];
-  const wire = { cut: false };
+  // `cut`: the server is not reached. `hold`: a promise every request waits on before it is answered
+  const wire = { cut: false, hold: null };
   globalThis.fetch = async (url, init) => {
     if (wire.cut) throw new TypeError('fetch failed');
     asked.push(`${init?.method ?? 'GET'} ${url}`);
     unanswered++;
     try {
+      await wire.hold;
       return await inspector.handle(new native.Request(new URL(url, 'http://localhost'), init), BASE);
     } finally {
       unanswered--;
@@ -54,6 +67,8 @@ async function open({ hash = '', sockets, disconnect } = {}) {
     asked,
     wire,
     tick: async () => { tick(); await settle(); },
+    /** What the timer does, not waited for: for two looks that overlap */
+    tickNow: () => tick(),
     run: async () => {
       const add = globalThis.addEventListener;
       globalThis.addEventListener = (type, fn, ...rest) => { listening.push([type, fn]); return add.call(globalThis, type, fn, ...rest); };
@@ -161,7 +176,7 @@ test('the page opens where its address says, follows the activity as it lands, a
   assert.match(feed()[0], /v2 · bob \(r2\).*deleted.*Restore/);
   assert.match(feed()[1], /subtasks \/ s.*deleted/);
   assert.ok(open1.isConnected && open1.open);
-  assert.match(text('#meta'), /version 2 · 0 records/);
+  assert.match(text('#meta'), /version 2 · /, 'the version as it is');
 
   await click(byText('main .entry button.danger', 'Restore'));
   assert.equal(asking().title, 'Restore tasks / k to version 1?');
@@ -243,12 +258,20 @@ test('what the server refuses is said on the page, and a search that has more to
   history.pushState(null, '', `${BASE}#store=other&tab=records`);
   dispatchEvent(new Event('popstate'));
   await settle();
-  assert.match(text('main'), /No store "other"/, 'said where the store would have been');
-  // And a way to try again, which goes where the address then says
-  history.replaceState(null, '', `${BASE}#store=team-1&tab=records`);
+  // A store no client has open is not loaded for a look: the page says so where the store would have been,
+  // and loads it when it is asked to
+  assert.match(text('main'), /Store "other" is not loaded: no client has it open/);
+  assert.ok(!page.stores.has('other'));
+  await click(byText('main button', 'Load it'));
+  assert.equal(text('#note'), 'No store "other"', 'one the server has not, it says so of');
+  history.pushState(null, '', `${BASE}#store=team-2&tab=records`);
   placeAgain();
-  await click(byText('main button', 'Try again'));
-  assert.ok(byText('main li.pick span', 'tasks'));
+  await settle();
+  assert.ok(!page.stores.has('team-2'), 'a look has not loaded it');
+  await click(byText('main button', 'Load it'));
+  assert.ok(page.stores.has('team-2'));
+  assert.ok(byText('main li.pick span', 'tasks'), 'and it is shown');
+  assert.ok(page.asked.includes(`POST ${BASE}/api/load`));
 });
 
 test('a record that is written while it is looked at is shown as it is now; nested values fold, and a value is copied as JSON', async () => {
@@ -277,7 +300,13 @@ test('a record that is written while it is looked at is shown as it is now; nest
   assert.equal(JSON.parse(tree().dataset.json).done, true);
   assert.ok(tree().classList.contains('changed'), 'and marked as changed');
   assert.equal(document.querySelectorAll('main section:last-child .entry').length, 2, 'with the write in its history');
-  assert.equal(document.querySelector('li.pick[data-c="tasks"]').lastElementChild.textContent, '2', 'and the collection\'s count');
+  assert.equal(document.querySelector('li.pick[data-c="tasks"]').lastElementChild.textContent, '1', 'the count is of a moment ago: to count is to look at every record');
+  await clocked(async later => {
+    later(11_000);
+    await page.tick();
+    assert.equal(document.querySelector('li.pick[data-c="tasks"]').lastElementChild.textContent, '2', 'and is counted again in a while');
+    assert.match(text('#meta'), /version 2 · 2 records/);
+  });
   // A write of the value a field had already is said as that, once
   page.store.patch({ tasks: { k: { title: 'Milk' } } });
   await page.tick();
@@ -349,4 +378,117 @@ test('a part of the page that cannot be filled says why in its own place, and wh
   await answer(true);
   assert.equal(text('#note'), 'the store would not');
   assert.deepEqual(valueOf('main section:last-child .json'), { title: 'Oat milk' });
+});
+
+// --- Found in review ---------------------------------------------------------------------------
+
+test('the activity is followed row by row: a write of several records that a page of two hundred ends in the middle of is told whole', async () => {
+  const page = await open({ hash: '#store=team-1&tab=activity' });
+  await page.run();
+  for (let i = 0; i < 199; i++) page.store.patch({ tasks: { [`t${i}`]: { n: i } } });
+  page.store.patch({ tasks: { a1: { n: 1 }, a2: { n: 2 }, a3: { n: 3 } } });   // rows 200, 201 and 202
+  const told = () => [...document.querySelectorAll('main .entry header button:not(.danger)')].map(button => button.textContent);
+  await page.tick();
+  assert.equal(told().length, 201, 'two hundred, above the one entry that was there');
+  assert.ok(told().includes('tasks / a1') && !told().includes('tasks / a2'), 'the page of two hundred ends inside the write');
+  await page.tick();
+  assert.deepEqual(told().slice(0, 3), ['tasks / a1', 'tasks / a2', 'tasks / a3'], 'and the rest of it comes with the next, in its place');
+  assert.equal(told().length, 203);
+  assert.equal(new Set(told()).size, 203, 'none told twice');
+});
+
+test('the feed keeps five hundred entries on the page, not only in its memory', async () => {
+  const page = await open({ hash: '#store=team-1&tab=activity' });
+  await page.run();
+  for (let round = 0; round < 4; round++) {
+    for (let i = 0; i < 180; i++) page.store.patch({ tasks: { [`r${round}-${i}`]: { n: i } } });
+    await page.tick();
+  }
+  const shown = document.querySelectorAll('main .entry');
+  assert.equal(shown.length, 500);
+  assert.match(shown[0].textContent, /tasks \/ r3-179/, 'the newest at the top');
+  assert.ok(byText('main button', 'Older'), 'and the way to what is older is still there');
+});
+
+test('two looks that overlap tell an entry once', async () => {
+  const page = await open({ hash: '#store=team-1&tab=activity' });
+  await page.run();
+  page.store.patch({ tasks: { k: { n: 1 } } });
+  // The server takes its time: the timer comes round again before it has answered
+  let release;
+  page.wire.hold = new Promise(resolve => { release = resolve; });
+  page.tickNow();
+  page.tickNow();
+  page.tickNow();
+  page.wire.hold = null;
+  release();
+  await settle();
+  assert.equal([...document.querySelectorAll('main .entry')].filter(entry => /tasks \/ k/.test(entry.textContent)).length, 1);
+});
+
+test('opened at its plain address, the page is left by going back; a place within it is a step back undoes', async () => {
+  const page = await open();
+  page.store.patch({ tasks: { k: { n: 1 } } });
+  const steps = history.length;
+  await page.run();
+  assert.equal(location.hash, '#store=team-1&tab=records');
+  assert.equal(history.length, steps, 'the first place takes the place of the address it was opened at');
+  await click(byText('main li.pick span', 'k').parentElement);
+  assert.equal(history.length, steps + 1, 'and the next is a step');
+  await click(byText('#tabs button', 'Activity'));
+  assert.equal(history.length, steps + 2);
+});
+
+test('a question that is open is taken back when the page goes elsewhere, and a revert is of the store it was asked in', async () => {
+  const page = await open({ hash: '#store=team-1&tab=records&c=settings' });
+  const other = page.stores.get('team-2');
+  for (const store of [page.store, other]) {
+    store.patch({ settings: { theme: 'dark' } });
+    store.patch({ settings: { theme: 'light' } });
+  }
+  await page.run();
+  await click(document.querySelectorAll('main section:last-child .entry')[1].querySelector('button.danger'));
+  assert.equal(asking().title, 'Revert settings to version 1?');
+  // Back, or a link, while it is open: the page is on the other store, whose settings are at the same versions
+  history.pushState(null, '', `${BASE}#store=team-2&tab=records&c=settings`);
+  placeAgain();
+  await settle();
+  assert.equal(asking(), null, 'the question is not left open over another store');
+  assert.ok(!page.asked.includes(`POST ${BASE}/api/revert`));
+  assert.deepEqual([page.store.state.settings.theme, other.state.settings.theme], ['light', 'light']);
+
+  // Answered while the page is being taken elsewhere: the revert is of the store it was asked in
+  history.pushState(null, '', `${BASE}#store=team-1&tab=records&c=settings`);
+  placeAgain();
+  await settle();
+  await click(document.querySelectorAll('main section:last-child .entry')[1].querySelector('button.danger'));
+  let release;
+  page.wire.hold = new Promise(resolve => { release = resolve; });
+  document.querySelector('#ask button.yes').click();
+  document.getElementById('stores').value = 'team-2';
+  document.getElementById('stores').dispatchEvent(new Event('change'));
+  page.wire.hold = null;
+  release();
+  await settle();
+  assert.deepEqual([page.store.state.settings.theme, other.state.settings.theme], ['dark', 'light'], 'team-1 is put back, and team-2 is left as it is');
+  assert.equal(document.getElementById('stores').value, 'team-2', 'and the page stays where it was taken');
+});
+
+test('what comes back for a store the page has left is not shown in the one it is on', async () => {
+  const page = await open({ hash: '#store=team-1&tab=activity' });
+  const other = page.stores.get('team-2');
+  await page.run();
+  page.store.patch({ tasks: { one: { n: 1 } } });
+  other.patch({ tasks: { two: { n: 2 } } });
+  let release;
+  page.wire.hold = new Promise(resolve => { release = resolve; });
+  page.tickNow();                     // asks after team-1
+  history.pushState(null, '', `${BASE}#store=team-2&tab=activity`);
+  placeAgain();
+  page.wire.hold = null;
+  release();
+  await settle();
+  const told = [...document.querySelectorAll('main .entry header button:not(.danger)')].map(button => button.textContent);
+  assert.ok(told.includes('tasks / two') && !told.includes('tasks / one'), JSON.stringify(told));
+  assert.match(text('#meta'), new RegExp(`version ${other.version} `));
 });

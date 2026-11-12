@@ -225,7 +225,7 @@ export function createHandlers({
     if (closing) return new Response('Server shutting down', { status: 503, headers: { 'retry-after': '1' } });
     if (inspected) {
       try {
-        return await inspect.handle(req, inspectPath);
+        return (await inspect.handle(req, inspectPath)) ?? new Response('Not found', { status: 404 });
       } catch (err) {
         onError(err);
         return new Response('Something went wrong', { status: 500 });

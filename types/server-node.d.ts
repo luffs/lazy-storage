@@ -6,8 +6,7 @@ import type { CloseOptions, HandlerOptions, SocketInfo, SocketStats } from './se
 export type { CloseOptions, HandlerOptions, SocketInfo, SocketStats } from './server-bun.js';
 
 /** A Web Request for an incoming Node request, headers included; what `authenticate` receives. With `body`, a promise of one with its body (up to 64 KB) */
-export function toRequest(req: IncomingMessage): Request;
-export function toRequest(req: IncomingMessage, options: { body: true }): Promise<Request>;
+export function toRequest(req: IncomingMessage, options?: { body?: boolean }): Request;
 
 export interface NodeHandlers {
   /** Handle an http server's 'upgrade' event; resolves to false when the URL is not ours */

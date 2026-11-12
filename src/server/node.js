@@ -15,6 +15,7 @@
 //   const lazy = createHandlers({ stores, authenticate, authorize });
 //   httpServer.on('upgrade', (req, socket, head) => { lazy.upgrade(req, socket, head); });
 import { createServer } from 'node:http';
+import { Readable } from 'node:stream';
 import { WebSocketServer } from 'ws';
 import { LazyWatch } from 'lazy-watch';
 import { createHub } from './hub.js';
@@ -24,9 +25,27 @@ import { snapshotOptions, snapshotId, serveSnapshot } from './snapshot.js';
 import { createInspector } from './inspector.js';
 
 /**
+ * The address a request was made to, for the Web Request that stands for
+ * it. The Host header is the client's to write, and with the request's
+ * target it has to make an address that parses, and whose path is the one
+ * the request asked for and the adapter routed by: one that does not
+ * (`a:99999`, or `x/y?`, which would move the path) is left out, and the
+ * address is the target's on localhost
+ */
+function addressOf(req) {
+  const local = `http://localhost${req.url}`;
+  try {
+    const asked = new URL(`http://${req.headers.host ?? 'localhost'}${req.url}`);
+    return asked.pathname === new URL(local).pathname ? asked.href : local;
+  } catch {
+    return local;
+  }
+}
+
+/**
  * A Web Request for an incoming Node request, headers included. With
- * `body` its body too (a promise of the Request then): what a POST to the
- * inspector carries, read up to 64 KB and no further
+ * `body` its body too, for a POST: read as the Request's is read and not
+ * before, so a request that is turned away has none of it read
  */
 export function toRequest(req, { body = false } = {}) {
   const headers = new Headers();
@@ -34,25 +53,9 @@ export function toRequest(req, { body = false } = {}) {
     if (Array.isArray(value)) for (const v of value) headers.append(name, v);
     else if (value !== undefined) headers.set(name, value);
   }
-  const url = `http://${req.headers.host ?? 'localhost'}${req.url}`;
-  if (!body || req.method === 'GET' || req.method === 'HEAD') {
-    const request = new Request(url, { method: req.method, headers });
-    return body ? Promise.resolve(request) : request;
-  }
-  return new Promise((resolve, reject) => {
-    const chunks = [];
-    let size = 0;
-    req.on('data', chunk => {
-      size += chunk.length;
-      if (size <= BODY_MOST) chunks.push(chunk);
-    });
-    req.on('error', reject);
-    req.on('end', () => resolve(new Request(url, { method: req.method, headers, body: size > BODY_MOST ? 'x'.repeat(BODY_MOST + 1) : Buffer.concat(chunks) })));
-  });
+  if (!body || req.method !== 'POST') return new Request(addressOf(req), { method: req.method, headers });
+  return new Request(addressOf(req), { method: req.method, headers, body: Readable.toWeb(req), duplex: 'half' });
 }
-
-/** The most of a request's body that is read (see toRequest) */
-const BODY_MOST = 64 * 1024;
 
 /** Answer an upgrade request with a plain HTTP response and close the socket */
 function refuse(socket, status, text) {
@@ -307,10 +310,18 @@ export function createHandlers({
       response = new Response('Server shutting down', { status: 503, headers: { 'retry-after': '1' } });
     } else if (inspected) {
       try {
-        response = await inspect.handle(await toRequest(req, { body: true }), inspectPath);
+        response = await inspect.handle(toRequest(req, { body: true }), inspectPath);
       } catch (err) {
         onError(err);
         response = new Response('Something went wrong', { status: 500 });
+      }
+      // Routed here by its path and answered by it: an answer of none is a fault, not a crash
+      response ??= new Response('Not found', { status: 404 });
+      // A body the inspector did not read (the request was turned away, or was too large) is not waited for: the
+      // connection goes with the answer, where it would otherwise be held until the client had sent it all
+      if (!req.complete) {
+        response.headers.set('connection', 'close');
+        res.once('finish', () => req.destroy());
       }
     } else {
       try {

@@ -45,7 +45,7 @@ export interface HandlerOptions {
    * sessions, for whom `authorize(request, { write })` lets in (`write`: a revert, a disconnect); answer with the user to have a
    * revert told as theirs. No inspector without it
    */
-  inspector?: { authorize: (request: Request, context: { write: boolean }) => unknown };
+  inspector?: { authorize: (request: Request, context: { write: boolean }) => unknown | Response | Promise<unknown | Response> };
   /**
    * Close a socket whose unsent output passes this many bytes, with code
    * 1013; the client reconnects and catches up with a delta. Default 16 MB.

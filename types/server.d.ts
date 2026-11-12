@@ -316,7 +316,7 @@ export interface Store<S extends object = any> {
    * `by` is the user the server makes the write for (an administrator), told with it in the history
    */
   revert(c: string, id: string, when: When, options?: { children?: boolean; by?: unknown }): Change[];
-  revert(singleton: string, when: When): Change[];
+  revert(singleton: string, when: When, options?: { by?: unknown }): Change[];
   export(): StoreDocument;
   restore(doc: StorageDocument): void;
   flush(): void;
@@ -412,7 +412,7 @@ export function snapshotResponse(store: Store, request: Request, options?: { ori
  * or a throw, turns the request away. An answer that is a user (an object, or a string for its key) is who a revert
  * is told as in the store's history
  */
-export type InspectorAuthorize = (request: Request, context: { write: boolean }) => unknown;
+export type InspectorAuthorize = (request: Request, context: { write: boolean }) => unknown | Response | Promise<unknown | Response>;
 
 export interface InspectorOptions {
   stores: StoreRegistry | StoreResolver;

@@ -129,7 +129,7 @@ itself, so it can be reverted. They differ in who writes:
 
 | | `store.revert` | `db.revert` |
 |---|---|---|
-| Who writes | The server, as `store.patch` does; `{ by: user }` as a fourth argument tells it in the history as that user's, made through the server | The client: it reads the record as it was and writes it to `db.state` |
+| Who writes | The server, as `store.patch` does; `{ by: user }` as a fourth argument (the third for a singleton, which has no id) tells it in the history as that user's, made through the server: a string is the user's key as it is, an object is keyed as the store keys its users | The client: it reads the record as it was and writes it to `db.state` |
 | [Rules](auth.md#who-may-write-what) | Not judged, as no write of the server's is | Judged, as any edit of that user's |
 | A deleted record | Made again, and with it the children its deletion took (and theirs), each as it was just before, in the same write; `{ children: false }` as a fourth argument makes the record alone | Made again, alone |
 | A record that was not there then | Deleted, its children with it | Deleted |

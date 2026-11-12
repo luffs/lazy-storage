@@ -53,13 +53,26 @@ not let in is answered 401.
 `authorize(request, { write })` is given the Web `Request` and says
 whether it may look; a falsy answer, or a throw (which is reported to
 `onError`), turns it away, and it may answer through a promise. `write`
-is true for a request that changes something, a revert or a disconnect:
-answer by it to let someone look who may not change.
+is true for a request that changes something (a revert, a disconnect,
+loading a store): answer by it to let someone look who may not change.
+A request that is turned away has none of its body read.
 
-What it answers is also who is looking. Answer with the user (an object
-with an `id`, or a string) and a revert is told in the store's history
-as theirs, made through the server; answer `true` and it is told as the
-server's own, with nobody to it.
+It may also answer with a `Response` of its own, which is sent as it
+is: a 401 with `WWW-Authenticate` for the browser to ask for HTTP basic
+credentials, or a redirect to where one signs in.
+
+```js
+authorize: request => request.headers.get('authorization') === expected
+  || new Response('Sign in', { status: 401, headers: { 'www-authenticate': 'Basic realm="inspector"' } })
+```
+
+What it answers is also who is looking. Answer with the user's key (a
+string) or an object with an `id` (a string or a number), and a revert
+is told in the store's history as that key's, made through the server;
+answer anything else that is truthy and it is told as the server's own,
+with nobody to it. The key is written as it is given, whatever
+`presence.key` the store has: answer with what the store's history
+calls its users.
 
 ```js
 inspector: {
@@ -83,9 +96,15 @@ What else it does to stay an administrator's page:
   page frame it.
 - What it shows it writes as text, never as markup: a record is whatever
   a client wrote.
-- A change is taken as JSON with a header of the page's own, which a
-  form on another site cannot send, and is asked of `authorize` with
-  `write: true`.
+- What a page of another site asks is refused, to read as to change:
+  a browser says where a request comes from (`Sec-Fetch-Site`, which a
+  page cannot set), so its credentials cannot be borrowed with a link,
+  an image or a form. A program that says nothing, `curl` or a script,
+  is asked of `authorize` like any other.
+- A change is taken as JSON of at most 64 KB, with a header of the
+  page's own (`x-lazy-inspect: 1`) that a form cannot send, for a
+  browser too old to say where its requests come from; and it is asked
+  of `authorize` with `write: true`.
 - Nothing is cached.
 
 ## What it needs of a store
@@ -99,7 +118,9 @@ page counts the sessions and names nobody.
 
 The stores it lists are the ones live in a registry (`createStores`); a
 server given a resolver function has no list, and the page takes a store
-by its id. Looking at a store loads it, as a client opening it would.
+by its id. To look is not to load: a store in a registry that no client
+has open is not made by a request to look at it, the page says it is not
+loaded, and its "Load it" loads it, which is a change (`write: true`).
 
 A request costs the server what it looks at, so each is bounded: a page
 of records is a hundred, read from the collection's ids sorted once per
@@ -109,7 +130,12 @@ server's sockets, and of who is connected to a store, the page is told a
 hundred and how many there are in all: the sockets furthest behind
 first, those with the store open unless every store's are asked for,
 and narrowed to a user by what is typed. What the page asks every two
-seconds, to keep its top line, carries none of them.
+seconds, to keep its top line, is the store's version and how many
+sessions it has: it counts nothing and reads no record. The counts
+beside the collections are made once for a version of the store, and
+asked for again no more often than every ten seconds; one look waits
+for the one before it; and the activity keeps the newest five hundred
+entries on the page.
 
 It is a view for a person, not an interface to build on: for a program,
 the same things are `store.state`, `store.historyOf`, `store.activity`

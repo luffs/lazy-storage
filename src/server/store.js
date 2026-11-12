@@ -581,7 +581,8 @@ export function createStore({
       if (!changesOf.has(key)) changesOf.set(key, []);
       changesOf.get(key).push(change);
     }
-    const by = ownerKey(user) ?? null;
+    // A write of the server's made for someone (see run): who, by a user as the store keys users, or by the key itself
+    const by = replicaId === 'server' && typeof user === 'string' ? user : ownerKey(user) ?? null;
     // When it landed: the store's time, held to what the last row said, so that it never goes back from one version
     // to the next whatever the wall clock does. A write's own stamp does: an edit made offline lands with an old one
     landedAt = Math.max(landedAt, clock.time);
@@ -1611,9 +1612,11 @@ export function createStore({
      * nothing is known of the record then, and what a patch throws (a form its schema no longer takes).
      * Returns the changes that landed
      */
-    revert(c, id, when, { children = true, by } = {}) {
+    revert(c, id, when, options) {
       alive('write to');
-      if (shape.isSingleton(c) && when === undefined) [id, when] = [undefined, id];
+      // A singleton has no id: what stands in its place is when, and what follows it the options
+      if (shape.isSingleton(c) && id !== undefined) [id, when, options] = [undefined, id, when];
+      const { children = true, by } = options ?? {};
       const row = rowAt(c, id, when);
       if (!row && !known(when)) throw new Error(`Nothing is known of ${shape.full(c, id).join('/')} then: it is before the store kept its history`);
       const current = doc.get(c, id);
