@@ -112,6 +112,9 @@ function presenceOptions(presence) {
  * @param {Object} [options.storage]
  * @param {boolean} [options.groupCommit=true]
  * @param {Function[]} [options.migrations] - `(state, { store }) => diff` each, run once, in order
+ * @param {boolean|{ keep?: number }} [options.history=false] - keep every record as each write left it, with when
+ *   and who, for `store.history`, `store.recordAt` and `store.revert`; `keep` (ms) forgets what is older, but for
+ *   the last form of each record before it. The storage has to keep history (the memory and SQLite adapters do)
  * @param {boolean|Object} [options.presence=false]
  * @param {(error: any) => void} [options.onError]
  * @param {() => number} [options.now]
@@ -134,6 +137,7 @@ export function createStore({
   storage = memoryStorage(),
   groupCommit = true,
   migrations = [],
+  history: historyOption = false,
   presence: presenceOption = false,
   onError = err => console.error('lazy-storage:', err),
   now
@@ -158,6 +162,13 @@ export function createStore({
   const judgeRules = createRules(shape, { ...rules, ...locked }, readOnly === true, checkRecord);
   const judgeSchemas = createRules(shape, {}, false, checkRecord);
   if (!Array.isArray(migrations) || migrations.some(m => typeof m !== 'function')) throw new TypeError('migrations must be an array of functions');
+  // History (see landed, and the history section below): null when off, else how long it is kept
+  if (historyOption !== false && historyOption !== true && !Utils.isPlainObject(historyOption)) throw new TypeError('history must be true, false, or { keep }');
+  const keeps = historyOption === false ? null : { keep: historyOption === true ? Infinity : historyOption.keep ?? Infinity };
+  if (keeps && !(keeps.keep > 0)) throw new TypeError('history.keep must be a positive number of milliseconds');
+  if (keeps && ['history', 'historyOfVersion', 'historyCount', 'pruneHistory'].some(method => typeof storage[method] !== 'function')) {
+    throw new TypeError("This store's storage keeps no history (it has no history(query), historyOfVersion(v), historyCount() and pruneHistory(before))");
+  }
   const time = now ?? Date.now;
   const saved = storage.load();
   const doc = saved ? docFromRecords(shape, saved.records) : createDoc(shape);
@@ -536,6 +547,24 @@ export function createStore({
     return { upserts, deletes };
   }
 
+  /**
+   * A history row per record the changes wrote: the record as they left it
+   * (null: deleted) and the changes to it, both as JSON, encoded now. A
+   * commit is stored at the end of the turn, and by then a later write of
+   * the same turn may have changed the record again: its row is its own
+   */
+  function historyOf(applied, { upserts, deletes }, ts, replicaId, user) {
+    const changesOf = new Map();
+    for (const change of applied) {
+      const key = shape.recordKey(change.c, change.id);
+      if (!changesOf.has(key)) changesOf.set(key, []);
+      changesOf.get(key).push(change);
+    }
+    const by = replicaId === 'server' ? null : ownerKey(user) ?? null;
+    const row = (c, id, data) => ({ c, id: id ?? null, v: version, ts, user: by, replica: replicaId, data, changes: JSON.stringify(changesOf.get(shape.recordKey(c, id ?? undefined)) ?? []) });
+    return [...upserts.map(([c, id, record]) => row(c, id, JSON.stringify(record))), ...deletes.map(([c, id]) => row(c, id, null))];
+  }
+
   function assertOp(op) {
     if (!Utils.isPlainObject(op)) throw new RefusedError('invalid', 'An op must be an object');
     if (typeof op.replica !== 'string' || !op.replica) throw new RefusedError('invalid', 'op.replica must be a string');
@@ -553,7 +582,14 @@ export function createStore({
       const entry = { v: version, ts, changes: applied };
       log.push(entry);
       if (log.length > deltaLog) log.splice(0, log.length - deltaLog);
-      commit({ ...rowsOf(applied), replica: replicaEntry ? { id: replicaId, ...replicaEntry } : undefined, log: entry, logFloor: log[0]?.v ?? version });
+      const rows = rowsOf(applied);
+      commit({
+        ...rows,
+        replica: replicaEntry ? { id: replicaId, ...replicaEntry } : undefined,
+        log: entry,
+        logFloor: log[0]?.v ?? version,
+        ...(keeps ? { history: historyOf(applied, rows, ts, replicaId, user) } : {})
+      });
       broadcast({ t: 'patch', changes: applied, v: version, ts });
       // Heard on the next microtask, as a batch is: a listener that writes (closes a session, patches) does so
       // after the write that set it off has finished, not in the middle of it
@@ -709,6 +745,10 @@ export function createStore({
 
   function compact() {
     lastCompaction = time();
+    if (keeps && Number.isFinite(keeps.keep)) {
+      // What is pending is stored first: a row it holds may be the one a record's history is pruned back to
+      if (commitNow()) storage.pruneHistory(lastCompaction - keeps.keep);
+    }
     if (!Number.isFinite(retention)) return { deletions: 0, replicas: 0 };
     const cutoff = lastCompaction - retention;
     const touched = doc.prune(cutoff);
@@ -729,7 +769,109 @@ export function createStore({
   }
 
   function maybeCompact() {
-    if (Number.isFinite(retention) && time() - lastCompaction >= compactEvery) compact();
+    if ((Number.isFinite(retention) || (keeps && Number.isFinite(keeps.keep))) && time() - lastCompaction >= compactEvery) compact();
+  }
+
+  // --- History ----------------------------------------------------------------------------
+  //
+  // With `history` on, every write leaves a row per record it wrote: the
+  // record as the write left it, the changes to it, when (the store's
+  // clock and version) and who (the replica, and its user's key). The
+  // storage keeps the rows; the store asks it for a record's, newest
+  // first. A store that already holds records when history is first
+  // turned on writes a row for each as it stands (`baseline`), so a record
+  // nobody has written since still has a form to be asked for; before that
+  // row nothing is known.
+
+  /** `when` as the storage is asked: { v } a version, { ts } or a number or a Date a time on the store's clock; nothing: now */
+  function upTo(when) {
+    if (when === undefined) return {};
+    const ts = Utils.isPlainObject(when) ? when.ts : when;
+    if (Utils.isPlainObject(when) && Number.isSafeInteger(when.v)) return { upToV: when.v };
+    if ((typeof ts === 'number' || ts instanceof Date) && Number.isFinite(Number(ts))) return { upToTs: Number(ts) };
+    throw new TypeError('When is a time (a number of milliseconds, a Date, { ts }) or a version ({ v })');
+  }
+
+  function historyRows(c, id, query) {
+    if (!keeps) throw new TypeError('History is off on this store: make it with history: true');
+    if (!shape.has(c)) throw new TypeError(`"${c}" is not a collection or singleton of this store`);
+    if (shape.isCollection(c) && (typeof id !== 'string' || !id)) throw new TypeError(`A record of "${c}" is named by its id`);
+    commitNow();
+    return storage.history({ c, id: shape.isSingleton(c) ? null : id, ...query });
+  }
+
+  const entryOf = row => ({
+    v: row.v,
+    ts: row.ts,
+    replicaId: row.replica,
+    ...(row.user === null || row.user === undefined ? {} : { user: row.user }),
+    changes: JSON.parse(row.changes),
+    record: row.data === null ? undefined : JSON.parse(row.data)
+  });
+
+  /** Whether a change is at, above or beneath a path in its record */
+  const touches = (change, path) => {
+    const at = change.path ?? [];
+    for (let i = 0; i < Math.min(at.length, path.length); i++) if (at[i] !== path[i]) return false;
+    return true;
+  };
+
+  /**
+   * The records a record's deletion took with it, as changes that make
+   * them again: its children, theirs, and so on, each as it was just before
+   * (they are not asked to go back in time, only to come back). A deletion
+   * and what it cascaded to are one write, so they are the deletions of
+   * that version whose record named, as its parent, one being made again:
+   * another record deleted by the same write, but no child of it, stays
+   * deleted. One made again since is left as it is
+   */
+  function takenWith(c, id) {
+    const [last] = storage.history({ c, id, limit: 1 });
+    if (!last || last.data !== null || !shape.hasParents) return [];
+    const back = new Set([shape.recordKey(c, id)]);
+    const gone = [];
+    for (const row of storage.historyOfVersion(last.v)) {
+      if (row.data !== null || row.id === null || !shape.parentsOf(row.c).length || doc.get(row.c, row.id) !== undefined) continue;
+      const [before] = storage.history({ c: row.c, id: row.id, upToV: last.v - 1, limit: 1 });
+      if (before && before.data !== null) gone.push({ c: row.c, id: row.id, was: JSON.parse(before.data) });
+    }
+    const changes = [];
+    // A child's child comes back once the child is among those coming back: round by round until none is added
+    for (let added = true; added;) {
+      added = false;
+      for (const record of gone) {
+        const key = shape.recordKey(record.c, record.id);
+        if (back.has(key) || !Utils.isPlainObject(record.was)) continue;
+        const parent = shape.parentsOf(record.c).some(({ field, parent: pc }) => typeof record.was[field] === 'string' && back.has(shape.recordKey(pc, record.was[field])));
+        if (!parent) continue;
+        back.add(key);
+        changes.push(changeFor({ c: record.c, id: record.id, path: [] }, record.was));
+        added = true;
+      }
+    }
+    return changes;
+  }
+
+  /**
+   * What takes a record from `current` to `target`, as a diff a put merges
+   * in: a field `target` lacks is null (deleted), an object both have is
+   * gone into, anything else is written whole (a register and a list
+   * always are)
+   */
+  function diffTo(c, id, current, target, path = []) {
+    const diff = {};
+    for (const key of Object.keys(current)) if (!Object.hasOwn(target, key)) diff[key] = null;
+    for (const [key, value] of Object.entries(target)) {
+      const here = [...path, key];
+      const both = Utils.isPlainObject(value) && Utils.isPlainObject(current[key]) && !shape.isRegister(c, id, here);
+      if (both) {
+        const inner = diffTo(c, id, current[key], value, here);
+        if (Object.keys(inner).length) diff[key] = inner;
+      } else if (JSON.stringify(current[key]) !== JSON.stringify(value)) {
+        diff[key] = value;
+      }
+    }
+    return diff;
   }
 
   // --- Answers ----------------------------------------------------------------------------
@@ -1207,6 +1349,62 @@ export function createStore({
       for (const [type, entry] of Object.entries(sent)) out[type] = { ...entry };
       return { version, epoch, schema, sessions: sessions.size, replicas: replicas.size, records, log: log.length, sent: out };
     },
+    /**
+     * A record's history, newest first: `[{ v, ts, replicaId, user?, changes, record }]`, a write each, `record`
+     * as that write left it (undefined: deleted) and `changes` what it did to it. `limit` (default 100) entries,
+     * older than version `before` when given, and with `path` only the writes at, above or beneath that path in
+     * the record. A singleton takes the options in the id's place
+     */
+    history(c, id, options) {
+      if (Utils.isPlainObject(id) && options === undefined) [id, options] = [undefined, id];
+      const { limit = 100, before, path } = options ?? {};
+      if (!(Number.isInteger(limit) && limit >= 1)) throw new TypeError('history takes a limit of one or more');
+      if (before !== undefined && !Number.isSafeInteger(before)) throw new TypeError('before is a version: a whole number');
+      if (path !== undefined && !(Array.isArray(path) && path.every(seg => typeof seg === 'string'))) throw new TypeError('A path is an array of keys');
+      const out = [];
+      let cursor = before;
+      // With a path, read on until enough of the writes that touch it are found
+      for (;;) {
+        const rows = historyRows(c, id, { before: cursor, limit: path ? 200 : limit });
+        for (const row of rows) {
+          const entry = entryOf(row);
+          if (!path || entry.changes.some(change => touches(change, path)) || entry.changes.length === 0) out.push(entry);
+          if (out.length === limit) return out;
+        }
+        if (!path || rows.length < 200) return out;
+        cursor = rows[rows.length - 1].v;
+      }
+    },
+    /**
+     * A record as it was: at a time on the store's clock (a number of ms, a Date, `{ ts }`) or at a version
+     * (`{ v }`). undefined when it was not there then, or when that is before the store kept history
+     */
+    recordAt(c, id, when) {
+      if (shape.isSingleton(c) && when === undefined) [id, when] = [undefined, id];
+      const [row] = historyRows(c, id, { ...upTo(when), limit: 1 });
+      return row && row.data !== null ? JSON.parse(row.data) : undefined;
+    },
+    /**
+     * Put a record back as it was then (see recordAt), as a write of the server's: the fields it had are
+     * written, the ones it has since gained deleted, and a record that was not there is deleted. Throws when
+     * nothing is known of the record then, and what a patch throws (a form its schema no longer takes).
+     * Returns the changes that landed
+     */
+    revert(c, id, when, { children = true } = {}) {
+      alive('write to');
+      if (shape.isSingleton(c) && when === undefined) [id, when] = [undefined, id];
+      const [row] = historyRows(c, id, { ...upTo(when), limit: 1 });
+      if (!row) throw new Error(`Nothing is known of ${shape.full(c, id).join('/')} then: it is before the store kept its history`);
+      const current = doc.get(c, id);
+      if (row.data === null) return current === undefined ? [] : run([{ c, id, del: true }]);
+      const target = JSON.parse(row.data);
+      // A record made again brings back the records its deletion took with it, in the same write
+      if (current === undefined) return run([changeFor({ c, id, path: [] }, target), ...(children ? takenWith(c, id) : [])]);
+      const whole = !Utils.isPlainObject(target) || !Utils.isPlainObject(current) || shape.isRegister(c, id);
+      const value = whole ? target : diffTo(c, id, current, target);
+      if (!whole && Object.keys(value).length === 0) return [];
+      return run([changeFor(shape.isSingleton(c) ? { c, path: [] } : { c, id, path: [] }, value)]);
+    },
     compact,
     export: () => {
       commitNow();
@@ -1258,6 +1456,15 @@ export function createStore({
     if (seeds.length) commit({ upserts: seeds, deletes: [] });
   }
   compact();
+  // History turned on over records already there: each gets a row as it stands, the first thing known of it
+  if (keeps && commitNow() && storage.historyCount() === 0) {
+    const baseline = [];
+    const ts = clock.time;
+    for (const [c, id, data] of doc.records()) {
+      baseline.push({ c, id: id ?? null, v: version, ts, user: null, replica: 'server', data: JSON.stringify(data), changes: '[]' });
+    }
+    if (baseline.length) commit({ upserts: [], deletes: [], history: baseline });
+  }
   migrate();
   if (!commitNow()) throw new RefusedError('unavailable', 'The store could not save the change and was unloaded');
   return self;

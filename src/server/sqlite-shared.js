@@ -151,6 +151,19 @@ const SCHEMA = `
     changes TEXT    NOT NULL,
     PRIMARY KEY (store, v)
   ) WITHOUT ROWID;
+  CREATE TABLE IF NOT EXISTS history (
+    store      TEXT    NOT NULL,
+    collection TEXT    NOT NULL,
+    id         TEXT    NOT NULL,
+    v          INTEGER NOT NULL,
+    ts         INTEGER NOT NULL,
+    user       TEXT,
+    replica    TEXT,
+    data       TEXT,
+    changes    TEXT    NOT NULL,
+    PRIMARY KEY (store, collection, id, v)
+  ) WITHOUT ROWID;
+  CREATE INDEX IF NOT EXISTS history_by_version ON history (store, v);
   CREATE TABLE IF NOT EXISTS leases (
     store  TEXT    PRIMARY KEY,
     holder TEXT    NOT NULL,
@@ -269,7 +282,24 @@ export function sqliteStorageOn({ exec, prepare, transaction, close, db, driver 
     dropReplicas: prepare('DELETE FROM replicas WHERE store = ?'),
     dropLog: prepare('DELETE FROM oplog WHERE store = ?'),
     dropStore: prepare('DELETE FROM stores WHERE store = ?'),
-    dropLease: prepare('DELETE FROM leases WHERE store = ?')
+    dropLease: prepare('DELETE FROM leases WHERE store = ?'),
+    // History (a store made with `history`; see storage.js): a row per record a write wrote, by record and version
+    putHistory: prepare(`
+      INSERT INTO history (store, collection, id, v, ts, user, replica, data, changes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT (store, collection, id, v) DO UPDATE SET ts = excluded.ts, user = excluded.user, replica = excluded.replica, data = excluded.data, changes = excluded.changes`),
+    history: prepare(`
+      SELECT v, ts, user, replica, data, changes FROM history
+      WHERE store = ? AND collection = ? AND id = ? AND v < ? AND v <= ? AND ts <= ?
+      ORDER BY v DESC LIMIT ?`),
+    historyOfVersion: prepare('SELECT collection, id, v, ts, user, replica, data, changes FROM history WHERE store = ? AND v = ?'),
+    historyCount: prepare('SELECT count(*) AS n FROM history WHERE store = ?'),
+    // Each record's last row before the time stays: what the record was then. Unless it was deleted then: no
+    // row says the same, and a record made and deleted would otherwise leave one for ever
+    pruneHistory: prepare(`
+      DELETE FROM history WHERE store = ?1 AND ts < ?2 AND (data IS NULL OR v < (
+        SELECT max(h.v) FROM history h WHERE h.store = history.store AND h.collection = history.collection AND h.id = history.id AND h.ts < ?2
+      ))`),
+    dropHistory: prepare('DELETE FROM history WHERE store = ?')
   };
 
   // Leases (see the header)
@@ -355,6 +385,7 @@ export function sqliteStorageOn({ exec, prepare, transaction, close, db, driver 
       if (change.replica) replicas.set(change.replica.id, change.replica);
       for (const replica of change.forgetReplicas ?? []) replicas.set(replica, null);
       if (change.log) q.putLog.run(id, change.log.v, change.log.ts, JSON.stringify(change.log.changes));
+      for (const h of change.history ?? []) q.putHistory.run(id, h.c, rowId(h.id), h.v, h.ts, h.user ?? null, h.replica ?? null, h.data, h.changes);
     }
     for (const [key, row] of records) {
       const [c, rid] = JSON.parse(key);
@@ -372,6 +403,7 @@ export function sqliteStorageOn({ exec, prepare, transaction, close, db, driver 
     q.dropRecords.run(id);
     q.dropReplicas.run(id);
     q.dropLog.run(id);
+    q.dropHistory.run(id);
     for (const [c, rid, data, clock] of doc.records) q.upsert.run(id, c, rowId(rid), JSON.stringify(data), JSON.stringify(clock ?? EMPTY_CLOCK));
     for (const [replica, r] of Object.entries(doc.replicas ?? {})) q.setReplica.run(id, replica, r.seq, r.seen ?? null, r.owner ?? null);
     q.setVersion.run(id, doc.version, newEpoch(), Number.isInteger(doc.schema) ? doc.schema : null);
@@ -381,6 +413,7 @@ export function sqliteStorageOn({ exec, prepare, transaction, close, db, driver 
     q.dropRecords.run(id);
     q.dropReplicas.run(id);
     q.dropLog.run(id);
+    q.dropHistory.run(id);
     q.dropStore.run(id);
     q.dropLease.run(id);
   });
@@ -426,6 +459,16 @@ export function sqliteStorageOn({ exec, prepare, transaction, close, db, driver 
         commit: change => commitMany([change]),
         commitMany,
         flush() {},
+        /** A record's history rows, newest first (see storage.js) */
+        history({ c, id: rid, before, upToV, upToTs, limit }) {
+          const most = Number.MAX_SAFE_INTEGER;
+          return q.history.all(id, c, rowId(rid), before ?? most, upToV ?? most, upToTs ?? most, limit ?? most).map(row => ({ ...row }));
+        },
+        historyOfVersion: v => q.historyOfVersion.all(id, v).map(({ collection, id: rid, ...row }) => ({ c: collection, id: rid === '' ? null : rid, ...row })),
+        historyCount: () => q.historyCount.get(id).n,
+        pruneHistory(before) {
+          q.pruneHistory.run(id, before);
+        },
         /**
          * Take a document (store.export(), or another adapter's load()) as
          * this store's whole storage, in one transaction, under a new epoch

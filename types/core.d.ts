@@ -239,6 +239,23 @@ export type ClientMessage =
   | { t: 'vouch'; store?: string; as: string; credential: unknown; replica: string }
   | { t: 'ping' };
 
+/** One write to a record, as `store.history` and a client's `db.historyOf` tell it */
+export interface HistoryEntry {
+  /** The store's version the write made, and its time on the store's clock */
+  v: number;
+  ts: Timestamp;
+  /** The replica that wrote ('server' for the store's own write), and the key of its user, as presence keys users */
+  replicaId: string;
+  user?: string;
+  /** What the write did to this record; none for the row a record has from when history was turned on */
+  changes: Change[];
+  /** The record as the write left it; undefined: deleted */
+  record: any;
+}
+
+/** A time on the store's clock (ms, a Date, `{ ts }`) or a version (`{ v }`) */
+export type When = number | Date | { ts: number | Date } | { v: number };
+
 export interface Peer { replicaId: string; user?: unknown; key?: string; data?: unknown }
 
 export type ServerMessage =

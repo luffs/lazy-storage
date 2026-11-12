@@ -1,7 +1,7 @@
 // Type declarations for `lazy-storage/server`: stores, storage adapters,
 // the registry, and hubs. Hand-written; the runtime is plain JS.
 import type { Unsubscribe } from 'lazy-watch';
-import type { Change, ClientMessage, Lost, Op, Path, Peer, RecordClock, Schema, ServerMessage, Shape, ShapeOptions, Tagged, Timestamp } from './core.js';
+import type { Change, ClientMessage, HistoryEntry, Lost, Op, Path, Peer, RecordClock, Schema, When, ServerMessage, Shape, ShapeOptions, Tagged, Timestamp } from './core.js';
 
 export type { ClientMessage, ServerMessage, Tagged, Schema, SchemaCheck } from './core.js';
 export { optional, oneOf, listItem, defineSchemas } from './core.js';
@@ -48,6 +48,8 @@ export interface StorageCommit {
   schema: number;
   log?: LogEntry;
   logFloor?: number;
+  /** A row per record the write wrote, for a store made with `history` */
+  history?: Array<HistoryRow & { c: string; id: string | null }>;
 }
 
 export interface ServerStorage {
@@ -61,7 +63,29 @@ export interface ServerStorage {
   close?(): void;
   /** Take a document as the whole storage, under a new epoch and no log; never under a live store */
   replace?(doc: StorageDocument): void;
+  /** A record's history rows, newest first: older than version `before`, no later than `upToV` or the time `upToTs` (for a store made with `history`) */
+  history?(query: { c: string; id: string | null; before?: number; upToV?: number; upToTs?: number; limit?: number }): HistoryRow[];
+  /** The rows one write left, each with its `c` and `id` */
+  historyOfVersion?(v: number): Array<HistoryRow & { c: string; id: string | null }>;
+  /** How many history rows it holds */
+  historyCount?(): number;
+  /** Forget the rows older than that time, but for each record's last one before it (not kept when that is a deletion) */
+  pruneHistory?(before: number): void;
 }
+
+/** A record as one write left it, as storage keeps it: `data` and `changes` are JSON, `data` null for a record deleted */
+export interface HistoryRow {
+  c?: string;
+  id?: string | null;
+  v: number;
+  ts: Timestamp;
+  user: string | null;
+  replica: string | null;
+  data: string | null;
+  changes: string;
+}
+
+export type { HistoryEntry, When } from './core.js';
 
 export function memoryStorage(): ServerStorage & { replace(doc: StorageDocument): void };
 export function assertDocument(doc: unknown): asserts doc is StorageDocument;
@@ -173,6 +197,11 @@ export interface StoreOptions<S extends object = any> extends Omit<ShapeOptions,
   /** Commit what a turn of the event loop merged together (default true) */
   groupCommit?: boolean;
   migrations?: Array<(state: S, context: { store: Store<S> }) => object | void>;
+  /**
+   * Keep every record as each write left it, with when and who, for `store.history`, `recordAt` and `revert`;
+   * `keep` (ms) forgets what is older, but for the last form of each record before it. Off by default
+   */
+  history?: boolean | { keep?: number };
   presence?: boolean | PresenceOptions<S>;
   onError?(error: unknown): void;
   now?: () => number;
@@ -259,6 +288,18 @@ export interface Store<S extends object = any> {
   stats(): StoreStats;
   /** Forget what the retention window no longer needs */
   compact(): { deletions: number; replicas: number };
+  /** A record's history, newest first: `limit` entries (default 100), older than version `before`, with `path` the writes at, above or beneath it */
+  history(c: string, id: string, options?: { limit?: number; before?: number; path?: Path }): HistoryEntry[];
+  history(singleton: string, options?: { limit?: number; before?: number; path?: Path }): HistoryEntry[];
+  /** A record as it was then (now, without `when`); undefined when it was not there, or that is before the store kept history */
+  recordAt(c: string, id: string, when?: When): any;
+  recordAt(singleton: string, when?: When): any;
+  /**
+   * Put a record back as it was then, as a write of the server's; returns the changes that landed. A record
+   * made again brings back the children its deletion took with it, as they were just before, unless `children: false`
+   */
+  revert(c: string, id: string, when: When, options?: { children?: boolean }): Change[];
+  revert(singleton: string, when: When): Change[];
   export(): StoreDocument;
   restore(doc: StorageDocument): void;
   flush(): void;

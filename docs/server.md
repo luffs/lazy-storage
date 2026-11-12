@@ -203,7 +203,7 @@ check, a Zod schema), also gets the record whole in a `data` column, for
 the same, and a name taken already gets a trailing `_`.
 
 - `prefix` names the views apart from tables of yours, or from this
-  adapter's own (`records`, `stores`, `replicas`, `oplog`, `leases`): a
+  adapter's own (`records`, `stores`, `replicas`, `oplog`, `history`, `leases`): a
   name the file has already is refused, and a collection called `records`
   needs one. `store: 'team-1'` makes the views of that store alone,
   without the `store` column.
@@ -260,6 +260,67 @@ then `stores.get(id)`). Edits a client made offline in the old shape are
 decided as written when it returns, so a migration that renames is best
 paired with a rule that refuses the old name for a while (see [Who may
 write what](auth.md#who-may-write-what)).
+
+### History
+
+A store keeps what its records are, not what they were. Made with
+`history: true` it keeps both: every write leaves, for each record it
+wrote, the record as it was left, the changes to it, when, and who.
+
+```js
+const store = createStore({ initial, history: { keep: 90 * DAY }, storage: sqlite.store(id) });
+
+store.history('tasks', 'k');                  // newest first: [{ v, ts, replicaId, user, changes, record }]
+store.history('tasks', 'k', { path: ['title'], limit: 10 });   // who changed the title, and when
+store.recordAt('tasks', 'k', lastTuesday);    // the record as it was: a time, a Date, or { v } a version
+store.revert('tasks', 'k', lastTuesday);      // and put back so
+```
+
+- **`store.history(c, id, { limit, before, path })`** is a record's
+  writes, newest first, `limit` of them (default 100) and older than
+  version `before`, to page. Each says the store's version and time
+  (`v`, `ts`), the replica that wrote (`'server'` for the store's own
+  write) and its `user`, the key presence gives the user (`user.id`
+  unless `presence.key` says otherwise); `changes`, what the write did
+  to this record; and `record`, the record as it left it, `undefined`
+  for a deletion. With `path`, only the writes at, above or beneath that
+  path: who changed a field. A singleton has no id:
+  `store.history('settings', { limit: 10 })`.
+- **`store.recordAt(c, id, when)`** is the record as it was at a time on
+  the store's clock (milliseconds, a `Date`, `{ ts }`) or at a version
+  (`{ v }`); `undefined` when it was not there.
+- **`store.revert(c, id, when)`** puts the record back as it was then, as
+  a write of the server's own: the fields it had are written, the ones it
+  has gained since are deleted, and what did not change is not touched,
+  so an edit a client makes to another field at the same moment still
+  lands. A record deleted since is made again, and with it the children
+  its deletion took (and theirs), each as it was just before, in the same
+  write; `{ children: false }` as a fourth argument makes the record
+  alone. One that was not there then is deleted, its children with it. It is a write like
+  any other: clients hear it as a patch, it is held to the
+  [schemas](model.md#schemas) as they are now, and it is in the history
+  itself, so a revert can be reverted.
+
+What it costs: a row per record per write, holding the record whole, so
+a record of 2 KB written a thousand times is 2 MB of history. `keep`
+(milliseconds) forgets what is older, at the hourly compaction, but for
+each record's last form before it, so `recordAt` still answers at the
+edge, and a record deleted within `keep` can be made again however long
+ago it was last written. A record deleted longer ago than `keep` leaves
+nothing. Without `keep` everything is kept. History begins when it is
+turned on: a store that already has records gets a row for each as it
+stands (with no `changes`), and before that row nothing is known, so
+`recordAt` is `undefined` and `revert` throws. A
+[restore](#backups-restores-and-moving-a-store) starts it over, and
+`store.export()` does not carry it; a SQLite backup does.
+
+The memory and SQLite adapters keep history; another adapter does by
+taking the `history` rows a commit carries and answering `history(query)`,
+`historyOfVersion(v)`, `historyCount()` and `pruneHistory(before)` (see
+[storage.js](../src/server/storage.js)). In SQLite the rows are the table
+`history` (`store`, `collection`, `id`, `v`, `ts`, `user`, `replica`,
+`data`, `changes`), there to be read with SQL like the rest: `SELECT user,
+count(*) FROM history WHERE ts > ? GROUP BY user`.
 
 ### Backups, restores, and moving a store
 
