@@ -22,26 +22,30 @@
 //                         whole storage, under a new epoch and no log
 //
 // An adapter may also keep HISTORY, for a store made with `history`: a
-// commit then carries `history: [{ c, id, v, ts, user, replica, data,
-// changes }]`, a row per record the write wrote, `data` the record as it
-// was left, as JSON (null: deleted), and `changes` the changes to it, as
-// JSON. It keeps them, by record and version, and answers:
+// commit then carries `history: [{ c, id, v, n, ts, at, user, replica,
+// data, changes }]`, a row per record the write wrote. `v` is the version
+// the write made and `n` the row's place among that version's rows; `ts`
+// the write's own stamp, which an edit made offline brings from the past,
+// and `at` the store's time when it landed, which never goes back from one
+// version to the next; `data` the record as it was left, as JSON (null:
+// deleted), and `changes` the changes to it, as JSON. It keeps them, by
+// record and version, and answers:
 //
-//   history({ c, id, before?, upToV?, upToTs?, fromTs?, user?, limit })   a record's rows, newest first:
-//                         older than version `before`, no later than version `upToV` or time `upToTs`,
-//                         no earlier than time `fromTs`, of one user's writes
-//   historyOfVersion(v)   the rows one write left, each with its `c` and `id`
-//   activity({ before?, after?, fromTs?, toTs?, user?, c?, deleted?, ascending?, cursor?, limit? })
-//                         the rows of every record, each with its `c` and `id`, newest first (oldest
-//                         first with `ascending`): of versions under `before` and over `after`, from
-//                         time `fromTs` to `toTs`, of one user's writes, of one collection, or the
-//                         deletions alone. In order of version, then collection, then id;
-//                         `cursor` ({ v, c, id }) is a row to read on after
+//   history({ c, id, before?, upToV?, upToAt?, fromAt?, user?, limit? })
+//                         a record's rows, newest first: older than version `before`, no later than
+//                         version `upToV` or the time `upToAt`, no earlier than `fromAt`, of one
+//                         user's writes
+//   historyOfVersion(v)   the rows one write left, each with its `c` and `id`, in order of `n`
+//   activity({ before?, after?, fromAt?, toAt?, user?, c?, deleted?, ascending?, cursor?, limit? })
+//                         the rows of every record, each with its `c` and `id`, in order of version
+//                         (newest first, or oldest with `ascending`) and then of `n`: of versions
+//                         under `before` and over `after`, landed from `fromAt` to `toAt`, of one
+//                         user's writes, of one collection, or the deletions alone. `cursor`
+//                         ({ v, n }) is a row to read on after
 //   historyCount()        how many rows it holds
-//   pruneHistory(before)  forget the rows older than that time, but for each
-//                         record's last one before it: what the record was
-//                         then (not kept when that is a deletion, which no
-//                         row says as well)
+//   pruneHistory(before)  forget the rows that landed before that time, but for each record's last
+//                         one before it: what the record was then (not kept when that is a deletion,
+//                         which no row says as well)
 //
 // A document that replaces the storage starts its history over.
 //
@@ -82,19 +86,18 @@ export function memoryStorage() {
   let history = [];   // rows as committed, oldest first
   const sameRecord = (row, c, id) => row.c === c && row.id === (id ?? null);
   return {
-    history({ c, id, before = Infinity, upToV = Infinity, upToTs = Infinity, fromTs = -Infinity, user, limit = Infinity }) {
+    history({ c, id, before = Infinity, upToV = Infinity, upToAt = Infinity, fromAt = -Infinity, user, limit = Infinity }) {
       const out = [];
       for (let i = history.length - 1; i >= 0 && out.length < limit; i--) {
         const row = history[i];
-        if (sameRecord(row, c, id) && row.v < before && row.v <= upToV && row.ts <= upToTs && row.ts >= fromTs && (user === undefined || row.user === user)) out.push({ ...row });
+        if (sameRecord(row, c, id) && row.v < before && row.v <= upToV && row.at <= upToAt && row.at >= fromAt && (user === undefined || row.user === user)) out.push({ ...row });
       }
       return out;
     },
-    historyCount: () => history.length,
-    historyOfVersion: v => history.filter(row => row.v === v).map(row => ({ ...row })),
-    activity({ before = Infinity, after = -Infinity, fromTs = -Infinity, toTs = Infinity, user, c, deleted = false, ascending = false, cursor, limit = Infinity } = {}) {
-      const order = (x, y) => (x.v !== y.v ? (ascending ? x.v - y.v : y.v - x.v) : x.c !== y.c ? (x.c < y.c ? -1 : 1) : (x.id ?? '') < (y.id ?? '') ? -1 : (x.id ?? '') > (y.id ?? '') ? 1 : 0);
-      const rows = history.filter(row => row.v < before && row.v > after && row.ts >= fromTs && row.ts <= toTs &&
+    historyOfVersion: v => history.filter(row => row.v === v).sort((x, y) => x.n - y.n).map(row => ({ ...row })),
+    activity({ before = Infinity, after = -Infinity, fromAt = -Infinity, toAt = Infinity, user, c, deleted = false, ascending = false, cursor, limit = Infinity } = {}) {
+      const order = (x, y) => (x.v !== y.v ? (ascending ? x.v - y.v : y.v - x.v) : x.n - y.n);
+      const rows = history.filter(row => row.v < before && row.v > after && row.at >= fromAt && row.at <= toAt &&
         (user === undefined || row.user === user) && (c === undefined || row.c === c) && (!deleted || row.data === null) &&
         (!cursor || order(row, cursor) > 0)).sort(order);
       return rows.slice(0, limit).map(row => ({ ...row }));
@@ -104,8 +107,8 @@ export function memoryStorage() {
       // Each record's last row before the time stays: what the record was then. Unless it was deleted then:
       // no row says the same, and a record made and deleted would otherwise leave one for ever
       const last = new Map();
-      for (const row of history) if (row.ts < before) last.set(recordKey(row.c, row.id), row);
-      history = history.filter(row => row.ts >= before || (row.data !== null && last.get(recordKey(row.c, row.id)) === row));
+      for (const row of history) if (row.at < before) last.set(recordKey(row.c, row.id), row);
+      history = history.filter(row => row.at >= before || (row.data !== null && last.get(recordKey(row.c, row.id)) === row));
     },
     load: () => (seen ? structuredClone({ records: [...records.values()], replicas, version, epoch, ...(schema === undefined ? {} : { schema }), log }) : null),
     commit(change) {

@@ -58,6 +58,8 @@ const DAY = 24 * HOUR;
 export const HELLO_OPS = 1000;
 
 /** The most entries one answer to a client's history request carries; it asks again, `before` the oldest, for more */
+/** The collection of a history row that is of no record: the mark the history is whole from (see known in createStore) */
+const MARK = '';
 const HISTORY_PAGE = 100;
 /** How many entries a history or an activity is, asked for without a limit: the store's own and a client's alike */
 const HISTORY_DEFAULT = 50;
@@ -224,6 +226,9 @@ export function createStore({
   let clocksJSON = null;
   let clocksBytes;
   let disposed = false;
+  // When the last history row landed (see historyRowsOf), and the time history was last pruned back to (see known)
+  let landedAt = 0;
+  let prunedBefore;
 
   function tally(type, count, bytes) {
     const entry = sent[type] ??= { messages: 0, bytes: 0 };
@@ -577,7 +582,11 @@ export function createStore({
       changesOf.get(key).push(change);
     }
     const by = replicaId === 'server' ? null : ownerKey(user) ?? null;
-    const row = (c, id, data) => ({ c, id: id ?? null, v: version, ts, user: by, replica: replicaId, data, changes: JSON.stringify(changesOf.get(shape.recordKey(c, id ?? undefined)) ?? []) });
+    // When it landed: the store's time, held to what the last row said, so that it never goes back from one version
+    // to the next whatever the wall clock does. A write's own stamp does: an edit made offline lands with an old one
+    landedAt = Math.max(landedAt, clock.time);
+    let n = 0;
+    const row = (c, id, data) => ({ c, id: id ?? null, v: version, n: n++, ts, at: landedAt, user: by, replica: replicaId, data, changes: JSON.stringify(changesOf.get(shape.recordKey(c, id ?? undefined)) ?? []) });
     return [...upserts.map(([c, id, record]) => row(c, id, JSON.stringify(record))), ...deletes.map(([c, id]) => row(c, id, null))];
   }
 
@@ -763,7 +772,15 @@ export function createStore({
     lastCompaction = time();
     if (keeps && Number.isFinite(keeps.keep)) {
       // What is pending is stored first: a row it holds may be the one a record's history is pruned back to
-      if (commitNow()) storage.pruneHistory(lastCompaction - keeps.keep);
+      if (commitNow()) {
+        // A storage that will not prune (its lease is gone) says so, and the commit that follows unloads the store
+        try {
+          storage.pruneHistory(lastCompaction - keeps.keep);
+          prunedBefore = lastCompaction - keeps.keep;
+        } catch (err) {
+          onError(err);
+        }
+      }
     }
     if (!Number.isFinite(retention)) return { deletions: 0, replicas: 0 };
     const cutoff = lastCompaction - retention;
@@ -791,20 +808,28 @@ export function createStore({
   // --- History ----------------------------------------------------------------------------
   //
   // With `history` on, every write leaves a row per record it wrote: the
-  // record as the write left it, the changes to it, when (the store's
-  // clock and version) and who (the replica, and its user's key). The
-  // storage keeps the rows; the store asks it for a record's, newest
-  // first. A store that already holds records when history is first
-  // turned on writes a row for each as it stands (`baseline`), so a record
-  // nobody has written since still has a form to be asked for; before that
-  // row nothing is known.
+  // record as the write left it, the changes to it, who (the replica, and
+  // its user's key) and when. When is three things. `v` is the version the
+  // write made, and `n` the row's place among that write's rows: the order
+  // of the store's history, and what a cursor names. `ts` is the write's
+  // own stamp, which the merge decided it by: an edit made offline brings
+  // one from the past, so stamps do not follow versions. `at` is the
+  // store's time when the write landed, which does: what the store held at
+  // a time is what the last write to land by then left, so a time that is
+  // asked for (recordAt, since, until, keep) is asked of `at`.
+  //
+  // The storage keeps the rows; the store asks it for them. A store that
+  // holds records its history does not know (history turned on over them,
+  // or turned off for a while and on again) writes a row for each as it
+  // stands, so that the newest row of a record is always the record;
+  // before a record's first row nothing is known of it.
 
   /** `when` as the storage is asked: { v } a version, { ts } or a number or a Date a time on the store's clock; nothing: now */
   function upTo(when) {
     if (when === undefined) return {};
-    const ts = Utils.isPlainObject(when) ? when.ts : when;
+    const time = Utils.isPlainObject(when) ? when.ts : when;
     if (Utils.isPlainObject(when) && Number.isSafeInteger(when.v)) return { upToV: when.v };
-    if ((typeof ts === 'number' || ts instanceof Date) && Number.isFinite(Number(ts))) return { upToTs: Number(ts) };
+    if ((typeof time === 'number' || time instanceof Date) && Number.isFinite(Number(time))) return { upToAt: Number(time) };
     throw new TypeError('When is a time (a number of milliseconds, a Date, { ts }) or a version ({ v })');
   }
 
@@ -816,59 +841,48 @@ export function createStore({
     return storage.history({ c, id: shape.isSingleton(c) ? null : id, ...query });
   }
 
+  /** A record's row as it was then (see upTo): the last to land by that time, or of that version; undefined where nothing is known of it then */
+  const rowAt = (c, id, when) => historyRows(c, id, { ...upTo(when), limit: 1 })[0];
+
+  /**
+   * Whether the history is whole at `when`: a record with no row by then
+   * was not there, and not merely unrecorded. It is whole from its last
+   * MARK on, a row of no record that is written with the rows that bring
+   * the history up to the records (see the end of createStore): before it
+   * the store may have been written with no history kept. And from the
+   * time it was last pruned back to: before that only each record's last
+   * row is left
+   */
+  function known(when) {
+    commitNow();
+    const [mark] = storage.history({ c: MARK, id: null, limit: 1 });
+    if (!mark && prunedBefore === undefined) return false;
+    const asked = upTo(when);
+    if (asked.upToV === undefined) return (asked.upToAt ?? Infinity) >= Math.max(mark?.at ?? -Infinity, prunedBefore ?? -Infinity);
+    let from = mark?.v ?? -Infinity;
+    if (prunedBefore !== undefined) from = Math.max(from, storage.activity({ ascending: true, fromAt: prunedBefore, limit: 1 })[0]?.v ?? version);
+    return asked.upToV >= from;
+  }
+
   /** A row as it is told: one write to one record, with the record it is of (a singleton has no id) */
   const entryOf = (c, id, row, changes = JSON.parse(row.changes)) => ({
     c,
     ...(id === null || id === undefined ? {} : { id }),
     v: row.v,
+    n: row.n,
     ts: row.ts,
+    at: row.at,
     replicaId: row.replica,
     ...(row.user === null || row.user === undefined ? {} : { user: row.user }),
     changes,
     record: row.data === null ? undefined : JSON.parse(row.data)
   });
 
-  /** The row to read on after, from what a caller gives as `cursor`: an entry, or its v, c and id */
+  /** The row to read on after, from what a caller gives as `cursor`: an entry, or its version and its place in it */
   function cursorOf(cursor) {
     if (cursor === undefined || cursor === null) return undefined;
-    if (Utils.isPlainObject(cursor) && Number.isSafeInteger(cursor.v) && typeof cursor.c === 'string' && (cursor.id === undefined || cursor.id === null || typeof cursor.id === 'string')) {
-      return { v: cursor.v, c: cursor.c, id: cursor.id ?? null };
-    }
-    throw new TypeError('cursor is the entry to read on after: its v, c and id');
-  }
-
-  /**
-   * A record's history, newest first (see store.historyOf):
-   * `{ entries, more }`. With a `path` the rows are read on, a page at a
-   * time, until `limit` of the writes that touch it are found; `scan` is
-   * how many rows that may take. `more` is the row it stopped at, to read
-   * on after as `cursor`, when it stopped for the limit or the scan and
-   * not for the end. A row's record is decoded only for an entry that is
-   * told
-   */
-  function readHistory(c, id, { limit = HISTORY_DEFAULT, before, cursor, path, since, until, user, scan = Infinity } = {}) {
-    if (!(Number.isInteger(limit) && limit >= 1)) throw new TypeError('history takes a limit of one or more');
-    if (before !== undefined && !Number.isSafeInteger(before)) throw new TypeError('before is a version: a whole number');
-    if (path !== undefined && !(Array.isArray(path) && path.every(seg => typeof seg === 'string'))) throw new TypeError('A path is an array of keys');
-    if (user !== undefined && typeof user !== 'string') throw new TypeError("user is a user's key: a string");
-    const from = cursorOf(cursor);
-    const query = { fromTs: timeOf(since, 'since'), upToTs: timeOf(until, 'until'), user };
-    const entries = [];
-    const page = path ? Math.min(HISTORY_READ, scan) : limit;
-    // A record has one row a version, so the row to read on after is a version to read on before
-    let upper = from === undefined ? before : Math.min(from.v, before ?? Infinity);
-    for (let read = 0; ;) {
-      const rows = historyRows(c, id, { ...query, before: upper, limit: page });
-      for (const row of rows) {
-        read++;
-        upper = row.v;
-        const changes = JSON.parse(row.changes);
-        if (!path || changes.length === 0 || changes.some(change => touches(change, path))) entries.push(entryOf(c, id, row, changes));
-        if (entries.length === limit) return { entries, more: { v: row.v, c, id: id ?? null } };
-      }
-      if (rows.length < page) return { entries };
-      if (read >= scan) return { entries, more: { v: upper, c, id: id ?? null } };
-    }
+    if (Utils.isPlainObject(cursor) && Number.isSafeInteger(cursor.v) && (cursor.n === undefined || Number.isSafeInteger(cursor.n))) return { v: cursor.v, n: cursor.n ?? Number.MAX_SAFE_INTEGER };
+    throw new TypeError('cursor is the entry to read on after: its v and n');
   }
 
   /** A time as the storage is asked for it: milliseconds, from a number or a Date; undefined when none is given */
@@ -879,13 +893,65 @@ export function createStore({
   }
 
   /**
+   * Rows read a page at a time until `limit` of them are told: `take(row)`
+   * gives the entry of a row that is, undefined of one that is not.
+   * `{ entries, more }`, `more` the row it stopped at ({ v, n }), to read on
+   * after as `cursor`, when it stopped for the limit or for `scan` and not
+   * for the end. `scan` is how many rows may be read, told or not: with one
+   * the storage is asked for rows in their order and nothing else, so that
+   * what it reads is what is counted, and `take` does the narrowing
+   */
+  function readRows(page, take, { limit, scan }) {
+    const size = Math.min(HISTORY_READ, scan, Number.isFinite(scan) ? Infinity : Math.max(limit, 1));
+    const entries = [];
+    let at;
+    for (let read = 0; ;) {
+      const rows = page(at, size);
+      for (const row of rows) {
+        read++;
+        at = { v: row.v, n: row.n };
+        const entry = take(row);
+        if (entry !== undefined) entries.push(entry);
+        if (entries.length === limit) return { entries, more: at };
+        if (read >= scan) return { entries, more: at };
+      }
+      if (rows.length < size) return { entries };
+    }
+  }
+
+  /**
+   * A record's history, newest first (see store.historyOf):
+   * `{ entries, more }`. A row's record is decoded only for an entry that
+   * is told
+   */
+  function readHistory(c, id, { limit = HISTORY_DEFAULT, before, cursor, path, since, until, user, scan = Infinity } = {}) {
+    if (!(Number.isInteger(limit) && limit >= 1)) throw new TypeError('history takes a limit of one or more');
+    if (before !== undefined && !Number.isSafeInteger(before)) throw new TypeError('before is a version: a whole number');
+    if (path !== undefined && !(Array.isArray(path) && path.every(seg => typeof seg === 'string'))) throw new TypeError('A path is an array of keys');
+    if (user !== undefined && typeof user !== 'string') throw new TypeError("user is a user's key: a string");
+    const from = cursorOf(cursor);
+    const [fromAt, upToAt] = [timeOf(since, 'since'), timeOf(until, 'until')];
+    // A record has one row a version, so the row to read on after is a version to read on before
+    const first = from === undefined ? before : before === undefined ? from.v : Math.min(from.v, before);
+    const bounded = Number.isFinite(scan);
+    const narrowed = bounded ? {} : { fromAt, upToAt, user };
+    const fits = row => !bounded || ((fromAt === undefined || row.at >= fromAt) && (upToAt === undefined || row.at <= upToAt) && (user === undefined || row.user === user));
+    return readRows(
+      (at, size) => historyRows(c, id, { ...narrowed, before: at ? at.v : first, limit: size }),
+      row => {
+        if (!fits(row)) return undefined;
+        const changes = JSON.parse(row.changes);
+        return !path || changes.length === 0 || changes.some(change => touches(change, path)) ? entryOf(c, id, row, changes) : undefined;
+      },
+      { limit, scan }
+    );
+  }
+
+  /**
    * The writes to every record, newest first (see store.activity):
    * `{ entries, more }`, an entry per record a write wrote, in order of
-   * version, then collection, then id. `allow(c, id)` leaves out the
-   * records a client may not read; `scan` is how many rows may be read
-   * looking for `limit` that are told. `more` is the row it stopped at
-   * ({ v, c, id }), to read on after as `cursor`, when it stopped for the
-   * limit or the scan and not for the end
+   * version and then of the row's place in its write. `allow(c, id)`
+   * leaves out the records a client may not read
    */
   function readActivity({ limit = HISTORY_DEFAULT, before, after, since, until, user, collection, deleted = false, oldestFirst = false, cursor } = {}, { scan = Infinity, allow } = {}) {
     if (!keeps) throw new TypeError('History is off on this store: make it with history: true');
@@ -894,22 +960,18 @@ export function createStore({
     if (user !== undefined && typeof user !== 'string') throw new TypeError("user is a user's key: a string");
     if (collection !== undefined && !(typeof collection === 'string' && shape.has(collection))) throw new TypeError(`"${collection}" is not a collection or singleton of this store`);
     if (typeof deleted !== 'boolean' || typeof oldestFirst !== 'boolean') throw new TypeError('deleted and oldestFirst are true or false');
-    const query = { before, after, fromTs: timeOf(since, 'since'), toTs: timeOf(until, 'until'), user, c: collection, deleted, ascending: oldestFirst };
+    const from = cursorOf(cursor);
+    const [fromAt, toAt] = [timeOf(since, 'since'), timeOf(until, 'until')];
+    const bounded = Number.isFinite(scan);
+    const narrowed = bounded ? {} : { fromAt, toAt, user, c: collection, deleted };
+    const fits = row => !bounded || ((fromAt === undefined || row.at >= fromAt) && (toAt === undefined || row.at <= toAt) && (user === undefined || row.user === user) &&
+      (collection === undefined || row.c === collection) && (!deleted || row.data === null));
     commitNow();
-    const page = Math.min(HISTORY_READ, scan);
-    const entries = [];
-    let at = cursorOf(cursor);
-    for (let read = 0; ;) {
-      const rows = storage.activity({ ...query, cursor: at, limit: page });
-      for (const row of rows) {
-        read++;
-        at = { v: row.v, c: row.c, id: row.id };
-        if (!allow || allow(row.c, row.id ?? undefined)) entries.push(entryOf(row.c, row.id, row));
-        if (entries.length === limit) return { entries, more: at };
-      }
-      if (rows.length < page) return { entries };
-      if (read >= scan) return { entries, more: at };
-    }
+    return readRows(
+      (at, size) => storage.activity({ ...narrowed, before, after, ascending: oldestFirst, cursor: at ?? from, limit: size }),
+      row => (row.c !== MARK && fits(row) && (!allow || allow(row.c, row.id ?? undefined)) ? entryOf(row.c, row.id, row) : undefined),
+      { limit, scan }
+    );
   }
 
   /** Whether a change is at, above or beneath a path in its record */
@@ -1106,7 +1168,22 @@ export function createStore({
       if (req === undefined) return refuse('invalid', 'A history request has a req to be answered by');
       if (!speaker.replicaId) return refuse('forbidden', 'Say hello first');
       const id = shape.isSingleton(msg.c) ? undefined : msg.id;
-      const may = (c, rid) => mayAsk === true || (typeof mayAsk === 'function' && mayAsk(speaker.user, { c, id: rid, store: self }) === true);
+      // The app's own function is asked of a record the store could hold, never of what a client made up; and
+      // one that throws lets nobody in, and is reported as the app's fault it is
+      const may = (c, rid) => {
+        if (mayAsk !== true && typeof mayAsk !== 'function') return false;
+        if (mayAsk === true) return true;
+        try {
+          return mayAsk(speaker.user, { c, id: rid, store: self }) === true;
+        } catch (err) {
+          onError(err);
+          return false;
+        }
+      };
+      if (msg.all !== true) {
+        if (typeof msg.c !== 'string' || !shape.has(msg.c)) return refuse('invalid', `"${msg.c}" is not a collection or singleton of this store`);
+        if (shape.isCollection(msg.c) && (typeof msg.id !== 'string' || !msg.id)) return refuse('invalid', `A record of "${msg.c}" is named by its id`);
+      }
       try {
         // The whole store's writes are asked for as one, and each record's told or not by the same rule
         const allowed = msg.all === true ? mayAsk !== false : shape.has(msg.c) && may(msg.c, id);
@@ -1120,8 +1197,11 @@ export function createStore({
           return send({ t: 'history', ...tag, req, entries, ...(more === undefined ? {} : { more }) });
         }
         if (msg.when !== undefined) {
-          const record = self.recordAt(msg.c, id, msg.when);
-          return send({ t: 'history', ...tag, req, ...(record === undefined ? {} : { record }) });
+          // Not there then, and nothing known of it then, are two answers: a client that puts a record back as it
+          // was deletes one that was not there, and must not delete one the history says nothing of
+          const row = rowAt(msg.c, id, msg.when);
+          const answer = row === undefined ? (known(msg.when) ? {} : { known: false }) : row.data === null ? {} : { record: JSON.parse(row.data) };
+          return send({ t: 'history', ...tag, req, ...answer });
         }
         const limit = Math.min(Number.isInteger(msg.limit) && msg.limit > 0 ? msg.limit : HISTORY_DEFAULT, HISTORY_PAGE);
         // One request reads so many rows and no more: a path few writes touch would otherwise have it read the
@@ -1521,7 +1601,7 @@ export function createStore({
      */
     recordAt(c, id, when) {
       if (shape.isSingleton(c) && when === undefined) [id, when] = [undefined, id];
-      const [row] = historyRows(c, id, { ...upTo(when), limit: 1 });
+      const row = rowAt(c, id, when);
       return row && row.data !== null ? JSON.parse(row.data) : undefined;
     },
     /**
@@ -1533,10 +1613,14 @@ export function createStore({
     revert(c, id, when, { children = true } = {}) {
       alive('write to');
       if (shape.isSingleton(c) && when === undefined) [id, when] = [undefined, id];
-      const [row] = historyRows(c, id, { ...upTo(when), limit: 1 });
-      if (!row) throw new Error(`Nothing is known of ${shape.full(c, id).join('/')} then: it is before the store kept its history`);
+      const row = rowAt(c, id, when);
+      if (!row && !known(when)) throw new Error(`Nothing is known of ${shape.full(c, id).join('/')} then: it is before the store kept its history`);
       const current = doc.get(c, id);
-      if (row.data === null) return current === undefined ? [] : run([{ c, id, del: true }]);
+      // Not there then: deleted by then, or not made yet
+      if (!row || row.data === null) {
+        if (shape.isSingleton(c)) throw new Error(`Nothing is known of ${c} then`);
+        return current === undefined ? [] : run([{ c, id, del: true }]);
+      }
       const target = JSON.parse(row.data);
       // A record made again brings back the records its deletion took with it, in the same write
       if (current === undefined) return run([changeFor({ c, id, path: [] }, target), ...(children ? takenWith(c, id) : [])]);
@@ -1596,14 +1680,40 @@ export function createStore({
     if (seeds.length) commit({ upserts: seeds, deletes: [] });
   }
   compact();
-  // History turned on over records already there: each gets a row as it stands, the first thing known of it
-  if (keeps && commitNow() && storage.historyCount() === 0) {
-    const baseline = [];
-    const ts = clock.time;
-    for (const [c, id, data] of doc.records()) {
-      baseline.push({ c, id: id ?? null, v: version, ts, user: null, replica: 'server', data: JSON.stringify(data), changes: '[]' });
+  // The history is brought up to the records: turned on over records already there, each gets a row as it stands,
+  // the first thing known of it. And where the store was written without it for a while (its newest row is of an
+  // older version than the store's), every record written since gets one, and every record deleted since a row
+  // that says so: the newest row of a record is then the record again, whatever went unrecorded between
+  if (keeps && commitNow()) {
+    const [newest] = storage.activity({ limit: 1 });
+    landedAt = Math.max(newest?.at ?? 0, clock.time);
+    if (!newest || newest.v < version) {
+      const last = new Map();   // record key -> its newest row's data, for a history that has rows
+      if (newest) {
+        for (let cursor; ;) {
+          const rows = storage.activity({ cursor, limit: 1000 });
+          for (const row of rows) {
+            const key = shape.recordKey(row.c, row.id ?? undefined);
+            if (row.c !== MARK && !last.has(key)) last.set(key, { c: row.c, id: row.id, data: row.data });
+          }
+          if (rows.length < 1000) break;
+          cursor = { v: rows[rows.length - 1].v, n: rows[rows.length - 1].n };
+        }
+      }
+      const rows = [];
+      const row = (c, id, data) => rows.push({ c, id: id ?? null, v: version, n: rows.length, ts: landedAt, at: landedAt, user: null, replica: 'server', data, changes: '[]' });
+      const here = new Set();
+      for (const [c, id, data] of doc.records()) {
+        const key = shape.recordKey(c, id);
+        here.add(key);
+        const json = JSON.stringify(data);
+        if (last.get(key)?.data !== json) row(c, id, json);
+      }
+      for (const [key, { c, id, data }] of last) if (data !== null && !here.has(key) && shape.has(c)) row(c, id, null);
+      // From here on the history is whole (see known)
+      row(MARK, null, null);
+      commit({ upserts: [], deletes: [], history: rows });
     }
-    if (baseline.length) commit({ upserts: [], deletes: [], history: baseline });
   }
   migrate();
   if (!commitNow()) throw new RefusedError('unavailable', 'The store could not save the change and was unloaded');

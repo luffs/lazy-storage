@@ -200,7 +200,11 @@ holding JSON text where the value is a list or an object. `true` and
 schema that lets in fields it does not name (`'*'`), or names none (a
 check, a Zod schema), also gets the record whole in a `data` column, for
 `json_extract`. A record's own `id` field is left out, the row's being
-the same, and a name taken already gets a trailing `_`.
+the same, and a name taken already gets a trailing `_`: SQLite tells
+names apart without regard to case, so `Name` beside `name` is `name_`.
+A field whose name has a `"` or a `\` in it gets no column, SQLite's
+JSON paths having no way to write it; it is in `data`, for a schema that
+lets in other fields.
 
 - `prefix` names the views apart from tables of yours, or from this
   adapter's own (`records`, `stores`, `replicas`, `oplog`, `history`, `leases`): a

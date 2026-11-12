@@ -246,9 +246,13 @@ export interface HistoryEntry {
   /** The record it is of: its collection (or singleton), and its id, which a singleton has none of */
   c: string;
   id?: string;
-  /** The store's version the write made, and its time on the store's clock */
+  /** The store's version the write made, and the entry's place among that write's entries: the order of the history */
   v: number;
+  n: number;
+  /** When the write was made: its own stamp, which an edit made offline brings from the past */
   ts: Timestamp;
+  /** When it landed, on the store's clock: what `since`, `until` and a time given to `recordAt` are asked of */
+  at: Timestamp;
   /** The replica that wrote ('server' for the store's own write), and the key of its user, as presence keys users */
   replicaId: string;
   user?: string;
@@ -261,14 +265,14 @@ export interface HistoryEntry {
 /** A time on the store's clock (ms, a Date, `{ ts }`) or a version (`{ v }`) */
 export type When = number | Date | { ts: number | Date } | { v: number };
 
-/** Where an answer stopped, to read on after: an entry's version and record. The last entry of an answer will do */
-export interface HistoryCursor { v: number; c: string; id?: string | null }
+/** Where an answer stopped, to read on after: an entry's version and its place in it. The last entry of an answer will do */
+export interface HistoryCursor { v: number; n?: number }
 
 /** What `historyOf` and `activity` both take: how many, from when to when, whose, and where to read on from */
 export interface HistoryRange {
   /** How many entries (default 50) */
   limit?: number;
-  /** Times on the store's clock */
+  /** Times on the store's clock: of when a write landed (an entry's `at`) */
   since?: number | Date;
   until?: number | Date;
   /** Older than this version */
@@ -303,7 +307,7 @@ export type ServerMessage =
   | { t: 'delta'; store?: string; ops: Array<{ v: number; ts: Timestamp; changes: Change[] }>; v: number; epoch: string | null; seq: number; now: number; shape: string; lost?: Array<{ seq: number; lost: Lost[] }>; relay?: true }
   | { t: 'patch'; store?: string; changes: Change[]; v: number; ts: Timestamp }
   | { t: 'ack'; store?: string; seq: number; v: number; now: number; lost?: Lost[]; as?: string; replica?: string }
-  | { t: 'history'; store?: string; req: number; entries?: HistoryEntry[]; more?: HistoryCursor; record?: unknown; as?: string }
+  | { t: 'history'; store?: string; req: number; entries?: HistoryEntry[]; more?: HistoryCursor; record?: unknown; known?: false; as?: string }
   | { t: 'error'; store?: string; seq?: number; req?: number; code?: string; message: string; retryAfter?: number; as?: string; replica?: string }
   | { t: 'presence'; store?: string; peers?: Peer[]; left?: string[]; joined?: Peer[]; shared?: Array<{ replicaId: string; data?: unknown }> }
   | { t: 'relay'; store?: string; status: 'local' | 'through' }

@@ -63,15 +63,15 @@ export interface ServerStorage {
   close?(): void;
   /** Take a document as the whole storage, under a new epoch and no log; never under a live store */
   replace?(doc: StorageDocument): void;
-  /** A record's history rows, newest first: older than version `before`, no later than `upToV` or the time `upToTs`, no earlier than `fromTs`, of one user's writes (for a store made with `history`) */
-  history?(query: { c: string; id: string | null; before?: number; upToV?: number; upToTs?: number; fromTs?: number; user?: string; limit?: number }): HistoryRow[];
+  /** A record's history rows, newest first: older than version `before`, no later than `upToV` or landed by `upToAt`, not before `fromAt`, of one user's writes (for a store made with `history`) */
+  history?(query: { c: string; id: string | null; before?: number; upToV?: number; upToAt?: number; fromAt?: number; user?: string; limit?: number }): HistoryRow[];
   /** The rows one write left, each with its `c` and `id` */
   historyOfVersion?(v: number): Array<HistoryRow & { c: string; id: string | null }>;
-  /** Every record's rows, each with its `c` and `id`, in order of version (newest first, or oldest with `ascending`), collection and id; `cursor` a row to read on after */
-  activity?(query: { before?: number; after?: number; fromTs?: number; toTs?: number; user?: string; c?: string; deleted?: boolean; ascending?: boolean; cursor?: HistoryCursor; limit?: number }): Array<HistoryRow & { c: string; id: string | null }>;
+  /** Every record's rows, each with its `c` and `id`, in order of version (newest first, or oldest with `ascending`) and of their place in it; `cursor` a row to read on after */
+  activity?(query: { before?: number; after?: number; fromAt?: number; toAt?: number; user?: string; c?: string; deleted?: boolean; ascending?: boolean; cursor?: HistoryCursor; limit?: number }): Array<HistoryRow & { c: string; id: string | null }>;
   /** How many history rows it holds */
   historyCount?(): number;
-  /** Forget the rows older than that time, but for each record's last one before it (not kept when that is a deletion) */
+  /** Forget the rows that landed before that time, but for each record's last one before it (not kept when that is a deletion) */
   pruneHistory?(before: number): void;
 }
 
@@ -79,8 +79,12 @@ export interface ServerStorage {
 export interface HistoryRow {
   c?: string;
   id?: string | null;
+  /** The version the write made, and the row's place among that version's rows */
   v: number;
+  n: number;
+  /** The write's own stamp, and the store's time when it landed (which never goes back from one version to the next) */
   ts: Timestamp;
+  at: Timestamp;
   user: string | null;
   replica: string | null;
   data: string | null;

@@ -649,10 +649,19 @@ export function createRelay({
       case 'history': {
         const asked = edge.asking.get(msg.req);
         edge.asking.delete(msg.req);
-        if (asked && edge.sessions.has(asked.ss)) asked.ss.send({ t: 'history', req: asked.req, ...(msg.entries === undefined ? {} : { entries: msg.entries }), ...(msg.record === undefined ? {} : { record: msg.record }), ...(msg.more === undefined ? {} : { more: msg.more }) });
+        // The answer as the server gave it, under the client's own req
+        const { req: _req, as: _as, store: _store, ...answer } = msg;
+        if (asked && edge.sessions.has(asked.ss)) asked.ss.send({ ...answer, req: asked.req });
         return;
       }
       case 'error': {
+        // A server from before it knew the request names no `req` in its refusal: what was asked of it will not be
+        // answered, and that is its clients' to hear, each for its own request, and no fault
+        if (!Number.isInteger(msg.req) && edge.asking.size && /^Unknown message type: history/.test(msg.message ?? '')) {
+          for (const { ss, req } of edge.asking.values()) if (edge.sessions.has(ss)) ss.send({ t: 'error', req, code: 'unavailable', message: 'The server does not answer history requests: it is older than this relay' });
+          edge.asking.clear();
+          return;
+        }
         // The answer to what a client asked through the relay is that client's
         if (Number.isInteger(msg.req)) {
           const asked = edge.asking.get(msg.req);

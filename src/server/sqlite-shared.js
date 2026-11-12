@@ -156,14 +156,16 @@ const SCHEMA = `
     collection TEXT    NOT NULL,
     id         TEXT    NOT NULL,
     v          INTEGER NOT NULL,
+    n          INTEGER NOT NULL,
     ts         INTEGER NOT NULL,
+    at         INTEGER NOT NULL,
     user       TEXT,
     replica    TEXT,
     data       TEXT,
     changes    TEXT    NOT NULL,
     PRIMARY KEY (store, collection, id, v)
   ) WITHOUT ROWID;
-  CREATE INDEX IF NOT EXISTS history_by_version ON history (store, v);
+  CREATE INDEX IF NOT EXISTS history_in_order ON history (store, v, n);
   CREATE TABLE IF NOT EXISTS leases (
     store  TEXT    PRIMARY KEY,
     holder TEXT    NOT NULL,
@@ -184,14 +186,16 @@ const viewMark = prefix => `/* lazy-storage view${prefix ? `: ${prefix}` : ''} *
  * view is of one store), the record's id (a collection's), a column per
  * field its schema names, and the record whole as `data` where the schema
  * names no fields or lets in others. A field inside an object is named
- * with its path (`meta_color`); a name taken already gets a trailing `_`.
- * A collection's own `id` field is left out: the row's id is the record's
+ * with its path (`meta_color`); a name taken already gets a trailing `_`,
+ * and SQLite tells names apart without regard to case, so `Name` beside
+ * `name` is taken too. A collection's own `id` field is left out: the
+ * row's id is the record's
  */
 function viewSelect(c, schema, { single, store }) {
   const taken = new Set();
   const named = name => {
-    while (taken.has(name)) name += '_';
-    taken.add(name);
+    while (taken.has(name.toLowerCase())) name += '_';
+    taken.add(name.toLowerCase());
     return ident(name);
   };
   const columns = [];
@@ -199,8 +203,8 @@ function viewSelect(c, schema, { single, store }) {
   if (!single) columns.push(`id AS ${named('id')}`);
   const laid = fieldsOf(schema);
   for (const path of laid?.fields ?? []) {
-    // SQLite's JSON paths have no way to write a key with a quote in it
-    if (path.some(seg => seg.includes('"'))) continue;
+    // SQLite's JSON paths have no way to write a key with a quote or a backslash in it
+    if (path.some(seg => /["\\]/.test(seg))) continue;
     if (!single && path.length === 1 && path[0] === 'id') continue;
     columns.push(`json_extract(data, ${literal(`$${path.map(seg => `."${seg}"`).join('')}`)}) AS ${named(path.join('_'))}`);
   }
@@ -249,6 +253,9 @@ export function sqliteStorageOn({ exec, prepare, transaction, close, db, driver 
   // Wait out another connection's lock (a backup, an admin script) rather
   // than fail the commit at once with SQLITE_BUSY
   exec('PRAGMA busy_timeout = 5000;');
+  // A history table from before its rows said when they landed and where in their write they stand (never released):
+  // dropped, so that the store's history starts over from its records as they are
+  if (prepare("SELECT 1 AS one FROM sqlite_master WHERE type = 'table' AND name = 'history'").get() && !prepare('PRAGMA table_info(history)').all().some(c => c.name === 'n')) exec('DROP TABLE history;');
   exec(SCHEMA);
   // Files from before replicas had owners, or stores a schema, gain the column
   if (!prepare('PRAGMA table_info(replicas)').all().some(c => c.name === 'owner')) exec('ALTER TABLE replicas ADD COLUMN owner TEXT;');
@@ -285,27 +292,28 @@ export function sqliteStorageOn({ exec, prepare, transaction, close, db, driver 
     dropLease: prepare('DELETE FROM leases WHERE store = ?'),
     // History (a store made with `history`; see storage.js): a row per record a write wrote, by record and version
     putHistory: prepare(`
-      INSERT INTO history (store, collection, id, v, ts, user, replica, data, changes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT (store, collection, id, v) DO UPDATE SET ts = excluded.ts, user = excluded.user, replica = excluded.replica, data = excluded.data, changes = excluded.changes`),
+      INSERT INTO history (store, collection, id, v, n, ts, at, user, replica, data, changes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT (store, collection, id, v) DO UPDATE SET n = excluded.n, ts = excluded.ts, at = excluded.at, user = excluded.user, replica = excluded.replica, data = excluded.data, changes = excluded.changes`),
     history: prepare(`
-      SELECT v, ts, user, replica, data, changes FROM history
-      WHERE store = ?1 AND collection = ?2 AND id = ?3 AND v < ?4 AND v <= ?5 AND ts <= ?6 AND ts >= ?7 AND (?8 IS NULL OR user = ?8)
+      SELECT v, n, ts, at, user, replica, data, changes FROM history
+      WHERE store = ?1 AND collection = ?2 AND id = ?3 AND v < ?4 AND v <= ?5 AND at <= ?6 AND at >= ?7 AND (?8 IS NULL OR user = ?8)
       ORDER BY v DESC LIMIT ?9`),
-    historyOfVersion: prepare('SELECT collection, id, v, ts, user, replica, data, changes FROM history WHERE store = ? AND v = ?'),
-    // Every record's rows, newest first or oldest (see storage.js): a bound that is not asked for is as wide as it
-    // goes, and the cursor (?9 its version, ?10 and ?11 its record) is the row to read on after, in the order asked
+    historyOfVersion: prepare('SELECT collection, id, v, n, ts, at, user, replica, data, changes FROM history WHERE store = ? AND v = ? ORDER BY n'),
+    // Every record's rows, in order of version (newest first or oldest) and of their place in it (see storage.js): a
+    // bound that is not asked for is as wide as it goes, and the cursor (?9 its version, ?10 its place) is the row
+    // to read on after
     ...Object.fromEntries([['DESC', '<'], ['ASC', '>']].map(([order, past]) => [`activity${order}`, prepare(`
-      SELECT collection, id, v, ts, user, replica, data, changes FROM history
-      WHERE store = ?1 AND v < ?2 AND v > ?3 AND ts >= ?4 AND ts <= ?5
+      SELECT collection, id, v, n, ts, at, user, replica, data, changes FROM history
+      WHERE store = ?1 AND v < ?2 AND v > ?3 AND at >= ?4 AND at <= ?5
         AND (?6 IS NULL OR user = ?6) AND (?7 IS NULL OR collection = ?7) AND (?8 = 0 OR data IS NULL)
-        AND (?9 IS NULL OR v ${past} ?9 OR (v = ?9 AND (collection > ?10 OR (collection = ?10 AND id > ?11))))
-      ORDER BY v ${order}, collection, id LIMIT ?12`)])),
+        AND (?9 IS NULL OR v ${past} ?9 OR (v = ?9 AND n > ?10))
+      ORDER BY v ${order}, n LIMIT ?11`)])),
     historyCount: prepare('SELECT count(*) AS n FROM history WHERE store = ?'),
     // Each record's last row before the time stays: what the record was then. Unless it was deleted then: no
     // row says the same, and a record made and deleted would otherwise leave one for ever
     pruneHistory: prepare(`
-      DELETE FROM history WHERE store = ?1 AND ts < ?2 AND (data IS NULL OR v < (
-        SELECT max(h.v) FROM history h WHERE h.store = history.store AND h.collection = history.collection AND h.id = history.id AND h.ts < ?2
+      DELETE FROM history WHERE store = ?1 AND at < ?2 AND (data IS NULL OR v < (
+        SELECT max(h.v) FROM history h WHERE h.store = history.store AND h.collection = history.collection AND h.id = history.id AND h.at < ?2
       ))`),
     dropHistory: prepare('DELETE FROM history WHERE store = ?')
   };
@@ -393,7 +401,7 @@ export function sqliteStorageOn({ exec, prepare, transaction, close, db, driver 
       if (change.replica) replicas.set(change.replica.id, change.replica);
       for (const replica of change.forgetReplicas ?? []) replicas.set(replica, null);
       if (change.log) q.putLog.run(id, change.log.v, change.log.ts, JSON.stringify(change.log.changes));
-      for (const h of change.history ?? []) q.putHistory.run(id, h.c, rowId(h.id), h.v, h.ts, h.user ?? null, h.replica ?? null, h.data, h.changes);
+      for (const h of change.history ?? []) q.putHistory.run(id, h.c, rowId(h.id), h.v, h.n, h.ts, h.at, h.user ?? null, h.replica ?? null, h.data, h.changes);
     }
     for (const [key, row] of records) {
       const [c, rid] = JSON.parse(key);
@@ -405,6 +413,24 @@ export function sqliteStorageOn({ exec, prepare, transaction, close, db, driver 
       else q.setReplica.run(id, replica, r.seq, r.seen, r.owner ?? null);
     }
     if (floor !== null) q.pruneLog.run(id, floor);
+  });
+
+  /**
+   * A store's history pruned, under its lease as a commit is: the deletion
+   * first, which takes the file's write lock, then the lease read, and
+   * undone when it is no longer this process's. One that stalled past its
+   * lease would otherwise forget, by its own `keep`, rows of a store
+   * another process serves now
+   */
+  const prune = transaction((id, before) => {
+    q.pruneHistory.run(id, before);
+    if (!leasing) return;
+    const current = lq.get.get(id);
+    if (current && current.holder === holder) return;
+    held.delete(id);
+    const err = new Error(`The lease on store "${id}" was lost: another process serves it now`);
+    err.code = 'lease-lost';
+    throw err;
   });
 
   const replace = transaction((id, doc) => {
@@ -468,22 +494,22 @@ export function sqliteStorageOn({ exec, prepare, transaction, close, db, driver 
         commitMany,
         flush() {},
         /** A record's history rows, newest first (see storage.js) */
-        history({ c, id: rid, before, upToV, upToTs, fromTs, user, limit }) {
+        history({ c, id: rid, before, upToV, upToAt, fromAt, user, limit }) {
           const most = Number.MAX_SAFE_INTEGER;
-          return q.history.all(id, c, rowId(rid), before ?? most, upToV ?? most, upToTs ?? most, fromTs ?? -most, user ?? null, limit ?? most).map(row => ({ ...row }));
+          return q.history.all(id, c, rowId(rid), before ?? most, upToV ?? most, upToAt ?? most, fromAt ?? -most, user ?? null, Number.isFinite(limit) ? limit : most).map(row => ({ ...row }));
         },
         historyOfVersion: v => q.historyOfVersion.all(id, v).map(({ collection, id: rid, ...row }) => ({ c: collection, id: rid === '' ? null : rid, ...row })),
-        activity({ before, after, fromTs, toTs, user, c, deleted, ascending, cursor, limit } = {}) {
+        activity({ before, after, fromAt, toAt, user, c, deleted, ascending, cursor, limit } = {}) {
           const most = Number.MAX_SAFE_INTEGER;
           const rows = (ascending ? q.activityASC : q.activityDESC).all(
-            id, before ?? most, after ?? -most, fromTs ?? -most, toTs ?? most, user ?? null, c ?? null, deleted ? 1 : 0,
-            cursor ? cursor.v : null, cursor ? cursor.c : null, cursor ? rowId(cursor.id) : null, Number.isFinite(limit) ? limit : most
+            id, before ?? most, after ?? -most, fromAt ?? -most, toAt ?? most, user ?? null, c ?? null, deleted ? 1 : 0,
+            cursor ? cursor.v : null, cursor ? cursor.n : null, Number.isFinite(limit) ? limit : most
           );
           return rows.map(({ collection, id: rid, ...row }) => ({ c: collection, id: rid === '' ? null : rid, ...row }));
         },
         historyCount: () => q.historyCount.get(id).n,
         pruneHistory(before) {
-          q.pruneHistory.run(id, before);
+          prune(id, before);
         },
         /**
          * Take a document (store.export(), or another adapter's load()) as
@@ -540,11 +566,16 @@ export function sqliteStorageOn({ exec, prepare, transaction, close, db, driver 
       transaction(() => {
         const ours = prepare("SELECT name FROM sqlite_master WHERE type = 'view' AND instr(sql, ?) > 0").all(mark).map(r => r.name);
         for (const name of ours) exec(`DROP VIEW ${ident(name)};`);
-        const existing = prepare('SELECT type FROM sqlite_master WHERE name = ?');
+        // As SQLite tells names apart: without regard to case
+        const existing = prepare('SELECT type FROM sqlite_master WHERE name = ? COLLATE NOCASE');
+        const made = new Set();
         for (const [c, schema] of Object.entries(schemas)) {
           const name = `${prefix}${c}`;
+          // Two of the store's own collections whose names differ only by case: no prefix tells them apart
+          if (made.has(name.toLowerCase())) throw new TypeError(`A view called "${name}" cannot be made: another collection's view has that name but for its case, and SQLite tells names apart without it. Leave one of them out of the schemas given to views`);
           const there = existing.get(name);
           if (there) throw new TypeError(`A view called "${name}" cannot be made: the file has a ${there.type} of that name already. Give views a prefix`);
+          made.add(name.toLowerCase());
           exec(`CREATE VIEW ${ident(name)} AS ${mark} ${viewSelect(c, schema, { single: single.has(c), store })};`);
           names.push(name);
         }

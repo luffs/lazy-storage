@@ -617,6 +617,14 @@ function build({
       case 'error': {
         const err = new Error(msg.message);
         if (msg.code) err.code = msg.code;
+        // A server from before it knew the request names no `req` in its refusal: nothing asked of it will be
+        // answered, and that is no error of the store's to tell everyone
+        if (!Number.isInteger(msg.req) && asking.size && /^Unknown message type: history/.test(msg.message ?? '')) {
+          const unknown = Object.assign(new Error('The server does not answer history requests: it is older than this client'), { code: 'unavailable' });
+          for (const waiting of [...asking.values()]) waiting.reject(unknown);
+          asking.clear();
+          return;
+        }
         // The answer to something asked is its asker's to hear, not everyone's
         if (Number.isInteger(msg.req)) {
           const waiting = asking.get(msg.req);
@@ -857,6 +865,7 @@ function build({
     async historyOf(c, id, options) {
       if (Utils.isPlainObject(id) && options === undefined) [id, options] = [undefined, id];
       const { limit, before, path, since, until, user } = options ?? {};
+      if (limit !== undefined && !(Number.isInteger(limit) && limit >= 1)) throw new TypeError('history takes a limit of one or more');
       const entries = [];
       // An answer carries so many, and the server reads so far for one: it says where it stopped, and is asked on
       // from there, a request each (and a token of the rate limit each), until enough are told or there are no more
@@ -877,6 +886,7 @@ function build({
     async activity(options = {}) {
       const { limit, before, after, since, until, user, collection, deleted, oldestFirst } = options;
       if (collection !== undefined && !shape.has(collection)) throw new TypeError(`"${collection}" is not a collection or singleton of this store`);
+      if (limit !== undefined && !(Number.isInteger(limit) && limit >= 1)) throw new TypeError('activity takes a limit of one or more');
       const entries = [];
       // An answer carries so many and says where it stopped: asked on from there, a request each (and a token of
       // the rate limit each), until enough are told or there are no more
@@ -901,7 +911,10 @@ function build({
     async revert(c, id, when) {
       if (shape.isSingleton(c)) [id, when] = [undefined, id];
       if (when === undefined) throw new TypeError('revert takes a time or a version');
-      const target = (await ask({ ...of(c, id), when: wire(when) })).record;
+      const answer = await ask({ ...of(c, id), when: wire(when) });
+      // Not there then is a record to delete; nothing known of it then (before the store kept history) is nothing to go by
+      if (answer.known === false) throw Object.assign(new Error(`Nothing is known of ${shape.full(c, id).join('/')} then: it is before the store kept its history`), { code: 'unknown' });
+      const target = answer.record;
       if (shape.isSingleton(c)) {
         if (target === undefined) throw new Error(`Nothing is known of ${c} then`);
         if (Utils.isPlainObject(target) && Utils.isPlainObject(state[c])) writeAs(c, undefined, state[c], target, []);

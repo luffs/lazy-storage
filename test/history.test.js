@@ -1,6 +1,9 @@
 // history.test.js - A store that keeps its history: every record as each write left it, when and by whom,
 // read back, asked for as it was, and put back
 import { test } from 'node:test';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import assert from 'node:assert/strict';
 import { createStore, memoryStorage } from '../src/server/index.js';
 import { sqliteStorage } from '../src/server/sqlite-node.js';
@@ -96,7 +99,8 @@ for (const [kind, makeStorage] of Object.entries(storages)) {
     store.revert('tasks', 'k', 1_001_500);
     assert.deepEqual(store.state.tasks.k, { title: 'Milk', meta: { color: 'red', size: 1 }, geo: { x: 1, y: 2 }, tags: ['a'] });
     store.patch({ tasks: { late: { title: 'Late' } } });
-    assert.throws(() => store.revert('tasks', 'late', 1_000_500), /Nothing is known of tasks\/late then/);
+    store.revert('tasks', 'late', 1_000_500);
+    assert.equal(store.state.tasks.late, undefined, 'one that was not there then is deleted');
     store.revert('tasks', 'k', { v: store.historyOf('tasks', 'k').find(e => e.record === undefined).v });
     assert.equal(store.state.tasks.k, undefined);
     store.dispose();
@@ -156,7 +160,8 @@ for (const [kind, makeStorage] of Object.entries(storages)) {
     const now = fakeTime(100 * DAY);
     const storage = makeStorage();
     const store = createStore({ ...SHAPE, now, history: { keep: 10 * DAY }, storage });
-    const settled = storage.historyCount();   // the singleton's row
+    const rows = () => store.activity({ limit: 1000 }).length;
+    const settled = rows();   // the singleton's row
     for (let i = 0; i < 20; i++) {
       store.patch({ tasks: { [`gone${i}`]: { n: i } } });
       store.del('tasks', `gone${i}`);
@@ -164,8 +169,7 @@ for (const [kind, makeStorage] of Object.entries(storages)) {
     store.patch({ tasks: { old: { title: 'Written long ago' } } });
     now.advance(15 * DAY);
     store.del('tasks', 'old');   // within what is kept; and an hour and more since the last compaction
-    store.flush();
-    assert.equal(storage.historyCount(), settled + 2, 'of the twenty made and deleted, nothing; of the one deleted since, its last form and its deletion');
+    assert.equal(rows(), settled + 2, 'of the twenty made and deleted, nothing; of the one deleted since, its last form and its deletion');
     assert.equal(store.recordAt('tasks', 'gone3', 100 * DAY + 1), undefined);
     assert.deepEqual(store.historyOf('tasks', 'old').map(e => e.record), [undefined, { title: 'Written long ago' }]);
     store.revert('tasks', 'old', now() - DAY);
@@ -433,12 +437,13 @@ test('a request the server never answers is given up on, and one with fields tha
     refusal(a.historyOf('tasks', 'k', { path: [1] })),
     refusal(a.recordAt('tasks', 'k', { ts: {} })),
     refusal(a.recordAt('tasks', 'k', { v: 1.5 })),
-    a.historyOf('tasks', 'k', { limit: 'many' })
+    refusal(a.historyOf('tasks', 'k', { limit: 'many' })),
+    refusal(a.activity({ limit: 0 }))
   ];
   await net.settle();
   const answers = await Promise.all(asked);
   assert.deepEqual(answers.slice(0, 5).map(err => err.code), ['invalid', 'invalid', 'invalid', 'invalid', 'invalid']);
-  assert.equal(answers[5].length, 1, 'a limit that is none is the default');
+  assert.ok(answers[5] instanceof TypeError && answers[6] instanceof TypeError, 'a limit that is none is refused before it is asked, as the store refuses it');
   assert.deepEqual(faults, []);
   assert.throws(() => store.historyOf('tasks', 'k', { before: {} }), /before is a version/);
   assert.throws(() => store.historyOf('tasks', 'k', { limit: 1.5 }), /limit/);
@@ -500,23 +505,24 @@ for (const [kind, makeStorage] of Object.entries(storages)) {
     const told = entries => entries.map(e => `${e.c}/${e.id ?? ''}@${e.replicaId}${e.record === undefined ? ' gone' : ''}`);
     const all = store.activity();
     assert.deepEqual(told(all), [
-      'subtasks/s@a gone', 'tasks/k@a gone',       // one write: the task, and the child it took
+      'tasks/k@a gone', 'subtasks/s@a gone',       // one write: the task, and the child it took, in the order it wrote them
       'subtasks/s@server',
-      'settings/@b', 'tasks/k@b',
-      'tasks/j@a', 'tasks/k@a',
+      'tasks/k@b', 'settings/@b',
+      'tasks/k@a', 'tasks/j@a',
       'settings/@server'                            // as it stood when history began
     ]);
     assert.deepEqual([all[1].user, all[2].user, all[3].user], ['alice', undefined, 'bob']);
-    assert.deepEqual(all[4].changes, [{ c: 'tasks', id: 'k', path: ['title'], set: 'Oat milk' }]);
-    assert.deepEqual(all[4].record, { title: 'Oat milk' });
-    assert.ok(!('id' in all[3]), 'a singleton has no id');
+    assert.deepEqual(all[3].changes, [{ c: 'tasks', id: 'k', path: ['title'], set: 'Oat milk' }]);
+    assert.deepEqual(all[3].record, { title: 'Oat milk' });
+    assert.ok(!('id' in all[4]), 'a singleton has no id');
+    assert.deepEqual([all[0].n, all[1].n, all[0].v === all[1].v], [0, 1, true], 'a write\'s rows are numbered in it');
 
-    assert.deepEqual(told(store.activity({ user: 'alice' })), ['subtasks/s@a gone', 'tasks/k@a gone', 'tasks/j@a', 'tasks/k@a']);
-    assert.deepEqual(told(store.activity({ collection: 'tasks' })), ['tasks/k@a gone', 'tasks/k@b', 'tasks/j@a', 'tasks/k@a']);
-    assert.deepEqual(told(store.activity({ deleted: true })), ['subtasks/s@a gone', 'tasks/k@a gone'], 'what was deleted, with no id to ask by');
-    assert.deepEqual(told(store.activity({ since: 1_000_500, until: new Date(1_002_500) })), ['subtasks/s@server', 'settings/@b', 'tasks/k@b']);
-    assert.deepEqual(told(store.activity({ before: all[2].v, after: all[5].v })), ['settings/@b', 'tasks/k@b']);
-    assert.deepEqual(told(store.activity({ oldestFirst: true, after: all[5].v })), ['settings/@b', 'tasks/k@b', 'subtasks/s@server', 'subtasks/s@a gone', 'tasks/k@a gone'], 'the store followed from a version on');
+    assert.deepEqual(told(store.activity({ user: 'alice' })), ['tasks/k@a gone', 'subtasks/s@a gone', 'tasks/k@a', 'tasks/j@a']);
+    assert.deepEqual(told(store.activity({ collection: 'tasks' })), ['tasks/k@a gone', 'tasks/k@b', 'tasks/k@a', 'tasks/j@a']);
+    assert.deepEqual(told(store.activity({ deleted: true })), ['tasks/k@a gone', 'subtasks/s@a gone'], 'what was deleted, with no id to ask by');
+    assert.deepEqual(told(store.activity({ since: 1_000_500, until: new Date(1_002_500) })), ['subtasks/s@server', 'tasks/k@b', 'settings/@b']);
+    assert.deepEqual(told(store.activity({ before: all[2].v, after: all[5].v })), ['tasks/k@b', 'settings/@b']);
+    assert.deepEqual(told(store.activity({ oldestFirst: true, after: all[5].v })), ['tasks/k@b', 'settings/@b', 'subtasks/s@server', 'tasks/k@a gone', 'subtasks/s@a gone'], 'the store followed from a version on');
 
     // A page at a time, the last entry the cursor: a write of several records is split and nothing is told twice
     const paged = [];
@@ -569,7 +575,7 @@ test('a client reads the store\'s activity: the records it may not read the hist
   assert.deepEqual(mine.slice(0, 2).map(e => e.id), ['t129', 't128']);
   assert.equal(requests, 2, 'a hundred an answer');
   const everything = await settle(admin.activity({ limit: 4 }));
-  assert.deepEqual(everything.map(e => `${e.c}/${e.id}`), ['subtasks/s129', 'tasks/t129', 'subtasks/s128', 'tasks/t128']);
+  assert.deepEqual(everything.map(e => `${e.c}/${e.id}`), ['tasks/t129', 'subtasks/s129', 'tasks/t128', 'subtasks/s128']);
   assert.equal((await settle(a.activity())).length, 50, 'fifty unless asked for more');
   const first = await settle(a.activity({ oldestFirst: true, limit: 2, since: new Date(0) }));
   assert.deepEqual(first.map(e => e.id), ['t0', 't1']);
@@ -661,3 +667,250 @@ for (const [kind, makeStorage] of Object.entries(storages)) {
     store.dispose();
   });
 }
+
+// --- Found in review ---------------------------------------------------------------------------
+
+test('a client that reverts to a time before the store kept history is refused, and the record is not deleted', async () => {
+  const now = fakeTime(1_000_000);
+  const storage = memoryStorage();
+  const before = createStore({ ...SHAPE, now, storage });
+  before.patch({ tasks: { k: { title: 'From before' } } });
+  before.dispose();
+  now.advance(DAY);
+  const store = createStore({ ...SHAPE, now, storage, history: { clients: true } });
+  const net = createNetwork(store);
+  const a = net.client({ replicaId: 'a', ...SHAPE, now });
+  const behind = createNetwork(createRelay({ shapeOf: () => SHAPE, link: net.link({ user: { id: 'relay' } }).factory, acknowledge: 'local', grace: 0, reconnect: false, keepalive: false, now }));
+  const tab = behind.client({ replicaId: 'tab', ...SHAPE, now });
+  const settle = async promise => { for (let i = 0; i < 12; i++) { await net.settle(); await behind.settle(); } return promise; };
+  await settle();
+  assert.throws(() => store.revert('tasks', 'k', 1_000_500), /Nothing is known/);
+  for (const db of [a, tab]) {
+    const err = await settle(refusal(db.revert('tasks', 'k', 1_000_500)));
+    assert.deepEqual([err.code, err.message], ['unknown', 'Nothing is known of tasks/k then: it is before the store kept its history']);
+    assert.equal(await settle(db.recordAt('tasks', 'k', 1_000_500)), undefined);
+  }
+  await settle();
+  assert.deepEqual(store.state.tasks.k, { title: 'From before' }, 'still there');
+  // Not there then, where the history does know: that one is deleted
+  now.advance(1000);
+  a.state.tasks.late = { title: 'Late' };
+  await settle();
+  assert.equal(await settle(a.revert('tasks', 'late', now() - 500)), undefined);
+  assert.equal(store.state.tasks.late, undefined);
+});
+
+test('a request that narrows the store\'s activity reads no more rows than one that does not: the narrowing is done on what is read', async () => {
+  const sqlite = sqliteStorage();
+  const storage = sqlite.store('main');
+  const store = createStore({ ...SHAPE, history: { clients: true }, storage });
+  for (let i = 0; i < 2600; i++) store.patch({ tasks: { [`t${i % 7}`]: { n: i } } });
+  store.flush();
+  // What the storage is asked, and how much of it: a narrowing it was given would have it read rows it never returns
+  const asked = [];
+  const activity = storage.activity;
+  storage.activity = query => { const rows = activity(query); asked.push([Object.keys(query).filter(key => query[key] !== undefined && query[key] !== false).sort().join(), rows.length]); return rows; };
+  const history = storage.history;
+  storage.history = query => { const rows = history(query); asked.push([Object.keys(query).filter(key => query[key] !== undefined).sort().join(), rows.length]); return rows; };
+  const sent = [];
+  const session = store.session({ send: message => sent.push(message) });
+  session.receive({ t: 'hello', proto: 3, replica: 'x', ops: [] });
+  store.flush();
+  const ask = query => { asked.length = 0; sent.length = 0; session.receive({ t: 'history', req: 1, ...query }); store.flush(); return sent.find(m => m.t === 'history'); };
+
+  for (const narrowing of [{ user: 'nobody' }, { deleted: true }, { since: 9e15 }, { collection: 'subtasks' }]) {
+    const answer = ask({ all: true, ...narrowing });
+    assert.deepEqual(answer.entries, [], JSON.stringify(narrowing));
+    assert.equal(asked.reduce((sum, [, rows]) => sum + rows, 0), 1000, 'a thousand rows read, and no more');
+    assert.ok(asked.every(([keys]) => !/user|deleted|fromAt|toAt|\bc\b/.test(keys)), `the storage is not asked to narrow: ${asked[0][0]}`);
+    assert.ok(Number.isSafeInteger(answer.more.v), 'and it says where it stopped');
+  }
+  const one = ask({ c: 'tasks', id: 't0', user: 'nobody' });
+  assert.deepEqual(one.entries, []);
+  assert.ok(asked.every(([keys]) => !/user|fromAt|upToAt/.test(keys)), 'nor for one record');
+  // The store's own reading is its own to spend: the storage narrows it
+  asked.length = 0;
+  assert.deepEqual(store.activity({ user: 'nobody' }), []);
+  assert.ok(/user/.test(asked[0][0]));
+  store.dispose();
+  sqlite.close();
+});
+
+test('where a request for the activity stops says nothing of a record the client may not read', async () => {
+  const store = createStore({ ...SHAPE, history: { clients: (user, { c }) => c === 'tasks' } });
+  store.patch({ tasks: { mine: { n: 1 } } });
+  for (let i = 0; i < 1100; i++) store.patch({ subtasks: { [`hidden-${i}`]: { n: i } } });
+  const sent = [];
+  const session = store.session({ send: message => sent.push(message) });
+  session.receive({ t: 'hello', proto: 3, replica: 'x', ops: [] });
+  session.receive({ t: 'history', req: 1, all: true });
+  store.flush();
+  const answer = sent.find(m => m.t === 'history');
+  assert.deepEqual(answer.entries, []);
+  assert.deepEqual(Object.keys(answer.more).sort(), ['n', 'v'], 'a place in the history, and no record');
+  assert.ok(!JSON.stringify(answer).includes('hidden'));
+  // And it is a place to read on from: the next request reaches what the client may read
+  sent.length = 0;
+  session.receive({ t: 'history', req: 2, all: true, cursor: answer.more });
+  store.flush();
+  assert.deepEqual(sent.find(m => m.t === 'history').entries.map(e => `${e.c}/${e.id}`), ['tasks/mine']);
+});
+
+for (const [kind, makeStorage] of Object.entries(storages)) {
+  test(`${kind}: the record as it was at a time is what the store held then, though an edit stamped earlier landed later`, () => {
+    const now = fakeTime(1_000_000);
+    const store = createStore({ ...SHAPE, now, history: true, storage: makeStorage() });
+    store.patch({ tasks: { k: { a: 1, b: 1 } } });
+    now.advance(1000);
+    const early = now();   // an edit made now, offline
+    now.advance(1000);
+    store.patch({ tasks: { k: { a: 2 } } });
+    now.advance(1000);
+    // It lands now, with the stamp it was made with
+    store.apply({ replica: 'r', seq: 1, ts: early, changes: [{ c: 'tasks', id: 'k', path: ['b'], set: 2 }] }, { user: { id: 'u' } });
+    assert.deepEqual(store.state.tasks.k, { a: 2, b: 2 });
+
+    const [landed, patched] = store.historyOf('tasks', 'k');
+    assert.deepEqual([landed.ts, landed.at, patched.ts, patched.at], [early, 1_003_000, 1_002_000, 1_002_000], 'an entry says when the write was made and when it landed');
+    assert.deepEqual(store.recordAt('tasks', 'k', 1_001_500), { a: 1, b: 1 }, 'before either write had landed');
+    assert.deepEqual(store.recordAt('tasks', 'k', 1_002_500), { a: 2, b: 1 }, 'the offline edit had not landed yet, whatever its stamp');
+    assert.deepEqual(store.recordAt('tasks', 'k', 1_003_500), { a: 2, b: 2 });
+    assert.deepEqual(store.historyOf('tasks', 'k', { since: 1_002_500 }).map(e => e.record), [{ a: 2, b: 2 }], 'since and until are of when it landed too');
+    assert.deepEqual(store.activity({ until: 1_002_500, collection: 'tasks' }).map(e => e.record), [{ a: 2, b: 1 }, { a: 1, b: 1 }]);
+    store.revert('tasks', 'k', 1_002_500);
+    assert.deepEqual(store.state.tasks.k, { a: 2, b: 1 });
+    store.dispose();
+  });
+
+  test(`${kind}: history turned off for a while and on again is brought up to the records: what was written and deleted meanwhile gets a row`, () => {
+    const now = fakeTime(1_000_000);
+    const storage = makeStorage();
+    let store = createStore({ ...SHAPE, now, history: true, storage });
+    store.patch({ tasks: { k: { title: 'one' }, same: { title: 'untouched' }, doomed: { title: 'to go' } } });
+    store.dispose();
+    now.advance(1000);
+    store = createStore({ ...SHAPE, now, storage });   // without history
+    store.patch({ tasks: { k: { title: 'two' }, fresh: { title: 'new' }, doomed: null } });
+    store.dispose();
+    now.advance(1000);
+    store = createStore({ ...SHAPE, now, history: true, storage });
+    assert.deepEqual(store.recordAt('tasks', 'k'), { title: 'two' }, 'as it is, not as the history last knew it');
+    assert.deepEqual(store.recordAt('tasks', 'fresh'), { title: 'new' });
+    assert.equal(store.recordAt('tasks', 'doomed'), undefined);
+    assert.deepEqual(store.historyOf('tasks', 'k').map(e => [e.record.title, e.changes.length]), [['two', 0], ['one', 1]], 'a row as it stands, with no changes, over what it knew');
+    assert.deepEqual(store.historyOf('tasks', 'doomed').map(e => e.record), [undefined, { title: 'to go' }]);
+    assert.equal(store.historyOf('tasks', 'same').length, 1, 'what did not change gets none');
+    assert.deepEqual(store.recordAt('tasks', 'k', 1_000_500), { title: 'one' }, 'and what it knew from before still stands');
+    assert.deepEqual(store.activity({ deleted: true }).map(e => e.id), ['doomed']);
+    const rows = storage.historyCount();
+    store.dispose();
+    store = createStore({ ...SHAPE, now, history: true, storage });
+    assert.equal(storage.historyCount(), rows, 'loaded again with nothing unrecorded, nothing is added');
+    store.dispose();
+  });
+}
+
+test('before what history.keep has kept, a record with no row is not known to have been absent: its revert is refused', async () => {
+  const now = fakeTime(100 * DAY);
+  const store = createStore({ ...SHAPE, now, history: { keep: 10 * DAY, clients: true } });
+  store.patch({ tasks: { k: { n: 1 } } });
+  now.advance(DAY);
+  store.patch({ tasks: { k: { n: 2 } } });
+  now.advance(30 * DAY);
+  store.patch({ tasks: { k: { n: 3 }, later: { n: 1 } } });   // compacts: of k, the last form before what is kept stays
+  assert.deepEqual(store.recordAt('tasks', 'k', 105 * DAY), { n: 2 }, 'a record that has a row by then is told');
+  assert.throws(() => store.revert('tasks', 'later', 105 * DAY), /Nothing is known/, 'one that has none may have had rows that are forgotten');
+  assert.throws(() => store.revert('tasks', 'later', { v: 1 }), /Nothing is known/);
+  assert.deepEqual(store.state.tasks.later, { n: 1 });
+  now.advance(DAY);
+  store.patch({ tasks: { newest: { n: 1 } } });
+  store.revert('tasks', 'newest', now() - 1000);
+  assert.equal(store.state.tasks.newest, undefined, 'within what is kept, no row is not there');
+});
+
+test('the app\'s history.clients is asked of records the store could hold, never of what a client made up; one that throws lets nobody in', () => {
+  const faults = [];
+  const seen = [];
+  const store = createStore({
+    ...SHAPE,
+    onError: err => faults.push(err.message),
+    history: { clients: (user, { c, id }) => { seen.push([c, id]); return id === undefined || id.startsWith('t'); } }
+  });
+  store.patch({ tasks: { t1: { n: 1 } } });
+  const sent = [];
+  const session = store.session({ send: message => sent.push(message) });
+  session.receive({ t: 'hello', proto: 3, replica: 'x', ops: [] });
+  store.flush();
+  const ask = query => { sent.length = 0; session.receive({ t: 'history', req: 1, ...query }); store.flush(); return sent[0]; };
+  for (const id of [5, {}, null, undefined, '', ['t1']]) assert.equal(ask({ c: 'tasks', id }).code, 'invalid', JSON.stringify(id));
+  for (const c of [5, 'nope', '__proto__', undefined]) assert.equal(ask({ c, id: 't1' }).code, 'invalid', String(c));
+  assert.deepEqual(seen, [], 'the function was not asked');
+  assert.deepEqual(faults, []);
+  assert.equal(ask({ c: 'tasks', id: 't1' }).entries.length, 1);
+  assert.equal(ask({ c: 'settings', id: 'ignored for a singleton' }).entries.length, 1);
+
+  const thrower = createStore({ ...SHAPE, onError: err => faults.push(err.message), history: { clients: () => { throw new Error('the app\'s own bug'); } } });
+  const other = thrower.session({ send: message => sent.push(message) });
+  other.receive({ t: 'hello', proto: 3, replica: 'x', ops: [] });
+  thrower.flush();
+  sent.length = 0;
+  other.receive({ t: 'history', req: 2, c: 'tasks', id: 't1' });
+  thrower.flush();
+  assert.equal(sent[0].code, 'forbidden');
+  assert.deepEqual(faults, ['the app\'s own bug'], 'reported, as the fault of the app\'s it is');
+});
+
+test('a server from before history refuses the request with no req: the client, and a relay\'s client, hear unavailable at once and no error event', async () => {
+  const store = createStore(SHAPE);
+  // As a server from before the request answers it: an unknown message type, and no req
+  const session = store.session;
+  store.session = options => {
+    const made = session(options);
+    const receive = made.receive;
+    made.receive = message => (message.t === 'history' ? options.send({ t: 'error', message: 'Unknown message type: history' }) : receive(message));
+    return made;
+  };
+  const net = createNetwork(store, { vouch: credential => credential });
+  const faults = [];
+  const relay = createRelay({ shapeOf: () => SHAPE, link: net.link({ user: { id: 'relay' } }).factory, grace: 0, reconnect: false, keepalive: false, onError: err => faults.push(err) });
+  const site = createNetwork(relay);
+  const direct = net.client({ replicaId: 'a', ...SHAPE });
+  const behind = site.client({ replicaId: 'b', ...SHAPE }, { user: { id: 'bob' } });
+  const settle = async promise => { for (let i = 0; i < 12; i++) { await net.settle(); await site.settle(); } return promise; };
+  await settle();
+  for (const db of [direct, behind]) {
+    const errors = [];
+    db.on('error', err => errors.push(err));
+    const err = await settle(refusal(db.historyOf('tasks', 'k')));
+    assert.equal(err.code, 'unavailable');
+    assert.deepEqual(errors, []);
+  }
+  assert.deepEqual(faults, [], 'no fault of the relay\'s');
+  assert.equal(relay.stats().stores.main.waiting.length, 0);
+  relay.close();
+});
+
+test('a store that has lost its lease does not prune the history of the store another process serves now', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'lazy-history-'));
+  const file = join(dir, 'app.sqlite');
+  const faults = [];
+  let t = 100 * DAY;
+  const mine = sqliteStorage(file, { checkpoints: 'inline', lease: { ttl: 1000 } });
+  const store = createStore({ ...SHAPE, now: () => t, history: { keep: 10 * DAY }, storage: mine.store('main'), onError: err => faults.push(err.code ?? err.message) });
+  store.patch({ tasks: { k: { n: 1 } } });
+  t += DAY;
+  store.patch({ tasks: { k: { n: 2 } } });
+  store.flush();
+  // Another process takes the store: this one stalled past its lease
+  const theirs = sqliteStorage(file, { checkpoints: 'inline', lease: { ttl: 1000 } });
+  theirs.db.prepare("UPDATE leases SET holder = 'someone-else', until = ? WHERE store = 'main'").run(Date.now() + 60_000);
+  const rows = () => theirs.db.prepare("SELECT count(*) AS n FROM history WHERE store = 'main' AND collection = 'tasks'").get().n;
+  assert.equal(rows(), 2);
+  t += 30 * DAY;
+  store.compact();   // by this store's clock both rows are older than it keeps
+  assert.equal(rows(), 2, 'nothing of the other process\'s store is forgotten');
+  assert.deepEqual(faults, ['lease-lost']);
+  theirs.close();
+  try { mine.close(); } catch { /* its lease is gone */ }
+  rmSync(dir, { recursive: true, force: true });
+});

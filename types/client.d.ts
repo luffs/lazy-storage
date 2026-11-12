@@ -450,9 +450,10 @@ export interface Client<S extends object = any> {
   watch(listener: ChangeListener<S>, options?: ListenerOptions): Unsubscribe;
   on<E extends keyof ClientEvents>(event: E, fn: (payload: ClientEvents[E]) => void): Unsubscribe;
   /**
-   * A record's history, from the server (a store made with `history: { clients }`): newest first, `limit` (at
-   * most 100), `before` a version to page, `path` the writes that touched one field. Rejects with an error whose
-   * `code` is 'forbidden', 'offline' (not connected), 'unavailable' (behind a relay, the server away) or 'rate-limited'
+   * A record's history, from the server (a store made with `history: { clients }`): newest first, `limit` of
+   * them (50 unless given; more than an answer carries is asked for a request at a time). Rejects with an error
+   * whose `code` is 'forbidden', 'offline' (not connected), 'unavailable' (behind a relay whose server is away, or
+   * a server from before history), 'rate-limited', 'invalid' or 'timeout'
    */
   historyOf(c: string, id: string, options?: HistoryOptions): Promise<HistoryEntry[]>;
   historyOf(singleton: string, options?: HistoryOptions): Promise<HistoryEntry[]>;

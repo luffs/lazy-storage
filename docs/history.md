@@ -52,7 +52,9 @@ record each, newest first:
 ```js
 {
   c: 'tasks', id: 'k',          // the record it is of; a singleton has no id
-  v: 1042, ts: 1762905600000,   // the store's version the write made, and its time on the store's clock
+  v: 1042, n: 0,                // the store's version the write made, and the entry's place in that write
+  ts: 1762905600000,            // when the write was made: its own stamp
+  at: 1762905600000,            // when it landed, on the store's clock
   replicaId: 'r1',              // the replica that wrote; 'server' for the store's own write
   user: 'u1',                   // its user's key, as presence keys users (user.id unless presence.key says otherwise); none for the server
   changes: [{ c: 'tasks', id: 'k', path: ['title'], set: 'Oat milk' }],   // what the write did to this record
@@ -60,9 +62,17 @@ record each, newest first:
 }
 ```
 
-An op that wrote three records is three entries of one version. An entry
-names what to ask of: `recordAt(e.c, e.id, { v: e.v })` is that entry's
-`record`, and `{ v: e.v - 1 }` the record before it.
+An op that wrote three records is three entries of one version, `n` 0
+to 2. An entry names what to ask of: `recordAt(e.c, e.id, { v: e.v })`
+is that entry's `record`, and `{ v: e.v - 1 }` the record before it.
+
+`ts` and `at` are the same for a write made while connected. An edit
+made offline is stamped when it was made and lands when its client is
+back, perhaps days later and after newer writes: `ts` says the first and
+`at` the second. The store's history is in the order things landed, so
+every time you ask by (`since`, `until`, a time given to `recordAt` or
+`revert`, `keep`) is a time of landing: the record at a time is what the
+store held then, whatever was still on its way.
 
 ## Options
 
@@ -72,7 +82,7 @@ where to read on from; each has a few of its own.
 | Option | | `historyOf` | `activity` |
 |---|---|---|---|
 | `limit` | How many entries; 50 unless given | yes | yes |
-| `since`, `until` | Times on the store's clock: milliseconds or a `Date` | yes | yes |
+| `since`, `until` | Times on the store's clock, of when a write landed (`at`): milliseconds or a `Date` | yes | yes |
 | `user` | One user's writes, by the user's key | yes | yes |
 | `before` | Older than this version | yes | yes |
 | `cursor` | The last entry of an answer: read on after it | yes | yes |
@@ -100,8 +110,10 @@ row there is.
 ## The record as it was
 
 `recordAt(c, id, when)` is the record at a time on the store's clock
-(milliseconds, a `Date`, `{ ts }`) or at a version (`{ v }`);
-`undefined` when it was not there. Two writes may bear the same
+(milliseconds, a `Date`, `{ ts }`) or at a version (`{ v }`): what the
+last write to land by then left. `undefined` when it was not there, and
+also where nothing is known of it then (before the store kept history,
+or before what `keep` has kept). Two writes may land in the same
 millisecond, and a time then means the later of them: a version, from an
 entry, tells them apart.
 
@@ -121,13 +133,20 @@ itself, so it can be reverted. They differ in who writes:
 | [Rules](auth.md#who-may-write-what) | Not judged, as no write of the server's is | Judged, as any edit of that user's |
 | A deleted record | Made again, and with it the children its deletion took (and theirs), each as it was just before, in the same write; `{ children: false }` as a fourth argument makes the record alone | Made again, alone |
 | A record that was not there then | Deleted, its children with it | Deleted |
+| A time nothing is known of | Throws | Rejects, with code `unknown` |
 | Undo | By another revert | `db.undo()`, like any edit |
 | Answer | The changes that landed | A promise of the record as it was |
 
 An app that wants a client to bring a record back with its children
-calls `store.revert` behind an endpoint of its own. `store.revert`
-throws when nothing is known of the record then (before the store kept
-history), and what a patch throws.
+calls `store.revert` behind an endpoint of its own.
+
+"Not there then" and "nothing known of it then" are told apart, since
+the first deletes the record and the second must not. A record with no
+entry by the time asked was not there, if the history is whole at that
+time: it is from the moment it was turned on (or back on), and from as
+far back as `keep` has kept. Before that a record may have had entries
+that are gone, or never had them, and a revert is refused. `store.revert`
+also throws what a patch throws.
 
 A list of what was deleted, each with a way back:
 
@@ -159,15 +178,18 @@ const feed = await db.activity({ since: yesterday });
   left out of the answer.
 - The calls ask the server and resolve to its answer. One request is
   answered with at most 100 entries, and the server reads at most 1000
-  rows for it (looking for the writes that touch a `path`, or the
-  records a client may read); a call that wants more asks again by
-  itself, and each request draws on the [rate limit](limits.md) as an op
-  does.
+  rows for it, whatever it is narrowed by: a `user` with no writes, or a
+  `path` nothing touches, costs the server a thousand rows and not the
+  whole history. A call that wants more asks again by itself, from where
+  the server says it stopped, and each request draws on the
+  [rate limit](limits.md) as an op does.
 - They reject with an error whose `code` says why: `forbidden`;
   `offline` while the client is not connected (history is the server's,
   and none of it is kept on the client); `unavailable` behind a
-  [relay](relays.md) whose server is away; `rate-limited`, with
+  [relay](relays.md) whose server is away, or from a server older than
+  history; `rate-limited`, with
   `retryAfter`; `invalid` for an option that is not what it says;
+  `unknown` for a `revert` to a time nothing is known of;
   `timeout` when the server has not answered within the client's
   `requestTimeout` (30 s by default).
 - A relay, and a browser's tabs sharing [one socket](stores.md#one-socket-per-browser),
@@ -194,6 +216,12 @@ such writes added 3.5 MB. So it is off unless asked for.
   records gets a row for each as it stands (an entry with no `changes`).
   Before that row nothing is known: `recordAt` is `undefined` and
   `revert` throws.
+- **Turned off for a while and on again, it is brought up to the
+  records.** Every record written meanwhile gets a row as it stands, and
+  every record deleted meanwhile a row that says so, so the newest entry
+  of a record is always the record. What happened in between is not
+  known, and a revert to a time before it was turned back on is refused
+  for a record with no entry by then.
 - **A [restore](server.md#backups-restores-and-moving-a-store) starts it
   over**, and `store.export()` does not carry it. A SQLite file's backup
   does.
@@ -201,17 +229,21 @@ such writes added 3.5 MB. So it is off unless asked for.
 ## Storage
 
 The memory and SQLite adapters keep history. In SQLite the rows are the
-table `history` (`store`, `collection`, `id`, `v`, `ts`, `user`,
-`replica`, `data`, `changes`), there to be [read with SQL](server.md#reading-the-file-with-sql)
+table `history` (`store`, `collection`, `id`, `v`, `n`, `ts`, `at`,
+`user`, `replica`, `data`, `changes`), there to be [read with SQL](server.md#reading-the-file-with-sql)
 like the rest:
 
 ```sql
-SELECT user, count(*) FROM history WHERE store = 'team-1' AND ts > ? GROUP BY user;
+SELECT user, count(*) FROM history WHERE store = 'team-1' AND collection <> '' AND at > ? GROUP BY user;
 ```
 
-It is keyed by record and version and indexed by version, so a record's
-history and the store's activity by version or time are read off an
-index; `activity` narrowed to one `user` reads rows until it has enough.
+(A row whose `collection` is empty is of no record: it marks where the
+history is whole from.) The table is keyed by record and version and
+indexed by version, so a record's history and the store's activity are
+read in order off an index. The store's own `store.activity` narrowed to
+one `user`, or to the deletions, has SQLite read every row of the store
+to find them: fine for a report, and for more, an index of your own on
+the column. A client's request never does (see [Clients](#clients)).
 
 An adapter of your own keeps history by storing the `history` rows a
 commit carries and answering `history(query)`, `historyOfVersion(v)`,

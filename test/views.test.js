@@ -130,3 +130,23 @@ test('views refuse a name the file has already, and what is not schemas, a prefi
   assert.throws(() => sqlite.views({}, { store: '' }), /store id/);
   sqlite.close();
 });
+
+test('names that differ only by case are told apart, as SQLite tells them: a column gets a trailing _, a view is refused; a key with a backslash has no column', () => {
+  const sqlite = sqliteStorage();
+  const store = createStore({ initial: { things: {} }, storage: sqlite.store('s') });
+  store.patch({ things: { o: { Name: 'upper', name: 'lower', Data: 'D', ID: 'inner', Store: 'S', 'back\\slash': 1 } } });
+  store.flush();
+  sqlite.views({ things: { Name: 'string', name: 'string', Data: 'string', ID: 'string', Store: 'string', 'back\\slash': 'number', '*': 'any' } }, { prefix: 'v_' });
+  const [row] = rows(sqlite, 'SELECT * FROM v_things');
+  assert.deepEqual(Object.keys(row), ['store', 'id', 'Name', 'name_', 'Data', 'ID_', 'Store_', 'data_']);
+  assert.deepEqual([row.store, row.id, row.Name, row.name_, row.Data, row.ID_, row.Store_], ['s', 'o', 'upper', 'lower', 'D', 'inner', 'S']);
+  assert.equal(JSON.parse(row.data_)['back\\slash'], 1, 'the record whole has what no column can name');
+  assert.deepEqual(rows(sqlite, 'SELECT "name_" AS n, "data_" IS NOT NULL AS whole FROM v_things'), [{ n: 'lower', whole: 1 }]);
+
+  // A view's name, against what the file has and against the other views of the call
+  assert.throws(() => sqlite.views({ Records: { a: 'string' } }), err => err instanceof TypeError && /"Records" cannot be made: the file has a table of that name already\. Give views a prefix/.test(err.message));
+  assert.throws(() => sqlite.views({ Users: { a: 'string' }, users: { a: 'string' } }, { prefix: 'u_' }), err => err instanceof TypeError && /"u_users" cannot be made: another collection's view has that name but for its case/.test(err.message));
+  assert.deepEqual(rows(sqlite, "SELECT name FROM sqlite_master WHERE type = 'view'"), [{ name: 'v_things' }], 'and none of a refused call is left behind');
+  store.dispose();
+  sqlite.close();
+});
