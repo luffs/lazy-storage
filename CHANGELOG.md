@@ -4,6 +4,26 @@ All notable changes to lazy-storage are documented here. The format follows Keep
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-11-13
+
+A store can now keep its history and be looked into. With `history`
+on, every write leaves a row per record it wrote, and `historyOf`,
+`activity`, `recordAt` and `revert` read it, by the same names on the
+store and on a client. The inspector is a page at `<path>/inspect` for
+looking at a running server's stores, records, history, activity and
+sessions. Schemas say what a record may hold, and the SQLite adapters
+can lay the records out as SQL views by those schemas. Writes copy
+faster, and fixes reach a browser's relay under the rate limit and a
+server written only by itself. The wire protocol stays at 3: a client
+asking a 1.0 server for history hears `unavailable`, and any mix of 1.0
+and 1.1 works. On upgrade: the ops in a hello now count against
+`rateLimit`, so a client back from offline with more ops than `burst`
+(500 by default) lands them a bucket at a time; raise `rateLimit.burst`
+where such outboxes are expected. History, the inspector, schemas and
+views are off unless asked for, and a schema added to a store that has
+records comes with a migration, since what storage holds is not judged
+on load.
+
 ### Added
 
 - **The inspector: a page to look into a running server.** What a store holds and what it did could be seen with a script and not otherwise. Given `inspector: { authorize }`, the Node and Bun adapters serve a page at `<path>/inspect`: the stores that are live, a store's collections and records (searched by id or content), a record with its clock and its history, a button that puts a record back as a write left it (a deleted one restored with the children its deletion took), the store's activity as it lands, narrowed to a user, a collection or the deletions, each change beside the value it replaced, and who is connected, with the server's sockets and a button that closes a user's. Where the page is, is in its address, so a record can be linked to. A revert is told in the history as whoever `authorize` says is looking (`store.revert` takes `{ by }` for the same from an endpoint of your own). It reads through the store's own calls, so history and activity are a store's `history` and the sessions its `presence`. It shows every record of every store, so there is none without `authorize(request, { write })`, which says who may look and, with `write`, revert; the page is one document under a Content-Security-Policy that lets nothing else load or run, writes what it shows as text, refuses what a page of another site asks, to read as to change (by the browser's `Sec-Fetch-Site`, so no link or form borrows its credentials), takes a change only as JSON with a header of its own, and reads no body of a request it turns away. `authorize` may answer with a `Response` of its own, a 401 that asks for basic credentials or a redirect to a sign-in. To look is not to load: a store no client has open is loaded from the page by someone who may change. What the page asks every two seconds counts nothing and reads no record. `createInspector({ stores, authorize })` is the same for a server of your own, and `examples/inspector/server.js` one to try it on. See [The inspector](docs/inspector.md)
