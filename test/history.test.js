@@ -452,7 +452,10 @@ test('a request the server never answers is given up on, and one with fields tha
   deaf = true;
   const unanswered = refusal(a.historyOf('tasks', 'k'));
   await net.settle();
+  // The client's timer does not hold the process open (an app's request should not), so the test holds it
+  const held = setTimeout(() => {}, 1000);
   const err = await unanswered;
+  clearTimeout(held);
   assert.deepEqual([err.code, err.message], ['timeout', 'The server did not answer within 30 ms']);
   store.dispose();
   sqlite.close();

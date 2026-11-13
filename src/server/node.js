@@ -57,6 +57,23 @@ export function toRequest(req, { body = false } = {}) {
   return new Request(addressOf(req), { method: req.method, headers, body: Readable.toWeb(req), duplex: 'half' });
 }
 
+/** How long a request answered before its body was read is read on and dropped before it is closed */
+const LINGER_MS = 1000;
+
+/**
+ * Drop the rest of a request's body that was answered without it, and
+ * close it once the client has sent it all or after LINGER_MS, whichever
+ * is first: a client that sends on and on is not waited for
+ */
+function linger(req) {
+  if (req.destroyed) return;
+  const timer = setTimeout(() => req.destroy(), LINGER_MS);
+  if (typeof timer.unref === 'function') timer.unref();
+  req.once('close', () => clearTimeout(timer));
+  req.on('data', () => {});
+  req.resume();
+}
+
 /** Answer an upgrade request with a plain HTTP response and close the socket */
 function refuse(socket, status, text) {
   if (socket.destroyed) return;
@@ -318,10 +335,12 @@ export function createHandlers({
       // Routed here by its path and answered by it: an answer of none is a fault, not a crash
       response ??= new Response('Not found', { status: 404 });
       // A body the inspector did not read (the request was turned away, or was too large) is not waited for: the
-      // connection goes with the answer, where it would otherwise be held until the client had sent it all
+      // connection goes with the answer, where it would otherwise be held until the client had sent it all. Not
+      // at once, though: a socket closed on bytes it has not read is reset, and the reset reaches the client
+      // before the answer does, so what is still coming is read and dropped for a moment first (see linger)
       if (!req.complete) {
         response.headers.set('connection', 'close');
-        res.once('finish', () => req.destroy());
+        res.once('finish', () => linger(req));
       }
     } else {
       try {
