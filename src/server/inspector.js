@@ -633,7 +633,7 @@ const PAGE = `<!doctype html>
   <nav class="tabbar" aria-label="What to look at">
     <span role="tablist" aria-label="Every store"><button id="all" role="tab" aria-selected="false">All stores</button></span>
     <div id="one" class="one">
-      <button id="pickStore" class="picker" aria-haspopup="listbox" aria-expanded="false" aria-controls="pickPanel" title="Pick a store (/)"><span class="dim">Store</span> <b id="pickedStore">none</b> <span aria-hidden="true">▾</span></button>
+      <button id="pickStore" class="picker" aria-haspopup="listbox" aria-expanded="false" aria-controls="pickPanel" title="Pick a store (/)"><span class="dim">Store</span> <b id="pickedStore">pick one</b> <span aria-hidden="true">▾</span></button>
       <div id="pickPanel" class="panel" hidden>
         <input id="pickFind" type="search" placeholder="find a store" autocomplete="off" spellcheck="false" role="combobox" aria-controls="pickList" aria-expanded="true" aria-autocomplete="list" aria-label="Find a store">
         <ul id="pickList" role="listbox" aria-label="Stores"></ul>
@@ -989,13 +989,14 @@ const record = (into, flash) => panel(into, async () => {
   looking = { into, store: state.store, c: state.c, id: state.id, json: JSON.stringify(r.record) };
   const title = state.id === null ? state.c : state.c + ' / ' + state.id;
   const history = el('div', {});
-  into.replaceChildren(
+  // A record that is not there has no clock, and the DOM would write it as "undefined": it is left out
+  into.replaceChildren(...[
     el('h2', {}, title),
     shown(r.record),
-    r.clock && folded('Clock: when each path was written', r.clock),
+    r.clock ? folded('Clock: when each path was written', r.clock) : null,
     el('h2', {}, 'History'),
     history
-  );
+  ].filter(Boolean));
   if (!state.overview.history) return history.append(el('p', { class: 'dim' }, 'This store keeps no history. Make it with history: true to see what a record was.'));
   const fill = tried(async cursor => {
     const { entries } = await ask('history', { store: state.store, c: state.c, id: state.id, cursor: cursor && cursor.v + '.' + cursor.n });
@@ -1316,7 +1317,8 @@ const fillAll = tried(async () => {
   // "12 live", "100 of 2340 live", "3 that match, of 12 live", "100 of 340 that match, of 2340 live"
   const some = stores.length === found ? String(found) : stores.length + ' of ' + found;
   const shown = (found === total ? some + ' live' : some + ' that match, of ' + total + ' live') + (registry ? '; ' + registry.idle + ' with nobody, ' + registry.sessions + ' sessions in all' : '');
-  into.replaceChildren(
+  // replaceChildren writes a null as the text "null": what is not there is left out
+  into.replaceChildren(...[
     el('p', { class: 'dim' }, shown + '. What each sent and did is a minute, from the last two looks, and in all since it was loaded; the biggest first by it in all.'),
     stores.length
       ? el('div', { class: 'scroll' }, el('table', {}, el('thead', {}, el('tr', {}, COLUMNS.map(([label, order], i) => el('th', {
@@ -1324,7 +1326,8 @@ const fillAll = tried(async () => {
         ...(order === all.sort && label !== 'Writes' ? { 'aria-sort': order === 'id' ? 'ascending' : 'descending' } : {})
       }, order ? el('button', { title: order === 'id' ? 'In order of id' : 'Biggest first', on: { click: () => sortBy(order) } }, label) : label)))), el('tbody', {}, rows)))
       : el('p', { class: 'dim' }, total ? 'No live store matches.' : 'No store is live.'),
-    turnedAway && refusalsList(all.refusalsOf, turnedAway.refusals));
+    turnedAway ? refusalsList(all.refusalsOf, turnedAway.refusals) : null
+  ].filter(Boolean));
   all.was = new Map(stores.map(s => [s.id, { at: now, sessions: s.sessions, records: s.records, log: s.log, sent: s.sent, ops: s.ops ?? 0, writes: s.writes ?? 0, lost: tally(s.lost), refused: tally(s.refused) }]));
 });
 

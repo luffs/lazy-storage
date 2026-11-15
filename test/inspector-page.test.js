@@ -504,6 +504,7 @@ test('all stores side by side: a place of its own, sorted by a column\'s header,
   await page.run();
 
   assert.equal(document.getElementById('all').getAttribute('aria-selected'), 'true');
+  assert.ok(!text('main').includes('null'), 'nothing written as "null" where nothing is shown');
   assert.ok(document.getElementById('one').classList.contains('aside'), 'the store and its tabs set aside');
   assert.equal(text('#meta'), '');
   const ids = () => [...document.querySelectorAll('main tbody tr td:first-child')].map(td => td.textContent);
@@ -626,4 +627,16 @@ test('the header is a tab bar: one tab shown at a time, and the arrow keys go to
   await settle();
   assert.deepEqual(selected(), ['All stores'], 'round to All stores');
   assert.equal(location.hash, '#tab=all');
+});
+
+test('a record that is not there is shown without a clock, and nothing is written as "undefined"', async () => {
+  const page = await open({ hash: '#store=team-1&tab=records&c=tasks&id=gone' });
+  page.store.patch({ tasks: { gone: { title: 'Milk' } } });
+  page.store.patch({ tasks: { gone: null } });
+  await page.run();
+  const detail = text('main section:last-child');
+  assert.match(detail, /tasks \/ gone/);
+  // The DOM writes a null or an undefined put in as text, run on to the next word: looked for as it is
+  assert.ok(!detail.includes('undefined') && !detail.includes('null'), detail);
+  assert.ok(!/Clock: when each path was written/.test(detail), 'no clock for a record that is not there');
 });

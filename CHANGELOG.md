@@ -4,6 +4,10 @@ All notable changes to lazy-storage are documented here. The format follows Keep
 
 ## [Unreleased]
 
+### Fixed
+
+- **The inspector wrote "null" and "undefined" as text.** All stores, with no store's refusals open, put a null where the list goes, and a record that is not there (deleted, its history still to see) an undefined where its clock goes; the DOM wrote each as text. Both are left out. The store picker names no store as "pick one" until one is picked, where it said "none"
+
 ## [1.4.0] - 2026-11-15
 
 The inspector shows all stores side by side, and a store tells what it
