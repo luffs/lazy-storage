@@ -4,6 +4,21 @@ All notable changes to lazy-storage are documented here. The format follows Keep
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-11-15
+
+A store can be asked who its server's writes are for, and the
+inspector names users. `createStore({ by })` is asked at each write of
+the server's that says no `by` of its own, so an app that runs each
+request in an AsyncLocalStorage tells every write a request makes as
+its user's with one line, instead of passing `by` to every call. The
+inspector's `nameOf(key)` shows a name beside the keys the store keeps,
+in history, activity, sessions and sockets, finds users by it, and may
+look it up through a promise. Nothing changes on the wire, and any mix
+of 1.2 and 1.3 works. On upgrade there is nothing to change: both are
+new and optional. A store given `by` asks it on every `patch`, `del` and
+`revert` that names none, and an inspector revert whose `authorize`
+names no one is then told as its answer; migrations never ask it.
+
 ### Added
 
 - **A store can be asked who its server's writes are for.** `{ by }` had to be passed to every `store.patch`, `store.del` and `store.revert`, so an app whose endpoints all write for whoever called them passed it everywhere, or wrapped the store's calls and had to read their arguments as the store does. `createStore({ by: () => key })` is asked at each write of the server's that says no `by` of its own and answered as `by` is (a key, or a user as the store keys its users; nothing for nobody), so `by: () => acting.getStore()` over an AsyncLocalStorage tells every write a request makes as its user's. A write's own `by` wins, `null` included; a migration, the store's own write as it loads, is nobody's and does not ask it; and a revert from the inspector whose `authorize` names no one is told as the store's `by` says. See [Who the server's writes are for](docs/history.md#who-the-servers-writes-are-for)
