@@ -30,7 +30,8 @@ serves of itself, for whoever runs it:
   loaded (ops heard, its server's writes, changes lost and ops refused,
   each with why), and what its history holds (its size, rows and since
   when, read every half minute); with a registry, how many are live and
-  idle. A hundred at most, found by id, biggest first by the column whose
+  idle. A hundred a page, gone through with Previous and Next (or `[` and
+  `]`), found by id, biggest first by the column whose
   header is clicked (sessions unless asked; any other order counts every
   store found), and asked again every few seconds while shown, a number
   that changed lit for a moment. What it sent and its ops and writes are
@@ -39,7 +40,7 @@ serves of itself, for whoever runs it:
   history to its activity, and what it refused to the last fifty refusals,
   each with when, whose, which op and why. It has
   a place of its own beside the store picked and its tabs, at `#tab=all`
-  (`&sort=refused`, say).
+  (`&sort=refused&page=2`, say).
 
 ```js
 import { serve } from 'lazy-storage/server/node';   // or 'lazy-storage/server/bun'

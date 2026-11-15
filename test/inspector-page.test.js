@@ -505,6 +505,12 @@ test('all stores side by side: a place of its own, sorted by a column\'s header,
 
   assert.equal(document.getElementById('all').getAttribute('aria-selected'), 'true');
   assert.ok(!text('main').includes('null'), 'nothing written as "null" where nothing is shown');
+  // What its history holds, as the other counts: its size, and beneath it how many writes; how old the oldest
+  // is on pointing at it
+  const history = [...document.querySelectorAll('main tbody tr')].find(tr => tr.firstChild.textContent === 'team-2').children[9];
+  assert.match(history.textContent, /^\d+ B\d+ writes?$/);
+  assert.match(history.querySelector('.why').textContent, /^\d+ writes?$/);
+  assert.match(history.querySelector('button').title, /^Its activity · the oldest kept (just now|\d+ s ago), \d{4}-\d\d-\d\d \d\d:\d\d:\d\d$/);
   assert.ok(document.getElementById('one').classList.contains('aside'), 'the store and its tabs set aside');
   assert.equal(text('#meta'), '');
   const ids = () => [...document.querySelectorAll('main tbody tr td:first-child')].map(td => td.textContent);
@@ -639,4 +645,39 @@ test('a record that is not there is shown without a clock, and nothing is writte
   // The DOM writes a null or an undefined put in as text, run on to the next word: looked for as it is
   assert.ok(!detail.includes('undefined') && !detail.includes('null'), detail);
   assert.ok(!/Clock: when each path was written/.test(detail), 'no clock for a record that is not there');
+});
+
+test('all stores is gone through a hundred at a time: the page in the address, on and back by button or by [ and ]', async () => {
+  const page = await open({ hash: '#tab=all&sort=id' });
+  for (let i = 2; i <= 205; i++) page.stores.get(`team-${i}`);
+  await page.run();
+  const ids = () => [...document.querySelectorAll('main tbody tr td:first-child')].map(td => td.textContent);
+  const line = () => text('main .pager span');
+  assert.match(line(), /^1–100 of 205 live/);
+  assert.equal(ids()[0], 'team-1');
+  assert.equal(byText('main .pager button', '‹ Previous').disabled, true);
+
+  await click(byText('main .pager button', 'Next ›'));
+  assert.equal(location.hash, '#tab=all&sort=id&page=2');
+  assert.match(line(), /^101–200 of 205 live/);
+  assert.equal(ids()[0], 'team-101');
+
+  document.body.dispatchEvent(new KeyboardEvent('keydown', { key: ']', bubbles: true }));
+  await settle();
+  assert.deepEqual(ids(), ['team-201', 'team-202', 'team-203', 'team-204', 'team-205']);
+  assert.equal(byText('main .pager button', 'Next ›').disabled, true, 'no page past the last');
+  document.body.dispatchEvent(new KeyboardEvent('keydown', { key: ']', bubbles: true }));
+  await settle();
+  assert.equal(location.hash, '#tab=all&sort=id&page=3');
+
+  // Another order goes back to the first page
+  await click(byText('main th button', 'Records'));
+  assert.equal(location.hash, '#tab=all&sort=records');
+  assert.match(line(), /^1–100 of 205 live/);
+
+  // Opened at a page, it is that page
+  history.pushState(null, '', `${BASE}#tab=all&sort=id&page=2`);
+  placeAgain();
+  await settle();
+  assert.equal(ids()[0], 'team-101');
 });

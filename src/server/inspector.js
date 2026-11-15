@@ -21,7 +21,7 @@
 //   GET  <base>/api/stores         the live stores, each with its counts
 //   GET  <base>/api/store          ?store=      a store: collections, sessions, counts
 //   GET  <base>/api/refusals       ?store=      the last ops and requests it turned away, and why
-//   GET  <base>/api/everyStore     the live stores: what each holds, sent and decided, its history's size (&q=, &sort=, &limit=)
+//   GET  <base>/api/everyStore     the live stores: what each holds, sent and decided, its history's size (&q=, &sort=, &offset=, &limit=)
 //   GET  <base>/api/records        ?store=&c=   a collection's records, a page at a time (&after=, &limit=, &q=)
 //   GET  <base>/api/record         ?store=&c=&id=   a record and its clock
 //   GET  <base>/api/history        ?store=&c=&id=   a record's history (&cursor=v.n, &limit=)
@@ -249,7 +249,7 @@ export function createInspector({ stores, authorize, sockets, disconnect, nameOf
     },
     store: params => overview(params.get('store'), storeOf(params)),
     // The live stores, a row each of what it holds, what it sent and decided since it was loaded, and what its
-    // history holds; a hundred at most, found by id (`q`) and in the order `sort` names, biggest first; and the
+    // history holds; a hundred at most from `offset` on, found by id (`q`) and in the order `sort` names, biggest first; and the
     // registry's sums, where it is one. To sort by anything but the id or the sessions is to count every store
     // found (its records, its history: see historySizeOf), so only those found are, and only when asked to
     everyStore(params) {
@@ -259,14 +259,16 @@ export function createInspector({ stores, authorize, sockets, disconnect, nameOf
       const sort = params.get('sort') || 'sessions';
       if (!Object.hasOwn(STORE_SORTS, sort)) throw new TypeError(`sort is one of ${Object.keys(STORE_SORTS).join(', ')}`);
       const limit = limitOf(params, LIST_MOST, LIST_MOST);
+      const offset = numberOf(params.get('offset'), 'offset') ?? 0;
+      if (offset < 0) throw new TypeError('offset is a whole number of zero or more');
       const found = ids.filter(id => !q || id.toLowerCase().includes(q)).map(id => ({ id, store: resolve(id) })).filter(({ store }) => store);
       const cheap = sort === 'id' || sort === 'sessions';
       const rows = cheap ? found.map(({ id, store }) => ({ id, store, sessions: store.sessions })) : found.map(({ id, store }) => rowOf(id, store));
       // Ids in the order a person reads them: team-2 before team-10
       rows.sort((x, y) => STORE_SORTS[sort](x, y) || x.id.localeCompare(y.id, undefined, { numeric: true }));
-      const page = rows.slice(0, limit).map(row => (cheap ? rowOf(row.id, row.store) : row)).map(({ store, ...row }) => row);
+      const page = rows.slice(offset, offset + limit).map(row => (cheap ? rowOf(row.id, row.store) : row)).map(({ store, ...row }) => row);
       const sums = typeof stores.stats === 'function' ? stores.stats() : null;
-      return { listed: true, total: ids.length, found: found.length, sort, stores: page, registry: sums && { stores: sums.stores, idle: sums.idle, sessions: sums.sessions } };
+      return { listed: true, total: ids.length, found: found.length, sort, offset, stores: page, registry: sums && { stores: sums.stores, idle: sums.idle, sessions: sums.sessions } };
     },
     // The last ops and requests a store turned away, newest first, each with whose (named) and why
     async refusals(params) {
@@ -558,6 +560,7 @@ const PAGE = `<!doctype html>
   th[aria-sort="ascending"] button::after { content: ' ↑'; }
   button, select, input { font: inherit; color: inherit; background: var(--soft); border: 1px solid var(--line); border-radius: 6px; padding: 4px 9px; }
   button { cursor: pointer; }
+  button:disabled { cursor: default; opacity: .45; }
   button[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--bg); }
   button.danger { color: var(--bad); }
   main { display: grid; grid-template-columns: minmax(150px, 190px) minmax(180px, 260px) 1fr; min-height: calc(100vh - 86px); }
@@ -621,8 +624,14 @@ const PAGE = `<!doctype html>
   th.num, td.num { text-align: right; padding-right: 16px; }
   td .why { display: block; color: var(--dim); font-size: 12px; white-space: nowrap; }
   /* A number that goes somewhere: to the store's sessions, its activity, what it refused */
-  button.link { padding: 0; border: 0; background: none; color: inherit; font: inherit; text-align: inherit; text-decoration: underline dotted; text-underline-offset: 3px; }
+  button.link { padding: 0; border: 0; background: none; color: inherit; font: inherit; text-align: inherit; }
+  /* Its number underlined, and not what is told beneath it */
+  button.link .u { text-decoration: underline dotted; text-underline-offset: 3px; }
   .refusals { margin-top: 16px; }
+  /* The count of what is shown, and the pages on and back at its end */
+  .pager { flex-wrap: nowrap; align-items: flex-start; }
+  .pager > span { flex: 1; }
+  .pager button { white-space: nowrap; }
   @keyframes changed { from { box-shadow: 0 0 0 2px var(--accent); } to { box-shadow: 0 0 0 2px transparent; } }
   .changed { animation: changed 1.6s ease-out; }
 </style>
@@ -810,7 +819,7 @@ function differences(old, now, path = []) {
 const TABS = [['records', 'Records'], ['activity', 'Activity'], ['sessions', 'Sessions']];
 
 // Where the page is, kept in its address: a record can be linked to, and the way back is the browser's
-const placed = () => (state.tab === 'all' ? '#tab=all' + (all.sort === 'sessions' ? '' : '&sort=' + all.sort) : '#' + new URLSearchParams(Object.entries({ store: state.store, tab: state.tab, c: state.tab === 'records' ? state.c : null, id: state.tab === 'records' ? state.id : null }).filter(([, value]) => value !== null && value !== undefined)));
+const placed = () => (state.tab === 'all' ? '#tab=all' + (all.sort === 'sessions' ? '' : '&sort=' + all.sort) + (all.page ? '&page=' + (all.page + 1) : '') : '#' + new URLSearchParams(Object.entries({ store: state.store, tab: state.tab, c: state.tab === 'records' ? state.c : null, id: state.tab === 'records' ? state.id : null }).filter(([, value]) => value !== null && value !== undefined)));
 function place() {
   if (location.hash === placed() || (!state.store && state.tab !== 'all')) return;
   // The address the page was opened at (none, or half of one) is not a place to go back to: the first place
@@ -826,7 +835,10 @@ function placeFrom() {
   const changed = params.get('store') !== state.store;
   Object.assign(state, { store: params.get('store') ?? state.store, tab: tab === 'all' || TABS.some(([name]) => name === tab) ? tab : 'records', c: params.get('c'), id: params.get('id') });
   if (changed) Object.assign(state, { feed: [], feedAt: null });
-  if (state.tab === 'all') all.sort = ORDERS.some(([name]) => name === params.get('sort')) ? params.get('sort') : 'sessions';
+  if (state.tab === 'all') {
+    all.sort = ORDERS.some(([name]) => name === params.get('sort')) ? params.get('sort') : 'sessions';
+    all.page = Math.max(0, (Number.parseInt(params.get('page'), 10) || 1) - 1);
+  }
   return params.has('store');
 }
 function tabs() {
@@ -1247,10 +1259,12 @@ const ORDERS = COLUMNS.filter(([, order]) => order).map(([label, order]) => [ord
 // clicked (in the address), asked again every few seconds while shown (allStoresAgain). What each sent and
 // decided is since it was loaded, and what its history holds is read every half minute. A number that has
 // changed since the last look is lit for a moment (all.was). A store's id goes to its records
-const all = { q: '', sort: 'sessions', into: null, asked: 0, was: new Map(), refusalsOf: null };
+// all.page counts from 0, a hundred stores a page; the address counts from 1
+const PAGE_SIZE = 100;
+const all = { q: '', sort: 'sessions', page: 0, into: null, asked: 0, was: new Map(), refusalsOf: null };
 async function allStores() {
   let typing = null;
-  const find = el('input', { type: 'search', placeholder: 'find a store', value: all.q, on: { input: () => { clearTimeout(typing); typing = setTimeout(() => { all.q = find.value; fillAll(); }, 250); } } });
+  const find = el('input', { type: 'search', placeholder: 'find a store', value: all.q, on: { input: () => { clearTimeout(typing); typing = setTimeout(() => { all.q = find.value; all.page = 0; place(); fillAll(); }, 250); } } });
   all.into = el('div', {});
   all.was = new Map();
   $('main').replaceChildren(el('section', {}, el('h2', {}, 'All stores'), el('div', { class: 'row' }, find), all.into));
@@ -1259,6 +1273,17 @@ async function allStores() {
 const sortBy = order => {
   if (order === all.sort) return;
   all.sort = order;
+  all.page = 0;
+  all.was = new Map();
+  place();
+  fillAll();
+};
+// A page on or back, as far as there are stores: the last answer says how many were found
+const turnPage = step => {
+  const last = Math.max(0, Math.ceil((all.found ?? 0) / PAGE_SIZE) - 1);
+  const page = Math.min(last, Math.max(0, all.page + step));
+  if (page === all.page) return;
+  all.page = page;
   all.was = new Map();
   place();
   fillAll();
@@ -1266,7 +1291,7 @@ const sortBy = order => {
 const fillAll = tried(async () => {
   const asked = ++all.asked;
   const into = all.into;
-  const answer = await ask('everyStore', { q: all.q, sort: all.sort });
+  const answer = await ask('everyStore', { q: all.q, sort: all.sort, offset: all.page * PAGE_SIZE, limit: PAGE_SIZE });
   const turnedAway = all.refusalsOf ? await ask('refusals', { store: all.refusalsOf }).catch(() => null) : null;
   // A newer ask is on its way, or the page has gone elsewhere: this answer is not what is shown
   if (asked !== all.asked || !into?.isConnected) return;
@@ -1275,6 +1300,13 @@ const fillAll = tried(async () => {
     return;
   }
   const { stores, total, found, registry } = answer;
+  all.found = found;
+  // A page past the last (fewer found since): the last there is
+  if (!stores.length && all.page > 0 && found) {
+    all.page = Math.ceil(found / PAGE_SIZE) - 1;
+    place();
+    return fillAll();
+  }
   const now = Date.now();
   const go = (id, tab = 'records') => { Object.assign(state, { store: id, tab, c: null, id: null, feed: [], feedAt: null }); show(); };
   // What each store's numbers were at the last look: one that differs now is lit, and what grew since, by how
@@ -1296,14 +1328,14 @@ const fillAll = tried(async () => {
   };
   const counted = (s, key, counts, bad, open) => {
     const n = tally(counts);
-    const body = [String(n), n ? el('span', { class: 'why' }, reasons(counts)) : null];
+    const body = [el('span', { class: 'u' }, String(n)), n ? el('span', { class: 'why' }, reasons(counts)) : null];
     return el('td', { class: 'num' + (bad && n ? ' bad' : '') + lit(s, key, n) }, n && open ? el('button', { class: 'link', title: 'What was refused, and why', on: { click: open } }, ...body) : body);
   };
   const num = (s, key, text, title) => el('td', { class: 'num' + lit(s, key, s[key]), ...(title ? { title } : {}) }, text);
   const showRefusals = id => { all.refusalsOf = all.refusalsOf === id ? null : id; fillAll(); };
   const rows = stores.map(s => el('tr', {},
     el('td', { class: 'mono' }, el('button', { title: 'Its records', on: { click: () => go(s.id) } }, s.id)),
-    el('td', { class: 'num' + lit(s, 'sessions', s.sessions) }, s.sessions ? el('button', { class: 'link', title: 'Who is connected', on: { click: () => go(s.id, 'sessions') } }, String(s.sessions)) : '0'),
+    el('td', { class: 'num' + lit(s, 'sessions', s.sessions) }, s.sessions ? el('button', { class: 'link', title: 'Who is connected', on: { click: () => go(s.id, 'sessions') } }, el('span', { class: 'u' }, String(s.sessions))) : '0'),
     num(s, 'records', String(s.records)),
     num(s, 'log', String(s.log), 'The delta log a reconnecting client catches up from'),
     growing(s, 'sent', size(s.sent), 'What it sent, a minute; beneath, since it was loaded', true),
@@ -1312,14 +1344,19 @@ const fillAll = tried(async () => {
     counted(s, 'lost', s.lost, false),
     counted(s, 'refused', s.refused, true, () => showRefusals(s.id)),
     el('td', { class: 'num' }, s.history
-      ? el('button', { class: 'link', title: 'Its activity', on: { click: () => go(s.id, 'activity') } }, size(s.history.bytes) || s.history.rows + ' rows', el('span', { class: 'why' }, (s.history.bytes === null ? '' : s.history.rows + ' rows') + (s.history.oldest ? (s.history.bytes === null ? '' : ', ') + 'since ' + when(s.history.oldest) : '')))
+      ? historyCell(s.history, () => go(s.id, 'activity'))
       : el('span', { class: 'dim' }, 'off'))));
-  // "12 live", "100 of 2340 live", "3 that match, of 12 live", "100 of 340 that match, of 2340 live"
-  const some = stores.length === found ? String(found) : stores.length + ' of ' + found;
+  // "12 live", "101–200 of 2340 live", "3 that match, of 12 live", "1–100 of 340 that match, of 2340 live"
+  const some = stores.length === found ? String(found) : (answer.offset + 1) + '–' + (answer.offset + stores.length) + ' of ' + found;
+  const paged = found > PAGE_SIZE;
+  const pager = paged ? [
+    el('button', { disabled: all.page === 0, title: 'The page before ([)', on: { click: () => turnPage(-1) } }, '‹ Previous'),
+    el('button', { disabled: answer.offset + stores.length >= found, title: 'The next page (])', on: { click: () => turnPage(1) } }, 'Next ›')
+  ] : [];
   const shown = (found === total ? some + ' live' : some + ' that match, of ' + total + ' live') + (registry ? '; ' + registry.idle + ' with nobody, ' + registry.sessions + ' sessions in all' : '');
   // replaceChildren writes a null as the text "null": what is not there is left out
   into.replaceChildren(...[
-    el('p', { class: 'dim' }, shown + '. What each sent and did is a minute, from the last two looks, and in all since it was loaded; the biggest first by it in all.'),
+    el('div', { class: 'row pager' }, el('span', { class: 'dim' }, shown + '. What each sent and did is a minute, from the last two looks, and in all since it was loaded; the biggest first by it in all.'), ...pager),
     stores.length
       ? el('div', { class: 'scroll' }, el('table', {}, el('thead', {}, el('tr', {}, COLUMNS.map(([label, order], i) => el('th', {
         class: i ? 'num' : '',
@@ -1330,6 +1367,15 @@ const fillAll = tried(async () => {
   ].filter(Boolean));
   all.was = new Map(stores.map(s => [s.id, { at: now, sessions: s.sessions, records: s.records, log: s.log, sent: s.sent, ops: s.ops ?? 0, writes: s.writes ?? 0, lost: tally(s.lost), refused: tally(s.refused) }]));
 });
+
+// What a store's history holds, as the other counts are told: its size, and beneath it, smaller, how many writes
+// ("713 B" over "7 writes"); how old the oldest is on pointing at it. It goes to the store's activity
+const writes = n => n.toLocaleString('en') + (n === 1 ? ' write' : ' writes');
+function historyCell(h, open) {
+  // Where a click goes first, as the other counts' titles say, then how old the oldest kept is
+  const title = 'Its activity' + (h.oldest ? ' · the oldest kept ' + ago(h.oldest) + ', ' + when(h.oldest) : '');
+  return el('button', { class: 'link', title, on: { click: open } }, el('span', { class: 'u' }, h.bytes === null ? writes(h.rows) : size(h.bytes)), h.bytes === null ? null : el('span', { class: 'why' }, writes(h.rows)));
+}
 
 // A store's last refusals, newest first: when, whose, its replica and op, and why
 function refusalsList(id, refusals) {
@@ -1384,10 +1430,13 @@ $('pickAll').addEventListener('click', () => {
 // A click elsewhere closes the panel, and / opens it from anywhere but a field being typed in
 document.addEventListener('pointerdown', event => { if (picker.open && !$('one').contains(event.target)) closePicker({ back: false }); });
 document.addEventListener('keydown', event => {
-  if (event.key !== '/' || event.ctrlKey || event.metaKey || event.altKey) return;
+  if (!['/', '[', ']'].includes(event.key) || event.ctrlKey || event.metaKey || event.altKey) return;
   if (event.target.closest?.('input, textarea, select, [contenteditable]') || !$('ask').hidden) return;
+  // [ and ] turn All stores' pages; / opens the store picker
+  if (event.key !== '/' && state.tab !== 'all') return;
   event.preventDefault();
-  openPicker();
+  if (event.key === '/') openPicker();
+  else turnPage(event.key === ']' ? 1 : -1);
 });
 // All stores is asked again every other look, while it is shown and the page is in sight
 let allTicks = 0;

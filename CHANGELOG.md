@@ -4,6 +4,14 @@ All notable changes to lazy-storage are documented here. The format follows Keep
 
 ## [Unreleased]
 
+### Added
+
+- **All stores goes through its stores a page at a time.** It showed the first hundred and no more, so with more than a hundred live the rest of an order (the quietest stores, the last ids) could only be found by searching. It shows a hundred a page, "101–200 of 2340 live", with Previous and Next (or `[` and `]`), the page in the address (`&page=2`), and back to the first when the order or the search changes; `/api/everyStore` takes `offset`
+
+### Changed
+
+- **All stores tells a store's history as it tells its other counts.** It said "2 rows, since" and the time on a second line as wide as the rest of the row. It says the size, "60 B", over a smaller "2 writes", and how old the oldest is on pointing at it, after where a click goes ("Its activity · the oldest kept 5 min ago, …"). A count that goes somewhere has its number underlined and not what is told beneath it, and a button that cannot be pressed (the next page on the last) is dimmed
+
 ### Fixed
 
 - **The inspector wrote "null" and "undefined" as text.** All stores, with no store's refusals open, put a null where the list goes, and a record that is not there (deleted, its history still to see) an undefined where its clock goes; the DOM wrote each as text. Both are left out. The store picker names no store as "pick one" until one is picked, where it said "none"

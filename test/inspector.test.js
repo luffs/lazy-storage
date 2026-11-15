@@ -630,6 +630,10 @@ test('all stores are shown side by side, a hundred at most, found by id and bigg
   const found = (await get('/api/everyStore?q=TEAM-3')).body;
   assert.deepEqual([found.found, found.total, found.stores.map(s => s.id)], [1, 3, ['team-3']]);
   assert.equal((await get('/api/everyStore?sort=size')).status, 400);
+  const second = (await get('/api/everyStore?sort=id&offset=1&limit=1')).body;
+  assert.deepEqual([second.offset, second.found, second.stores.map(s => s.id)], [1, 3, ['team-2']], 'a page from the offset on');
+  assert.deepEqual((await get('/api/everyStore?offset=9')).body.stores, [], 'past the last, none');
+  assert.equal((await get('/api/everyStore?offset=-1')).status, 400);
   for (let i = 4; i <= 10; i++) stores.get(`team-${i}`);
   assert.deepEqual((await get('/api/everyStore?sort=id')).body.stores.map(s => s.id).slice(0, 3), ['team-1', 'team-2', 'team-3'], 'team-10 after team-9, as it is read');
   assert.equal((await get('/api/everyStore?sort=id')).body.stores.at(-1).id, 'team-10');
