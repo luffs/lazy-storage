@@ -4,6 +4,25 @@ All notable changes to lazy-storage are documented here. The format follows Keep
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-11-15
+
+The inspector shows all stores side by side, and a store tells what it
+decided. All stores lists the live stores, a hundred at most, found by
+id and sorted by any column: what each holds, what it sent and did a
+minute, the changes it lost and the ops it refused, and what its
+history holds, asked again while shown. `store.stats()` counts ops,
+the server's writes, what was lost and what was refused;
+`store.refusals()` keeps the last fifty refusals with why; and
+`store.historySize()` says what the history holds. The store is picked
+from a panel that finds it by id, where a select of every store was,
+and the header is a tab bar. Nothing changes on the wire, and any mix
+of 1.3 and 1.4 works. On upgrade there is nothing to change. A
+`store.apply` that is refused is now counted in `stats().refused` and
+kept in `refusals()` as a session's is, and still throws; `stats()`
+has new fields, which a check of it whole sees; and the inspector's
+page no longer asks `/api/stores`, which stays for a program of one's
+own.
+
 ### Added
 
 - **The inspector shows all stores side by side.** To see how the stores fared took a store at a time in the inspector, or a table of the app's own built from `store.stats()` and observers (Mageek had one). All stores, a place of its own beside the store picked, lists the live stores, each with its sessions, records, delta log, what it sent, what it decided since it was loaded (the reasons beside the counts) and what its history holds, with the registry's live and idle counts. A hundred at most, found by id and biggest first by sessions, records, what was sent, ops, lost, refused or history (`/api/everyStore?q=&sort=&limit=`), asked again every few seconds while shown, a number that changed lit for a moment, what was sent and the ops and writes told a minute; the sessions, history and refused counts go to the store's sessions, its activity and its last refusals; a column's header sorts by it, and the order is in the address. The store to look at is picked from a button that names it (or `/`), in a panel that lists the live stores whose id has what is typed, gone along with the arrow keys and to with Enter, where a list of every store was: a server of thousands of stores had them all sent to the page and put in one select. See [The inspector](docs/inspector.md)
