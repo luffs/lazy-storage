@@ -74,9 +74,10 @@ function numberOf(text, name) {
  * @param {() => Array<Object>} [options.sockets] - the server's open sockets, as an adapter's `sockets()` lists them
  * @param {(filter: (user: any) => boolean) => number} [options.disconnect] - close the sockets of the users a
  *   filter picks, as an adapter's `disconnect` does
- * @param {(key: string) => (string|null|undefined)} [options.nameOf] - a user's name, by its key, for the page to
- *   show beside the key in history, activity, sessions and sockets: keys are what the store keeps, and seldom
- *   what a person reads. Nothing, or a throw (reported to onError), shows the key alone
+ * @param {(key: string) => (string|null|undefined|Promise<string|null|undefined>)} [options.nameOf] - a user's name,
+ *   by its key, for the page to show beside the key in history, activity, sessions and sockets, and to find a user
+ *   by: keys are what the store keeps, and seldom what a person reads. It may answer through a promise (a lookup),
+ *   asked once per key an answer. Nothing, or a throw (reported to onError), shows the key alone
  * @param {(error: any) => void} [options.onError]
  * @returns {{ handle: (request: Request, base: string) => Promise<Response|null> }}
  */
@@ -85,31 +86,27 @@ export function createInspector({ stores, authorize, sockets, disconnect, nameOf
   if (typeof authorize !== 'function') throw new TypeError('An inspector needs authorize(request, { write }): it shows every record of every store, and nothing lets a request in by default');
   if (nameOf !== undefined && typeof nameOf !== 'function') throw new TypeError('nameOf is a function, a user\'s name by its key');
   const resolve = typeof stores === 'function' ? stores : id => stores.get(id);
-  // A key's name, asked once an answer: the same user is in most of a page's entries
-  function namer() {
+  // The names of these keys, each asked once, all at once: nameOf may look them up (a database), and the same
+  // user is in most of a page's entries. A key without one is left out
+  async function namesOf(keys) {
     const names = new Map();
-    return key => {
-      if (!nameOf || typeof key !== 'string') return undefined;
-      if (!names.has(key)) {
-        let name;
-        try {
-          name = nameOf(key);
-        } catch (err) {
-          onError(err);
-        }
-        names.set(key, typeof name === 'string' && name && name !== key ? name.slice(0, 120) : undefined);
+    if (!nameOf) return names;
+    await Promise.all([...new Set(keys)].filter(key => typeof key === 'string').map(async key => {
+      let name;
+      try {
+        name = await nameOf(key);
+      } catch (err) {
+        onError(err);
       }
-      return names.get(key);
-    };
+      if (typeof name === 'string' && name && name !== key) names.set(key, name.slice(0, 120));
+    }));
+    return names;
   }
   // Each with `name` beside the key it names (`user` an entry's, `key` a peer's or a socket's), where nameOf has one
-  const named = (list, field) => {
-    const name = namer();
-    return list.map(item => {
-      const n = name(item[field]);
-      return n === undefined ? item : { ...item, name: n };
-    });
-  };
+  async function named(list, field, names) {
+    names ??= await namesOf(list.map(item => item[field]));
+    return list.map(item => (names.has(item[field]) ? { ...item, name: names.get(item[field]) } : item));
+  }
   const liveIds = () => (typeof stores.ids === 'function' ? stores.ids() : null);
   // A collection's ids in order, kept for as long as the store's version stands: a page of records is then a
   // place in a list, and not every id of the collection sorted again
@@ -264,19 +261,19 @@ export function createInspector({ stores, authorize, sockets, disconnect, nameOf
       const record = store.shape.isSingleton(c) ? store.state[c] : typeof id === 'string' && Object.hasOwn(store.state[c], id) ? store.state[c][id] : undefined;
       return { c, id, there: record !== undefined, record, clock: record === undefined ? undefined : store.clock(c, id) };
     },
-    history(params) {
+    async history(params) {
       const store = storeOf(params);
       const c = params.get('c');
       const id = store.shape?.isSingleton(c) ? undefined : params.get('id');
       const limit = limitOf(params, 50);
-      return { entries: named(withBefore(store, store.historyOf(c, id, { limit, cursor: cursorOf(params.get('cursor')) })), 'user') };
+      return { entries: await named(withBefore(store, store.historyOf(c, id, { limit, cursor: cursorOf(params.get('cursor')) })), 'user') };
     },
-    activity(params) {
+    async activity(params) {
       const store = storeOf(params);
       const limit = limitOf(params, 50);
       return {
         version: store.version,
-        entries: named(withBefore(store, store.activity({
+        entries: await named(withBefore(store, store.activity({
           limit,
           after: numberOf(params.get('after'), 'after'),
           before: numberOf(params.get('before'), 'before'),
@@ -289,17 +286,19 @@ export function createInspector({ stores, authorize, sockets, disconnect, nameOf
       };
     },
     // Who is connected to a store, a page of them: a store may have thousands, and the page asks every time it looks
-    peers(params) {
+    async peers(params) {
       const store = storeOf(params);
       const q = (params.get('q') ?? '').toLowerCase();
       const all = store.peers();
-      const found = q ? all.filter(peer => `${peer.replicaId} ${peer.key ?? ''} ${JSON.stringify(peer.user) ?? ''}`.toLowerCase().includes(q)) : all;
+      // Found by name too, where nameOf has one: every key's is asked then, and only then
+      const names = q ? await namesOf(all.map(peer => peer.key)) : null;
+      const found = q ? all.filter(peer => `${peer.replicaId} ${peer.key ?? ''} ${names.get(peer.key) ?? ''} ${JSON.stringify(peer.user) ?? ''}`.toLowerCase().includes(q)) : all;
       const stats = store.stats();
-      return { total: all.length, found: found.length, peers: named(found.slice(0, LIST_MOST), 'key'), sessions: stats.sessions, replicas: stats.replicas, sent: stats.sent, epoch: store.epoch };
+      return { total: all.length, found: found.length, peers: await named(found.slice(0, LIST_MOST), 'key', names ?? undefined), sessions: stats.sessions, replicas: stats.replicas, sent: stats.sent, epoch: store.epoch };
     },
     // The server's sockets, a page of them: the ones furthest behind first, since those are the ones to look at.
     // `store` narrows them to the sockets that have that store open, `q` to the users whose key has it
-    sockets(params) {
+    async sockets(params) {
       // A server of one's own may have none to tell of
       if (typeof sockets !== 'function') return { listed: false, total: 0, found: 0, sockets: [] };
       const store = params.get('store');
@@ -312,7 +311,8 @@ export function createInspector({ stores, authorize, sockets, disconnect, nameOf
         openMs: socket.openMs,
         expiresAt: socket.expiresAt ?? null
       }));
-      const found = all.filter(socket => (!store || socket.stores.includes(store)) && (!q || (socket.key ?? '').toLowerCase().includes(q)));
+      const names = q ? await namesOf(all.map(socket => socket.key)) : null;
+      const found = all.filter(socket => (!store || socket.stores.includes(store)) && (!q || `${socket.key ?? ''} ${names.get(socket.key) ?? ''}`.toLowerCase().includes(q)));
       found.sort((x, y) => y.buffered - x.buffered || y.idleMs - x.idleMs);
       return {
         listed: true,
@@ -320,7 +320,7 @@ export function createInspector({ stores, authorize, sockets, disconnect, nameOf
         total: all.length,
         found: found.length,
         // Never more than its first few stores each: a socket may have hundreds open
-        sockets: named(found.slice(0, LIST_MOST), 'key').map(socket => (socket.stores.length > 5 ? { ...socket, stores: socket.stores.slice(0, 5), moreStores: socket.stores.length - 5 } : socket))
+        sockets: (await named(found.slice(0, LIST_MOST), 'key', names ?? undefined)).map(socket => (socket.stores.length > 5 ? { ...socket, stores: socket.stores.slice(0, 5), moreStores: socket.stores.length - 5 } : socket))
       };
     }
   };
@@ -363,7 +363,8 @@ export function createInspector({ stores, authorize, sockets, disconnect, nameOf
       if (!Number.isSafeInteger(body.v)) throw new TypeError('A revert names a store, a record and the version to put it back to');
       const store = storeOf(new URLSearchParams({ store: String(body.store) }));
       // Who is looking, as a key: a string is one, and an object's id. Anything else (a session with no id to
-      // it) is nobody the history should be handed whole
+      // it) is nobody the history should be handed whole, and the store's own `by` is asked, as for any write
+      // of the server's that says not
       const id = who !== null && typeof who === 'object' ? who.id : who;
       const by = typeof id === 'string' && id ? id : typeof id === 'number' ? String(id) : undefined;
       const landed = store.revert(body.c, store.shape.isSingleton(body.c) ? undefined : body.id, { v: body.v }, { children: body.children !== false, by });
@@ -414,7 +415,7 @@ export function createInspector({ stores, authorize, sockets, disconnect, nameOf
         return refused ?? json(changes[name](body, allowed));
       }
       if (name === null || !Object.hasOwn(api, name)) return refusal(404, 'Not found');
-      return json(api[name](url.searchParams));
+      return json(await api[name](url.searchParams));
     } catch (err) {
       // What was asked could not be answered as asked (a store that is not, a collection it has not, history
       // that is off) is the asker's to hear; anything else is a fault

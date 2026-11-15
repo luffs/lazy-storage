@@ -69,8 +69,9 @@ authorize: request => request.headers.get('authorization') === expected
 What it answers is also who is looking. Answer with the user's key (a
 string) or an object with an `id` (a string or a number), and a revert
 is told in the store's history as that key's, made through the server;
-answer anything else that is truthy and it is told as the server's own,
-with nobody to it. The key is written as it is given, whatever
+answer anything else that is truthy and it is told as the store's own
+[`by`](history.md#who-the-servers-writes-are-for) says, and as the
+server's own, with nobody to it, where the store has none. The key is written as it is given, whatever
 `presence.key` the store has: answer with what the store's history
 calls its users.
 
@@ -111,12 +112,16 @@ What else it does to stay an administrator's page:
 
 The store keeps users by their keys, which are seldom what a person
 reads. `nameOf(key)` gives the page a name for one, shown beside the
-key in history, activity, sessions and sockets (`Ann (u1)`); nothing,
-or a throw (reported to `onError`), shows the key alone. It is asked
-once per key in an answer.
+key in history, activity, sessions and sockets (`Ann (u1)`), and the
+search in Sessions finds a user by it. It may answer through a promise,
+for a name looked up in a database, and is asked once per key an
+answer, all of them at once; a search asks it of every key there is to
+look through. Nothing, or a throw (reported to `onError`), shows the
+key alone.
 
 ```js
 inspector: { authorize, nameOf: key => users.get(key)?.name }
+inspector: { authorize, nameOf: async key => (await db.users.find(key))?.name }
 ```
 
 ## What it needs of a store

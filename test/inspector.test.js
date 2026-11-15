@@ -572,3 +572,41 @@ test('nameOf names the users the page shows by their keys, in history, activity 
   const peers = (await get('/api/peers?store=team-1')).body.peers;
   assert.deepEqual(peers.map(p => [p.key, p.name]), [['u2', 'Bo']]);
 });
+
+test('nameOf may answer through a promise, and finds a user by name in sessions and sockets', async () => {
+  const names = { u1: 'Ann Andersson', u2: 'Bo' };
+  const asked = [];
+  const nameOf = async key => { asked.push(key); await new Promise(resolve => setTimeout(resolve, 1)); return names[key]; };
+  const stores = createStores(id => (id === 'team-1' ? createStore({ ...SHAPE, history: true, presence: true }) : null));
+  const store = stores.get('team-1');
+  const inspector = createInspector({
+    stores,
+    authorize: () => true,
+    nameOf,
+    sockets: () => [{ user: { id: 'u1' }, stores: ['team-1'], buffered: 0, idleMs: 0, openMs: 0 }, { user: { id: 'u2' }, stores: ['team-1'], buffered: 0, idleMs: 0, openMs: 0 }]
+  });
+  const get = async path => (await inspector.handle(new Request(`http://x${BASE}${path}`), BASE)).json();
+  store.patch({ tasks: { k: { n: 1 } } }, { by: 'u1' });
+  store.patch({ tasks: { k: { n: 2 } } }, { by: 'u1' });
+  assert.deepEqual((await get('/api/history?store=team-1&c=tasks&id=k')).entries.map(e => e.name), ['Ann Andersson', 'Ann Andersson']);
+  assert.deepEqual(asked, ['u1'], 'once an answer, though it is in two entries');
+
+  const net = createNetwork(store);
+  net.client({ replicaId: 'r1', ...SHAPE }, { user: { id: 'u1' } });
+  net.client({ replicaId: 'r2', ...SHAPE }, { user: { id: 'u2' } });
+  await net.settle();
+  assert.deepEqual((await get('/api/peers?store=team-1&q=andersson')).peers.map(p => [p.key, p.name]), [['u1', 'Ann Andersson']]);
+  assert.deepEqual((await get('/api/peers?store=team-1')).peers.map(p => p.name).sort(), ['Ann Andersson', 'Bo']);
+  assert.deepEqual((await get('/api/sockets?q=bo')).sockets.map(w => [w.key, w.name]), [['u2', 'Bo']]);
+});
+
+test('a revert from the inspector whose authorize says no one is told as the store\'s own by says', async () => {
+  const stores = createStores(id => (id === 'team-1' ? createStore({ ...SHAPE, history: true, by: () => 'from-the-request' }) : null));
+  const store = stores.get('team-1');
+  const inspector = createInspector({ stores, authorize: () => true });
+  store.patch({ tasks: { k: { n: 1 } } }, { by: null });
+  store.patch({ tasks: { k: { n: 2 } } }, { by: null });
+  const response = await inspector.handle(new Request(`http://x${BASE}/api/revert`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-lazy-inspect': '1' }, body: JSON.stringify({ store: 'team-1', c: 'tasks', id: 'k', v: store.version - 1 }) }), BASE);
+  assert.equal(response.status, 200);
+  assert.deepEqual(store.historyOf('tasks', 'k', { limit: 1 }).map(e => [e.user, e.record]), [['from-the-request', { n: 1 }]]);
+});

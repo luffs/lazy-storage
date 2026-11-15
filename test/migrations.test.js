@@ -152,3 +152,17 @@ test('the count survives a reopen of a SQLite file, which gains the column it is
     rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
   }
 });
+
+test('a migration is the store\'s own write: its `by` is not asked, and the history tells it as nobody\'s', () => {
+  const disk = memoryStorage();
+  const old = createStore({ initial: INITIAL, storage: disk, history: true });
+  old.patch({ tasks: { a: { id: 'a', title: 'Milk' } } });
+  old.dispose();
+
+  let asked = 0;
+  const store = createStore({ initial: INITIAL, storage: disk, history: true, migrations: [renameTitle], by: () => { asked++; throw new Error('not yet'); } });
+  assert.equal(store.state.tasks.a.name, 'Milk', 'migrated though its by would throw');
+  assert.equal(asked, 0);
+  assert.deepEqual(store.historyOf('tasks', 'a', { limit: 1 }).map(e => [e.replicaId, e.user]), [['server', undefined]]);
+  store.dispose();
+});

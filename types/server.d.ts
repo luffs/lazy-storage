@@ -440,8 +440,8 @@ export interface InspectorOptions {
   /** The server's open sockets, as an adapter's `sockets()` lists them, and its `disconnect`: the adapters give their own */
   sockets?: () => Array<{ user?: unknown; relay?: unknown; stores: string[]; buffered: number; idleMs: number; openMs: number; expiresAt?: number | null }>;
   disconnect?: (filter: (user: unknown) => boolean) => number;
-  /** A user's name by its key, shown beside the key in history, activity, sessions and sockets; nothing shows the key alone */
-  nameOf?: (key: string) => string | null | undefined;
+  /** A user's name by its key, shown beside the key in history, activity, sessions and sockets, and found by; nothing shows the key alone */
+  nameOf?: (key: string) => string | null | undefined | Promise<string | null | undefined>;
   onError?: (error: any) => void;
 }
 

@@ -228,7 +228,7 @@ createStore({ readOnly: 'settings' });
 const viewNames: string[] = sqliteStorage(':memory:').views(declared, { singletons: ['settings'], prefix: 'v_', store: 'team-1' });
 void viewNames;
 const registryForInspector = createStores(() => createStore());
-const looked: Promise<Response | null> = createInspector({ stores: registryForInspector, authorize: (request, { write }) => !write && request.headers.has('cookie'), nameOf: key => (key === 'u1' ? 'Ann' : undefined) }).handle(new Request('http://x/ws/inspect'), '/ws/inspect');
+const looked: Promise<Response | null> = createInspector({ stores: registryForInspector, authorize: (request, { write }) => !write && request.headers.has('cookie'), nameOf: async key => (key === 'u1' ? 'Ann' : undefined) }).handle(new Request('http://x/ws/inspect'), '/ws/inspect');
 void looked;
 const commits: StorageCommit[] = [];
 const mine: ServerStorage = { load: () => null, commit: change => { commits.push(change); }, flush: () => {} };

@@ -1540,7 +1540,8 @@ export function createStore({
       try {
         const diff = migrations[i](structuredClone(doc.state), { store: self });
         schema = i + 1;
-        if (Utils.isPlainObject(diff) && Object.keys(diff).length) patch(diff);
+        // The store's own write, made as it loads: nobody's, whatever the store's `by` would say (nor asked it)
+        if (Utils.isPlainObject(diff) && Object.keys(diff).length) patch(diff, { by: null });
         else commit({ upserts: [], deletes: [] });
         if (!commitNow()) throw new RefusedError('unavailable', 'The store could not save the change and was unloaded');
       } catch (err) {
