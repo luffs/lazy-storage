@@ -265,6 +265,12 @@ export interface StoreDocument extends StorageDocument {
   schema: number;
 }
 
+/** A write of the server's made for someone: `by` is told in the history as that user's, and to listeners */
+export interface WriteOptions {
+  /** The user's key as it is (a string), or a user as the store keys its users (presence.key); null or absent: nobody */
+  by?: string | Record<string, unknown> | null;
+}
+
 export interface Store<S extends object = any> {
   /** The state: read it, never write it (patch, del and apply write) */
   readonly state: S;
@@ -275,10 +281,17 @@ export interface Store<S extends object = any> {
   readonly disposed: boolean;
   /** The time on the store's clock: the wall clock's, never before a timestamp the store has made or accepted */
   now(): number;
-  /** The server's own write, in the tree's shape: merged, missing containers and records made, stamped now */
-  patch(diff: Record<string, any>): Change[];
-  /** Delete a record, or a path in one, as the server */
-  del(c: string, id?: string | Path, path?: Path): Change[];
+  /**
+   * The server's own write, in the tree's shape: merged, missing containers and records made, stamped now.
+   * `by`: the user it is made for, told in the history and to listeners (a string as the user's key, an object
+   * keyed as the store keys its users)
+   */
+  patch(diff: Record<string, any>, options?: WriteOptions): Change[];
+  /** Delete a record, or a path in one, as the server; the options last (a singleton's path in the id's place) */
+  del(c: string, id?: string, path?: Path, options?: WriteOptions): Change[];
+  del(c: string, id: string, options: WriteOptions): Change[];
+  del(singleton: string, path?: Path, options?: WriteOptions): Change[];
+  del(singleton: string, options: WriteOptions): Change[];
   /** Decide a replica's op as if it came on a session of `user`; throws a RefusedError for one refused whole */
   apply(op: Op, options?: { user?: unknown }): { lost: Lost[]; duplicate: boolean };
   session(options: SessionOptions): Session;
@@ -292,7 +305,8 @@ export interface Store<S extends object = any> {
   /** A record's clock: times by path of what lives and what was deleted inside it */
   clock(c: string, id?: string): RecordClock;
   /** Hear every batch that lands, as a diff in the tree's shape, on the next microtask, before it is stored */
-  on(listener: (diff: Record<string, any>, meta: { origin: 'remote' | 'server'; replicaId: string; v: number; changes: Change[] }) => void): Unsubscribe;
+  /** `meta.user`: who wrote, as a key: a replica's user, or the `by` of a write of the server's; null for nobody */
+  on(listener: (diff: Record<string, any>, meta: { origin: 'remote' | 'server'; replicaId: string; user: string | null; v: number; changes: Change[] }) => void): Unsubscribe;
   /** Watch ops (once stored), refusals and sessions */
   observe<E extends keyof StoreEvents>(event: E, fn: (payload: StoreEvents[E]) => void): Unsubscribe;
   stats(): StoreStats;
@@ -315,8 +329,8 @@ export interface Store<S extends object = any> {
    * made again brings back the children its deletion took with it, as they were just before, unless `children: false`.
    * `by` is the user the server makes the write for (an administrator), told with it in the history
    */
-  revert(c: string, id: string, when: When, options?: { children?: boolean; by?: unknown }): Change[];
-  revert(singleton: string, when: When, options?: { by?: unknown }): Change[];
+  revert(c: string, id: string, when: When, options?: WriteOptions & { children?: boolean }): Change[];
+  revert(singleton: string, when: When, options?: WriteOptions): Change[];
   export(): StoreDocument;
   restore(doc: StorageDocument): void;
   flush(): void;

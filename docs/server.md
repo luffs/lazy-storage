@@ -354,7 +354,10 @@ in the tree's shape (a record by id, `null` to delete), stamps it with the
 server's time and applies it without any check: a missing record or
 nested object is made, and a deleted record takes its children with it.
 `store.del(c, id, path)` deletes, and `store.apply(op, { user })` decides
-a replica's op as if it came on that user's session. Retention, rate
+a replica's op as if it came on that user's session. Both `patch` and
+`del` take `{ by }` last, the user a write is made for, which the
+[history](history.md#who-the-servers-writes-are-for) and listeners are
+told. Retention, rate
 limits and the outbox are idle machinery here: harmless, and the
 defaults are fine.
 

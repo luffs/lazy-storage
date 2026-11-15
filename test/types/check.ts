@@ -166,7 +166,16 @@ store.del('tasks', 'a');
 const result = store.apply({ replica: 'r', seq: 1, ts: Date.now(), changes: [] }, { user: { id: 'u' } });
 const dup: boolean = result.duplicate;
 const recordClock: RecordClock = store.clock('tasks', 'a');
-store.on((changed, meta) => { void [changed.tasks, meta.origin, meta.changes]; });
+store.on((changed, meta) => { const who: string | null = meta.user; void [changed.tasks, meta.origin, meta.changes, who]; });
+// A write of the server's made for someone
+store.patch({ tasks: { a: { title: 'x' } } }, { by: 'u1' });
+store.patch({ tasks: { a: { title: 'x' } } }, { by: { id: 'u1' } });
+store.del('tasks', 'a', ['title'], { by: 'u1' });
+store.del('tasks', 'a', { by: null });
+store.del('settings', ['theme'], { by: 'u1' });
+store.revert('tasks', 'a', { v: 1 }, { by: 'u1', children: false });
+// @ts-expect-error a by is a key or a user, not a number
+store.patch({ tasks: {} }, { by: 42 });
 store.observe('op', (e: OpEvent) => { void [e.replicaId, e.changes]; });
 const entries: number[] = store.historyOf('tasks', 'a', { limit: 10, path: ['title'], since: new Date(0), user: 'u1' }).map(e => e.v + e.ts + e.changes.length + (e.user ?? e.replicaId).length);
 const was: unknown = [store.recordAt('tasks', 'a', new Date()), store.recordAt('settings', { v: 3 }), store.revert('tasks', 'a', 1000), store.revert('settings', { ts: 5 }), store.historyOf('settings', { limit: 1 })];

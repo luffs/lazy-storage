@@ -56,7 +56,7 @@ record each, newest first:
   ts: 1762905600000,            // when the write was made: its own stamp
   at: 1762905600000,            // when it landed, on the store's clock
   replicaId: 'r1',              // the replica that wrote; 'server' for the store's own write
-  user: 'u1',                   // its user's key, as presence keys users (user.id unless presence.key says otherwise); none for the server
+  user: 'u1',                   // its user's key, as presence keys users (user.id unless presence.key says otherwise); for the server's, its `by`, else none
   changes: [{ c: 'tasks', id: 'k', path: ['title'], set: 'Oat milk' }],   // what the write did to this record
   record: { title: 'Oat milk' } // the record as the write left it; undefined for a deletion
 }
@@ -107,6 +107,29 @@ takes its options in the id's place: `store.historyOf('settings', { limit: 10 })
 `path` exists for one record only: across the store it would read every
 row there is.
 
+## Who the server's writes are for
+
+A write of the server's is nobody's in the history: `replicaId` is
+`'server'` and there is no `user`. When the server writes for someone,
+an endpoint of the app's that an administrator called, say, it says so
+with `by`:
+
+```js
+store.patch({ tasks: { k: { title: 'Oat milk' } } }, { by: 'u1' });
+store.del('tasks', 'k', { by: request.user });           // a path before the options, when there is one
+store.del('settings', ['theme'], { by: 'u1' });          // a singleton: its path in the id's place
+store.revert('tasks', 'k', { v: 41 }, { by: 'u1' });
+```
+
+A string is the user's key as it is; an object is keyed as the store
+keys its users (`presence.key`, `user.id` by default), so it can be the
+user `authenticate` gave. Anything else throws before anything is
+written, and `null` is nobody. The entry is the server's still
+(`replicaId: 'server'`) with that user, so `activity({ user })` finds
+it beside the user's own edits, and `store.on` listeners hear it as
+`meta.user`. The rules do not judge it: it is the server's write,
+told as made for that user.
+
 ## The record as it was
 
 `recordAt(c, id, when)` is the record at a time on the store's clock
@@ -129,7 +152,7 @@ itself, so it can be reverted. They differ in who writes:
 
 | | `store.revert` | `db.revert` |
 |---|---|---|
-| Who writes | The server, as `store.patch` does; `{ by: user }` as a fourth argument (the third for a singleton, which has no id) tells it in the history as that user's, made through the server: a string is the user's key as it is, an object is keyed as the store keys its users | The client: it reads the record as it was and writes it to `db.state` |
+| Who writes | The server, as `store.patch` does; `{ by: user }` as a fourth argument (the third for a singleton, which has no id) tells it in the history as that user's, made through the server, as [it does for a patch](#who-the-servers-writes-are-for) | The client: it reads the record as it was and writes it to `db.state` |
 | [Rules](auth.md#who-may-write-what) | Not judged, as no write of the server's is | Judged, as any edit of that user's |
 | A deleted record | Made again, and with it the children its deletion took (and theirs), each as it was just before, in the same write; `{ children: false }` as a fourth argument makes the record alone | Made again, alone |
 | A record that was not there then | Deleted, its children with it | Deleted |

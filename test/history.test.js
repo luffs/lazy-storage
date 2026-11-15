@@ -917,3 +917,48 @@ test('a store that has lost its lease does not prune the history of the store an
   try { mine.close(); } catch { /* its lease is gone */ }
   rmSync(dir, { recursive: true, force: true });
 });
+
+test('the server\'s own writes are told as the user they are made for, by `by`: in the history, in activity and to listeners', async () => {
+  const store = createStore({ ...SHAPE, history: true, presence: { key: user => user.login } });
+  const heard = [];
+  store.on((diff, meta) => heard.push([meta.origin, meta.user]));
+  store.patch({ tasks: { k: { title: 'Milk' } } }, { by: 'support-3' });
+  store.patch({ tasks: { k: { title: 'Oat milk' } } }, { by: { login: 'alice' } });
+  store.patch({ tasks: { k: { done: true } } });
+  store.del('tasks', 'k', ['done'], { by: 'bob' });
+  store.del('tasks', 'k', { by: 'carol' });
+  store.patch({ settings: { theme: 'dark' } }, { by: 'dave' });
+  store.del('settings', ['theme'], { by: 'erin' });
+  await new Promise(resolve => setTimeout(resolve, 0));
+
+  const users = store.historyOf('tasks', 'k').map(e => [e.replicaId, e.user]);
+  assert.deepEqual(users, [['server', 'carol'], ['server', 'bob'], ['server', undefined], ['server', 'alice'], ['server', 'support-3']], 'a key as it is, a user keyed as presence keys users, nobody without by');
+  assert.equal(store.activity({ deleted: true })[0].user, 'carol');
+  assert.deepEqual(store.activity({ user: 'alice' }).map(e => e.record?.title), ['Oat milk']);
+  assert.deepEqual(store.historyOf('settings', { limit: 2 }).map(e => e.user), ['erin', 'dave'], 'a singleton\'s, its path in the id\'s place');
+  assert.deepEqual(heard, [['server', 'support-3'], ['server', 'alice'], ['server', null], ['server', 'bob'], ['server', 'carol'], ['server', 'dave'], ['server', 'erin']]);
+});
+
+test('a `by` that is no user throws before anything is written; null is nobody', () => {
+  const store = createStore({ ...SHAPE, history: true });
+  for (const by of [42, true, ['alice']]) {
+    assert.throws(() => store.patch({ tasks: { k: { n: 1 } } }, { by }), /by is a user's key/);
+    assert.throws(() => store.del('tasks', 'k', { by }), /by is a user's key/);
+  }
+  assert.equal(store.state.tasks.k, undefined, 'nothing written');
+  store.patch({ tasks: { k: { n: 1 } } }, { by: null });
+  store.revert('tasks', 'k', { v: 1 }, { by: null });
+  assert.deepEqual(store.historyOf('tasks', 'k').map(e => e.user), [undefined], 'nobody, not the text "null"');
+});
+
+test('listeners hear who wrote a replica\'s op as its user\'s key', async () => {
+  const store = createStore({ ...SHAPE });
+  const heard = [];
+  store.on((diff, meta) => heard.push([meta.origin, meta.user]));
+  const net = createNetwork(store);
+  const a = net.client({ replicaId: 'a', ...SHAPE }, { user: { id: 'alice' } });
+  await net.settle();
+  a.state.tasks.k = { title: 'Milk' };
+  await net.settle();
+  assert.deepEqual(heard, [['remote', 'alice']]);
+});

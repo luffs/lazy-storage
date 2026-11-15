@@ -581,8 +581,7 @@ export function createStore({
       if (!changesOf.has(key)) changesOf.set(key, []);
       changesOf.get(key).push(change);
     }
-    // A write of the server's made for someone (see run): who, by a user as the store keys users, or by the key itself
-    const by = replicaId === 'server' && typeof user === 'string' ? user : ownerKey(user) ?? null;
+    const by = userOfWrite(replicaId, user);
     // When it landed: the store's time, held to what the last row said, so that it never goes back from one version
     // to the next whatever the wall clock does. A write's own stamp does: an edit made offline lands with an old one
     landedAt = Math.max(landedAt, clock.time);
@@ -620,7 +619,7 @@ export function createStore({
       // Heard on the next microtask, as a batch is: a listener that writes (closes a session, patches) does so
       // after the write that set it off has finished, not in the middle of it
       if (listeners.size) {
-        const meta = { origin: replicaId === 'server' ? 'server' : 'remote', replicaId, v: version, changes: applied };
+        const meta = { origin: replicaId === 'server' ? 'server' : 'remote', replicaId, user: userOfWrite(replicaId, user), v: version, changes: applied };
         const diff = diffOf(shape, applied);
         queueMicrotask(() => {
           for (const fn of listeners) {
@@ -725,8 +724,29 @@ export function createStore({
     return { lost, duplicate: false };
   }
 
-  /** The server's own write: a diff in the tree's shape, decided as the authority, now */
-  function patch(diff) {
+  /**
+   * Who a write is told as, in the history and to listeners: for a replica's op its user's key, as presence keys
+   * users; for a write of the server's the user it was made for (`by`, already a key: see byOf), or nobody
+   */
+  function userOfWrite(replicaId, user) {
+    if (replicaId === 'server') return typeof user === 'string' ? user : null;
+    return ownerKey(user) ?? null;
+  }
+
+  /**
+   * The `by` of a write of the server's (patch, del, revert) as the key it is told by: a string is the user's key
+   * as it is, an object a user as the store keys users. Checked here, so a wrong one throws before anything is
+   * written rather than leaving a history row whose user is nobody, or the text "null"
+   */
+  function byOf(by) {
+    if (by === undefined || by === null) return undefined;
+    if (typeof by === 'string') return by;
+    if (typeof by !== 'object' || Array.isArray(by)) throw new TypeError('by is a user\'s key (a string) or a user as the store keys its users (an object)');
+    return ownerKey(by);
+  }
+
+  /** The server's own write: a diff in the tree's shape, decided as the authority, now; `by` the user it is made for */
+  function patch(diff, options) {
     alive('write to');
     if (!Utils.isPlainObject(diff)) throw new TypeError('store.patch takes a diff: { collection: { id: value } } or { singleton: value }');
     const list = [];
@@ -741,7 +761,7 @@ export function createStore({
       if (!Utils.isPlainObject(value)) throw new TypeError(`"${c}" is a collection: patch its records by id`);
       for (const id of Object.keys(value)) list.push(changeFor({ c, id, path: [] }, value[id]));
     }
-    return run(list);
+    return run(list, { by: byOf(options?.by) });
   }
 
   function run(list, { by } = {}) {
@@ -763,7 +783,8 @@ export function createStore({
       if (err instanceof SchemaError) throw new TypeError(err.message);
       throw err;
     }
-    // `by`: the user a write of the server's is made for (an administrator's revert), told with it in the history
+    // `by`: the user a write of the server's is made for (a revert, or a patch made for someone), a key (byOf),
+    // told with it in the history and to listeners
     landed(applied, ts, 'server', null, by, null);
     // As a replica's op does: a store only the server writes would otherwise forget nothing until it was loaded again
     maybeCompact();
@@ -1530,10 +1551,18 @@ export function createStore({
     now: () => clock.time,
     session,
     patch,
-    /** Delete a record, or a path in one, as the server */
-    del(c, id, path = []) {
+    /** Delete a record, or a path in one, as the server; the options last, `by` the user it is made for */
+    del(c, id, path, options) {
       alive('write to');
-      return run([shape.isSingleton(c) ? { c, path: Array.isArray(id) ? id : path, del: true } : { c, id, path, del: true }]);
+      if (shape.isSingleton(c)) {
+        // A singleton has no id: its path stands in the id's place, and the options follow it
+        if (Array.isArray(id)) [path, options] = [id, path];
+        else if (Utils.isPlainObject(id)) [path, options] = [[], id];
+        else if (Utils.isPlainObject(path)) [path, options] = [[], path];
+        return run([{ c, path: path ?? [], del: true }], { by: byOf(options?.by) });
+      }
+      if (Utils.isPlainObject(path)) [path, options] = [[], path];
+      return run([{ c, id, path: path ?? [], del: true }], { by: byOf(options?.by) });
     },
     /** Decide a replica's op on trust, as if it came on a session of `user` */
     apply(op, { user } = {}) {
@@ -1616,7 +1645,8 @@ export function createStore({
       alive('write to');
       // A singleton has no id: what stands in its place is when, and what follows it the options
       if (shape.isSingleton(c) && id !== undefined) [id, when, options] = [undefined, id, when];
-      const { children = true, by } = options ?? {};
+      const { children = true } = options ?? {};
+      const by = byOf(options?.by);
       const row = rowAt(c, id, when);
       if (!row && !known(when)) throw new Error(`Nothing is known of ${shape.full(c, id).join('/')} then: it is before the store kept its history`);
       const current = doc.get(c, id);

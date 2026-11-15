@@ -4,6 +4,15 @@ All notable changes to lazy-storage are documented here. The format follows Keep
 
 ## [Unreleased]
 
+### Added
+
+- **The server's own writes can say whom they are made for.** `store.revert` took `{ by }`, but `store.patch` and `store.del` did not, so everything an app's own endpoint wrote for a user was nobody's in the history: an audit could say what changed and when, not who. Both now take `{ by }` last (`store.patch(diff, { by })`, `store.del(c, id, path, { by })`, a singleton's path in the id's place), a string as the user's key or an object keyed as the store keys its users, and the history tells the write as that user's, made through the server (`replicaId: 'server'`), so `activity({ user })` finds it beside the user's own edits. A `by` that is no user throws before anything is written. See [Who the server's writes are for](docs/history.md#who-the-servers-writes-are-for)
+- **`store.on` listeners hear who wrote.** The meta a listener is given has `user`: a replica's user's key, as presence keys users, or a server write's `by`, and null for nobody; it had `origin` and `replicaId`, and who was behind a replica only the `op` observer could say
+
+### Fixed
+
+- **A revert `by: null` is nobody's.** It was keyed as a user and told in the history as the text `"null"`
+
 ## [1.1.0] - 2026-11-13
 
 A store can now keep its history and be looked into. With `history`
