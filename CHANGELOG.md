@@ -4,6 +4,17 @@ All notable changes to lazy-storage are documented here. The format follows Keep
 
 ## [Unreleased]
 
+## [1.4.1] - 2026-11-15
+
+All stores in the inspector goes through its stores a page at a time,
+a hundred a page with Previous and Next (or `[` and `]`), where it
+showed the first hundred alone; tells a store's history as it tells
+its other counts; and no longer writes "null" under its table, nor
+"undefined" for a record that is not there. Nothing changes on the
+wire or in the store's API, and any mix of 1.4.0 and 1.4.1 works. On
+upgrade there is nothing to change; `/api/everyStore` takes `offset`
+and answers it.
+
 ### Added
 
 - **All stores goes through its stores a page at a time.** It showed the first hundred and no more, so with more than a hundred live the rest of an order (the quietest stores, the last ids) could only be found by searching. It shows a hundred a page, "101–200 of 2340 live", with Previous and Next (or `[` and `]`), the page in the address (`&page=2`), and back to the first when the order or the search changes; `/api/everyStore` takes `offset`
