@@ -130,6 +130,10 @@ function presenceOptions(presence) {
  *   record's history (`db.historyOf`): true for every client that has the store open, or
  *   `(user, { c, id, store }) => boolean`; off by default, since what a record was may be what was taken out of
  *   it. The storage has to keep history (the memory and SQLite adapters do)
+ * @param {() => (string|Object|null|undefined)} [options.by] - who a write of the server's is made for when it
+ *   says no `by` of its own (patch, del, revert): asked at each such write, and answered as `by` is given (a
+ *   user's key, or a user as the store keys its users; nothing for nobody). For an app that knows who it is
+ *   serving where it writes, from a request's context (Node's AsyncLocalStorage), without passing it to every call
  * @param {boolean|Object} [options.presence=false]
  * @param {(error: any) => void} [options.onError]
  * @param {() => number} [options.now]
@@ -153,6 +157,7 @@ export function createStore({
   groupCommit = true,
   migrations = [],
   history: historyOption = false,
+  by: byOption,
   presence: presenceOption = false,
   onError = err => console.error('lazy-storage:', err),
   now
@@ -162,6 +167,7 @@ export function createStore({
   if (rateLimit && !(rateLimit.burst > 0 && rateLimit.perSecond > 0)) throw new TypeError('rateLimit needs positive burst and perSecond');
   if (!(maxReplicas >= 1)) throw new TypeError('maxReplicas must be a positive number (Infinity for no limit)');
   if (validate !== undefined && typeof validate !== 'function') throw new TypeError('validate must be a function');
+  if (byOption !== undefined && typeof byOption !== 'function') throw new TypeError('by must be a function, asked at each write of the server\'s who it is made for');
   // readOnly as a list: those collections and singletons are the server's alone
   const locked = Array.isArray(readOnly) ? Object.fromEntries(readOnly.map(key => [key, false])) : {};
   for (const key of Object.keys(locked)) if (!shape.has(key)) throw new TypeError(`readOnly: "${key}" is not a collection or singleton`);
@@ -745,6 +751,12 @@ export function createStore({
     return ownerKey(by);
   }
 
+  /** Who a write of the server's is for: its own `by` where its options give one (null too: nobody), else the store's `by` */
+  function byFor(options) {
+    if (options?.by !== undefined) return byOf(options.by);
+    return byOption ? byOf(byOption()) : undefined;
+  }
+
   /** The server's own write: a diff in the tree's shape, decided as the authority, now; `by` the user it is made for */
   function patch(diff, options) {
     alive('write to');
@@ -761,7 +773,7 @@ export function createStore({
       if (!Utils.isPlainObject(value)) throw new TypeError(`"${c}" is a collection: patch its records by id`);
       for (const id of Object.keys(value)) list.push(changeFor({ c, id, path: [] }, value[id]));
     }
-    return run(list, { by: byOf(options?.by) });
+    return run(list, { by: byFor(options) });
   }
 
   function run(list, { by } = {}) {
@@ -1559,10 +1571,10 @@ export function createStore({
         if (Array.isArray(id)) [path, options] = [id, path];
         else if (Utils.isPlainObject(id)) [path, options] = [[], id];
         else if (Utils.isPlainObject(path)) [path, options] = [[], path];
-        return run([{ c, path: path ?? [], del: true }], { by: byOf(options?.by) });
+        return run([{ c, path: path ?? [], del: true }], { by: byFor(options) });
       }
       if (Utils.isPlainObject(path)) [path, options] = [[], path];
-      return run([{ c, id, path: path ?? [], del: true }], { by: byOf(options?.by) });
+      return run([{ c, id, path: path ?? [], del: true }], { by: byFor(options) });
     },
     /** Decide a replica's op on trust, as if it came on a session of `user` */
     apply(op, { user } = {}) {
@@ -1646,7 +1658,7 @@ export function createStore({
       // A singleton has no id: what stands in its place is when, and what follows it the options
       if (shape.isSingleton(c) && id !== undefined) [id, when, options] = [undefined, id, when];
       const { children = true } = options ?? {};
-      const by = byOf(options?.by);
+      const by = byFor(options);
       const row = rowAt(c, id, when);
       if (!row && !known(when)) throw new Error(`Nothing is known of ${shape.full(c, id).join('/')} then: it is before the store kept its history`);
       const current = doc.get(c, id);

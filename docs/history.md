@@ -130,6 +130,22 @@ it beside the user's own edits, and `store.on` listeners hear it as
 `meta.user`. The rules do not judge it: it is the server's write,
 told as made for that user.
 
+An app whose endpoints all write for whoever called them need not pass
+`by` to every call. The store's own `by` is asked at each write of the
+server's that says none, and answered as `by` is given; from a
+request's context that is one line:
+
+```js
+const acting = new AsyncLocalStorage();                     // node:async_hooks; run each request in acting.run(user, …)
+const store = createStore({ ..., history: true, by: () => acting.getStore() });
+```
+
+A write's own `by` still wins, and `by: null` is nobody whatever the
+store's says. Asked outside a request, it answers nothing, and the
+write is the server's own. Work a request starts and leaves running (a
+timer, a listener it set off) is in its context too, and so is told as
+that user's: run it outside (`acting.exit(…)`) where it is not.
+
 ## The record as it was
 
 `recordAt(c, id, when)` is the record at a time on the store's clock

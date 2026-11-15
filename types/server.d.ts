@@ -212,6 +212,11 @@ export interface StoreOptions<S extends object = any> extends Omit<ShapeOptions,
     /** Who of the clients may read a record's history (`db.historyOf`): true, or a function; nobody by default */
     clients?: boolean | ((user: unknown, context: { c: string; id: string | undefined; store: Store<S> }) => boolean);
   };
+  /**
+   * Who a write of the server's is made for when it says no `by` of its own (patch, del, revert): asked at each
+   * such write, and answered as `by` is given. For an app that knows whom it serves from a request's context
+   */
+  by?: () => WriteOptions['by'] | undefined;
   presence?: boolean | PresenceOptions<S>;
   onError?(error: unknown): void;
   now?: () => number;
@@ -435,6 +440,8 @@ export interface InspectorOptions {
   /** The server's open sockets, as an adapter's `sockets()` lists them, and its `disconnect`: the adapters give their own */
   sockets?: () => Array<{ user?: unknown; relay?: unknown; stores: string[]; buffered: number; idleMs: number; openMs: number; expiresAt?: number | null }>;
   disconnect?: (filter: (user: unknown) => boolean) => number;
+  /** A user's name by its key, shown beside the key in history, activity, sessions and sockets; nothing shows the key alone */
+  nameOf?: (key: string) => string | null | undefined;
   onError?: (error: any) => void;
 }
 

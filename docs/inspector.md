@@ -107,6 +107,18 @@ What else it does to stay an administrator's page:
   of `authorize` with `write: true`.
 - Nothing is cached.
 
+## Names
+
+The store keeps users by their keys, which are seldom what a person
+reads. `nameOf(key)` gives the page a name for one, shown beside the
+key in history, activity, sessions and sockets (`Ann (u1)`); nothing,
+or a throw (reported to `onError`), shows the key alone. It is asked
+once per key in an answer.
+
+```js
+inspector: { authorize, nameOf: key => users.get(key)?.name }
+```
+
 ## What it needs of a store
 
 It reads through the store's own calls, so what a store keeps is what it
@@ -149,7 +161,7 @@ neither:
 ```js
 import { createInspector } from 'lazy-storage/server';
 
-const inspector = createInspector({ stores, authorize, sockets, disconnect, onError });
+const inspector = createInspector({ stores, authorize, nameOf, sockets, disconnect, onError });
 const response = await inspector.handle(request, '/admin/stores');   // a Response, or null for a path that is not under it
 ```
 

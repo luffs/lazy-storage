@@ -962,3 +962,28 @@ test('listeners hear who wrote a replica\'s op as its user\'s key', async () => 
   await net.settle();
   assert.deepEqual(heard, [['remote', 'alice']]);
 });
+
+test('the store\'s `by` is asked who a write of the server\'s is for when the write says not, and is answered as by is', async () => {
+  assert.throws(() => createStore({ ...SHAPE, by: 'u1' }), /by must be a function/);
+  let acting;
+  let asked = 0;
+  const store = createStore({ ...SHAPE, history: true, presence: { key: user => user.login }, by: () => { asked++; return acting; } });
+  acting = 'u1';
+  store.patch({ tasks: { k: { n: 1 } } });
+  acting = { login: 'alice' };
+  store.patch({ tasks: { k: { n: 2 } } });
+  acting = undefined;
+  store.patch({ tasks: { k: { n: 3 } } });
+  acting = 'u1';
+  store.patch({ tasks: { k: { n: 4 } } }, { by: 'bob' });
+  store.patch({ tasks: { k: { n: 5 } } }, { by: null });
+  store.revert('tasks', 'k', { v: 1 });
+  store.del('tasks', 'k', ['n']);
+  store.patch({ settings: { theme: 'dark' } });
+  store.revert('settings', { v: store.version });
+  assert.deepEqual(store.historyOf('tasks', 'k').map(e => e.user), ['u1', 'u1', undefined, 'bob', undefined, 'alice', 'u1'], 'its own by first, null for nobody; else the store\'s');
+  assert.equal(asked, 7, 'asked only where a write says no by of its own');
+  acting = 42;
+  assert.throws(() => store.patch({ tasks: { k: { n: 6 } } }), /by is a user's key/);
+  assert.equal(store.state.tasks.k.n, undefined, 'nothing written');
+});

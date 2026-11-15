@@ -4,6 +4,11 @@ All notable changes to lazy-storage are documented here. The format follows Keep
 
 ## [Unreleased]
 
+### Added
+
+- **A store can be asked who its server's writes are for.** `{ by }` had to be passed to every `store.patch`, `store.del` and `store.revert`, so an app whose endpoints all write for whoever called them passed it everywhere, or wrapped the store's calls and had to read their arguments as the store does. `createStore({ by: () => key })` is asked at each write of the server's that says no `by` of its own and answered as `by` is (a key, or a user as the store keys its users; nothing for nobody), so `by: () => acting.getStore()` over an AsyncLocalStorage tells every write a request makes as its user's. A write's own `by` wins, `null` included. See [Who the server's writes are for](docs/history.md#who-the-servers-writes-are-for)
+- **The inspector names users.** It showed the keys the store keeps, which are seldom what a person reads. `inspector: { authorize, nameOf }` gives a name by key, shown beside it in history, activity, sessions and sockets; the JSON answers carry it as `name`. Nothing, or a throw (reported to `onError`), shows the key alone. See [Names](docs/inspector.md#names)
+
 ## [1.2.0] - 2026-11-15
 
 The server's own writes can say whom they are made for. `store.patch`

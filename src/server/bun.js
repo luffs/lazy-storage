@@ -145,7 +145,7 @@ export function createHandlers({
   const deflate = deflateOptions(perMessageDeflate);
   const snapshots = snapshotOptions(httpSnapshots);
   // The inspector's page and its requests, at <path>/inspect, when the app says who may look (see inspector.js)
-  const inspect = inspector ? createInspector({ stores, authorize: inspector.authorize, sockets: () => sockets(), disconnect: filter => disconnect(filter), onError }) : null;
+  const inspect = inspector ? createInspector({ stores, authorize: inspector.authorize, nameOf: inspector.nameOf, sockets: () => sockets(), disconnect: filter => disconnect(filter), onError }) : null;
   const inspectPath = `${path}/inspect`;
   // Where the hub points a client that can fetch for a large snapshot
   const snapshotRoute = snapshots && { threshold: snapshots.threshold, url: id => `${path}/snapshot/${id}` };

@@ -5,17 +5,18 @@ import { once } from 'node:events';
 import { connect } from 'node:net';
 import { createStore, createStores, createInspector } from '../src/server/index.js';
 import { serve, createHandlers, toRequest } from '../src/server/node.js';
+import { createNetwork } from './helpers.js';
 
 const SHAPE = { initial: { tasks: {}, subtasks: {}, settings: { theme: 'light' } }, singletons: ['settings'], parents: { subtasks: { taskId: 'tasks' } } };
 const BASE = '/ws/inspect';
 /** What the page asks, it asks with a header of its own */
 const ASKED = { 'x-lazy-inspect': '1' };
 
-function setup({ history = true, authorize = () => true } = {}) {
+function setup({ history = true, authorize = () => true, nameOf } = {}) {
   const faults = [];
   const stores = createStores(id => (id.startsWith('team-') ? createStore({ ...SHAPE, history, presence: true }) : null));
   const store = stores.get('team-1');
-  const inspector = createInspector({ stores, authorize, onError: err => faults.push(err) });
+  const inspector = createInspector({ stores, authorize, nameOf, onError: err => faults.push(err) });
   const get = async (path, headers) => {
     const response = await inspector.handle(new Request(`http://x${BASE}${path}`, { headers }), BASE);
     return { status: response.status, headers: response.headers, body: response.headers.get('content-type')?.startsWith('application/json') ? await response.json() : await response.text() };
@@ -541,4 +542,33 @@ test('the script of the page declares nothing by a name the window has of its ow
   const declared = [...script.matchAll(/^(?:async\s+)?(?:function\*?|const|let|var|class)\s+([A-Za-z_$][\w$]*)/gm)].map(([, name]) => name);
   assert.ok(declared.length > 30, 'the declarations were found');
   assert.deepEqual(declared.filter(name => taken.has(name)), []);
+});
+
+test('nameOf names the users the page shows by their keys, in history, activity and sessions; nothing, or a throw, leaves the key', async () => {
+  const names = { u1: 'Ann', u2: 'Bo' };
+  assert.throws(() => createInspector({ stores: createStores(() => null), authorize: () => true, nameOf: 'Ann' }), /nameOf is a function/);
+  const asked = [];
+  const { get, store, stores, faults } = setup({
+    nameOf: key => {
+      asked.push(key);
+      if (key === 'boom') throw new Error('no name');
+      return names[key];
+    }
+  });
+  store.patch({ tasks: { k: { n: 1 } } }, { by: 'u1' });
+  store.patch({ tasks: { k: { n: 2 } } }, { by: 'u1' });
+  store.patch({ tasks: { k: { n: 3 } } }, { by: 'nobody-named' });
+  store.patch({ tasks: { k: { n: 4 } } }, { by: 'boom' });
+  store.patch({ tasks: { k: { n: 5 } } });
+  const { entries } = (await get('/api/history?store=team-1&c=tasks&id=k')).body;
+  assert.deepEqual(entries.map(e => [e.user, e.name]), [[undefined, undefined], ['boom', undefined], ['nobody-named', undefined], ['u1', 'Ann'], ['u1', 'Ann']]);
+  assert.equal(asked.filter(key => key === 'u1').length, 1, 'asked once an answer');
+  assert.equal(faults.length, 1, 'the throw reported');
+  assert.deepEqual((await get('/api/activity?store=team-1&user=u1')).body.entries.map(e => e.name), ['Ann', 'Ann']);
+
+  const net = createNetwork(stores.get('team-1'));
+  net.client({ replicaId: 'r2', ...SHAPE }, { user: { id: 'u2' } });
+  await net.settle();
+  const peers = (await get('/api/peers?store=team-1')).body.peers;
+  assert.deepEqual(peers.map(p => [p.key, p.name]), [['u2', 'Bo']]);
 });

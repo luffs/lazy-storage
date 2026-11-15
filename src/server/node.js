@@ -137,7 +137,7 @@ export function createHandlers({
   const resolveStore = typeof stores === 'function' ? stores : id => stores.get(id);
   const snapshots = snapshotOptions(httpSnapshots);
   // The inspector's page and its requests, at <path>/inspect, when the app says who may look (see inspector.js)
-  const inspect = inspector ? createInspector({ stores, authorize: inspector.authorize, sockets: () => sockets(), disconnect: filter => disconnect(filter), onError }) : null;
+  const inspect = inspector ? createInspector({ stores, authorize: inspector.authorize, nameOf: inspector.nameOf, sockets: () => sockets(), disconnect: filter => disconnect(filter), onError }) : null;
   const inspectPath = `${path}/inspect`;
   const snapshotRoute = snapshots && { threshold: snapshots.threshold, url: id => `${path}/snapshot/${id}` };
   // Compression is decided per message, above `threshold` only, as the Bun

@@ -174,6 +174,11 @@ store.del('tasks', 'a', ['title'], { by: 'u1' });
 store.del('tasks', 'a', { by: null });
 store.del('settings', ['theme'], { by: 'u1' });
 store.revert('tasks', 'a', { v: 1 }, { by: 'u1', children: false });
+// Who the server's writes are for, asked of the store where a write says not
+createStore({ by: () => 'u1' });
+createStore({ by: () => undefined });
+// @ts-expect-error the store's by is a function
+createStore({ by: 'u1' });
 // @ts-expect-error a by is a key or a user, not a number
 store.patch({ tasks: {} }, { by: 42 });
 store.observe('op', (e: OpEvent) => { void [e.replicaId, e.changes]; });
@@ -223,7 +228,7 @@ createStore({ readOnly: 'settings' });
 const viewNames: string[] = sqliteStorage(':memory:').views(declared, { singletons: ['settings'], prefix: 'v_', store: 'team-1' });
 void viewNames;
 const registryForInspector = createStores(() => createStore());
-const looked: Promise<Response | null> = createInspector({ stores: registryForInspector, authorize: (request, { write }) => !write && request.headers.has('cookie') }).handle(new Request('http://x/ws/inspect'), '/ws/inspect');
+const looked: Promise<Response | null> = createInspector({ stores: registryForInspector, authorize: (request, { write }) => !write && request.headers.has('cookie'), nameOf: key => (key === 'u1' ? 'Ann' : undefined) }).handle(new Request('http://x/ws/inspect'), '/ws/inspect');
 void looked;
 const commits: StorageCommit[] = [];
 const mine: ServerStorage = { load: () => null, commit: change => { commits.push(change); }, flush: () => {} };

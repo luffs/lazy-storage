@@ -74,13 +74,42 @@ function numberOf(text, name) {
  * @param {() => Array<Object>} [options.sockets] - the server's open sockets, as an adapter's `sockets()` lists them
  * @param {(filter: (user: any) => boolean) => number} [options.disconnect] - close the sockets of the users a
  *   filter picks, as an adapter's `disconnect` does
+ * @param {(key: string) => (string|null|undefined)} [options.nameOf] - a user's name, by its key, for the page to
+ *   show beside the key in history, activity, sessions and sockets: keys are what the store keeps, and seldom
+ *   what a person reads. Nothing, or a throw (reported to onError), shows the key alone
  * @param {(error: any) => void} [options.onError]
  * @returns {{ handle: (request: Request, base: string) => Promise<Response|null> }}
  */
-export function createInspector({ stores, authorize, sockets, disconnect, onError = err => console.error('lazy-storage:', err) } = {}) {
+export function createInspector({ stores, authorize, sockets, disconnect, nameOf, onError = err => console.error('lazy-storage:', err) } = {}) {
   if (!stores) throw new TypeError('An inspector needs stores (a registry or a resolver function)');
   if (typeof authorize !== 'function') throw new TypeError('An inspector needs authorize(request, { write }): it shows every record of every store, and nothing lets a request in by default');
+  if (nameOf !== undefined && typeof nameOf !== 'function') throw new TypeError('nameOf is a function, a user\'s name by its key');
   const resolve = typeof stores === 'function' ? stores : id => stores.get(id);
+  // A key's name, asked once an answer: the same user is in most of a page's entries
+  function namer() {
+    const names = new Map();
+    return key => {
+      if (!nameOf || typeof key !== 'string') return undefined;
+      if (!names.has(key)) {
+        let name;
+        try {
+          name = nameOf(key);
+        } catch (err) {
+          onError(err);
+        }
+        names.set(key, typeof name === 'string' && name && name !== key ? name.slice(0, 120) : undefined);
+      }
+      return names.get(key);
+    };
+  }
+  // Each with `name` beside the key it names (`user` an entry's, `key` a peer's or a socket's), where nameOf has one
+  const named = (list, field) => {
+    const name = namer();
+    return list.map(item => {
+      const n = name(item[field]);
+      return n === undefined ? item : { ...item, name: n };
+    });
+  };
   const liveIds = () => (typeof stores.ids === 'function' ? stores.ids() : null);
   // A collection's ids in order, kept for as long as the store's version stands: a page of records is then a
   // place in a list, and not every id of the collection sorted again
@@ -240,14 +269,14 @@ export function createInspector({ stores, authorize, sockets, disconnect, onErro
       const c = params.get('c');
       const id = store.shape?.isSingleton(c) ? undefined : params.get('id');
       const limit = limitOf(params, 50);
-      return { entries: withBefore(store, store.historyOf(c, id, { limit, cursor: cursorOf(params.get('cursor')) })) };
+      return { entries: named(withBefore(store, store.historyOf(c, id, { limit, cursor: cursorOf(params.get('cursor')) })), 'user') };
     },
     activity(params) {
       const store = storeOf(params);
       const limit = limitOf(params, 50);
       return {
         version: store.version,
-        entries: withBefore(store, store.activity({
+        entries: named(withBefore(store, store.activity({
           limit,
           after: numberOf(params.get('after'), 'after'),
           before: numberOf(params.get('before'), 'before'),
@@ -256,7 +285,7 @@ export function createInspector({ stores, authorize, sockets, disconnect, onErro
           deleted: params.get('deleted') === '1',
           oldestFirst: params.get('oldestFirst') === '1',
           cursor: cursorOf(params.get('cursor'))
-        }))
+        })), 'user')
       };
     },
     // Who is connected to a store, a page of them: a store may have thousands, and the page asks every time it looks
@@ -266,7 +295,7 @@ export function createInspector({ stores, authorize, sockets, disconnect, onErro
       const all = store.peers();
       const found = q ? all.filter(peer => `${peer.replicaId} ${peer.key ?? ''} ${JSON.stringify(peer.user) ?? ''}`.toLowerCase().includes(q)) : all;
       const stats = store.stats();
-      return { total: all.length, found: found.length, peers: found.slice(0, LIST_MOST), sessions: stats.sessions, replicas: stats.replicas, sent: stats.sent, epoch: store.epoch };
+      return { total: all.length, found: found.length, peers: named(found.slice(0, LIST_MOST), 'key'), sessions: stats.sessions, replicas: stats.replicas, sent: stats.sent, epoch: store.epoch };
     },
     // The server's sockets, a page of them: the ones furthest behind first, since those are the ones to look at.
     // `store` narrows them to the sockets that have that store open, `q` to the users whose key has it
@@ -291,7 +320,7 @@ export function createInspector({ stores, authorize, sockets, disconnect, onErro
         total: all.length,
         found: found.length,
         // Never more than its first few stores each: a socket may have hundreds open
-        sockets: found.slice(0, LIST_MOST).map(socket => (socket.stores.length > 5 ? { ...socket, stores: socket.stores.slice(0, 5), moreStores: socket.stores.length - 5 } : socket))
+        sockets: named(found.slice(0, LIST_MOST), 'key').map(socket => (socket.stores.length > 5 ? { ...socket, stores: socket.stores.slice(0, 5), moreStores: socket.stores.length - 5 } : socket))
       };
     }
   };
@@ -788,7 +817,9 @@ const record = (into, flash) => panel(into, async () => {
 }, () => record(into));
 
 function entry(e, { revert = false, where = false } = {}) {
-  const who = e.replicaId === 'server' ? (e.user === undefined ? 'the server' : e.user + ', through the server') : (e.user ?? 'someone') + ' (' + e.replicaId + ')';
+  // A user by name where the server has one for its key, the key after it
+  const user = e.user === undefined ? undefined : e.name ? e.name + ' (' + e.user + ')' : e.user;
+  const who = e.replicaId === 'server' ? (user === undefined ? 'the server' : user + ', through the server') : (user ?? 'someone') + ' (' + e.replicaId + ')';
   const late = e.at - e.ts > 1000 ? ' · made ' + when(e.ts) : '';
   return el('div', { class: 'entry' },
     el('header', {},
@@ -985,14 +1016,14 @@ async function sessions() {
   const find = el('input', { type: 'search', placeholder: 'find a user', value: seen.q, on: { change: () => { seen.q = find.value; show(); } } });
   const every = el('input', { type: 'checkbox', checked: seen.everyStore, on: { change: () => { seen.everyStore = every.checked; show(); } } });
   const socketRows = wires.sockets.map(w => el('tr', {},
-    el('td', { class: 'mono' }, w.relay ? 'relay ' + w.key : w.key ?? '(no user)'),
+    el('td', { class: 'mono' }, w.relay ? 'relay ' + w.key : w.key === null ? '(no user)' : w.name ? w.name + ' (' + w.key + ')' : w.key),
     el('td', { class: 'mono' }, w.stores.join(', ') + (w.moreStores ? ' and ' + w.moreStores + ' more' : '')),
     el('td', {}, lasted(w.openMs)),
     el('td', {}, lasted(w.idleMs)),
     el('td', { class: w.buffered > 65536 ? 'bad' : '' }, w.buffered + ' B'),
     el('td', {}, w.expiresAt === null ? '' : when(w.expiresAt)),
     el('td', {}, wires.disconnects && !w.relay && w.key !== null && el('button', { class: 'danger', on: { click: () => hangUp(w.key) } }, 'Disconnect'))));
-  const rows = people.peers.map(p => el('tr', {}, el('td', { class: 'mono' }, p.replicaId), el('td', { class: 'mono' }, p.key ?? ''), el('td', { class: 'mono' }, brief(p.user, 120)), el('td', { class: 'mono' }, brief(p.data, 120))));
+  const rows = people.peers.map(p => el('tr', {}, el('td', { class: 'mono' }, p.replicaId), el('td', { class: 'mono' }, p.key === undefined || p.key === null ? '' : p.name ? p.name + ' (' + p.key + ')' : p.key), el('td', { class: 'mono' }, brief(p.user, 120)), el('td', { class: 'mono' }, brief(p.data, 120))));
   $('main').replaceChildren(el('section', {},
     el('h2', {}, 'Sessions'),
     el('p', {}, people.sessions + ' sessions, ' + people.replicas + ' replicas remembered. Epoch ' + people.epoch + '.'),
