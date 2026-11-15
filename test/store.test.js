@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createStore, memoryStorage } from '../src/server/index.js';
 import { PROTOCOL } from '../src/core/index.js';
-import { fakeTime } from './helpers.js';
+import { createNetwork, fakeTime } from './helpers.js';
 
 const SHAPE = { initial: { tasks: {}, settings: {} }, singletons: ['settings'] };
 
@@ -236,4 +236,51 @@ test('observe(\'op\') tells what landed and what lost, an op that lost whole inc
     { seq: null, landed: 1, lost: [] },
     { seq: 2, landed: 1, lost: ['newer'] }
   ]);
+});
+
+test('stats() tells what the store decided since it was loaded: ops heard, its own writes, changes lost by why, ops refused by code', async () => {
+  const now = fakeTime(1_000_000);
+  const shape = { initial: { tasks: {}, locked: {} } };
+  const store = createStore({ ...shape, now, rules: { locked: false } });
+  assert.deepEqual(pick(store.stats()), { ops: 0, writes: 0, lost: {}, refused: {} });
+  store.patch({ tasks: { k: { n: 0 } } });
+  now.advance(1000);
+  store.apply({ replica: 'a', seq: 1, ts: now(), changes: [{ c: 'tasks', id: 'k', path: ['n'], set: 1 }] });
+  // Made before the write that is there now: it loses, as newer
+  store.apply({ replica: 'a', seq: 2, ts: now() - 500, changes: [{ c: 'tasks', id: 'k', path: ['n'], set: 2 }] });
+  const net = createNetwork(store);
+  const client = net.client({ replicaId: 'b', ...shape, now });
+  await net.settle();
+  client.state.locked.x = { n: 1 };
+  await net.settle();
+  assert.deepEqual(pick(store.stats()), { ops: 2, writes: 1, lost: { newer: 1 }, refused: { forbidden: 1 } });
+});
+
+function pick({ ops, writes, lost, refused }) {
+  return { ops, writes, lost, refused };
+}
+
+test('refusals() keeps the last fifty ops and requests turned away, newest first: when, whose, and why', async () => {
+  const now = fakeTime(1_000_000);
+  const shape = { initial: { tasks: {}, locked: {} } };
+  const store = createStore({ ...shape, now, rules: { locked: false }, schemas: { tasks: { n: 'number' } } });
+  const net = createNetwork(store);
+  const client = net.client({ replicaId: 'b', ...shape, now }, { user: { id: 'bob' } });
+  await net.settle();
+  client.state.locked.x = { n: 1 };
+  await net.settle();
+  // The app's own apply, refused by a schema: thrown to it, and kept too
+  assert.throws(() => store.apply({ replica: 'a', seq: 1, ts: now(), changes: [{ c: 'tasks', id: 'k', put: { n: 'one' } }] }, { user: { id: 'alice' } }), /n/);
+  const [last, first] = store.refusals();
+  assert.deepEqual([last.user, last.replicaId, last.seq, last.code], ['alice', 'a', 1, 'invalid']);
+  assert.deepEqual([first.user, first.replicaId, first.code, first.at], ['bob', 'b', 'forbidden', 1_000_000]);
+  assert.match(first.message, /./);
+  assert.deepEqual(store.stats().refused, { forbidden: 1, invalid: 1 });
+
+  for (let seq = 2; seq < 60; seq++) assert.throws(() => store.apply({ replica: 'a', seq, ts: now(), changes: [{ c: 'locked', id: 'x', put: { n: seq } }] }));
+  const kept = store.refusals();
+  assert.equal(kept.length, 50, 'the last fifty');
+  assert.equal(kept[0].seq, 59);
+  kept[0].code = 'changed';
+  assert.equal(store.refusals()[0].code, 'forbidden', 'a copy');
 });

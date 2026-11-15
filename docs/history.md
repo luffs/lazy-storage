@@ -244,6 +244,9 @@ A row per record per write, holding the record whole: a record of 2 KB
 written a thousand times is 2 MB of history. On SQLite a one-field write
 to a small record took 13 µs with history and 9 µs without, and 20 000
 such writes added 3.5 MB. So it is off unless asked for.
+`store.historySize()` says what a store's holds, `{ rows, bytes, oldest }`,
+and the inspector shows it beside every store; it reads every row in
+SQLite, so it is for a look now and then.
 
 - **`keep`** (milliseconds) forgets what is older, at the hourly
   compaction, but for each record's last form before it: `recordAt`

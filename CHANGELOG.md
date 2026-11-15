@@ -4,6 +4,13 @@ All notable changes to lazy-storage are documented here. The format follows Keep
 
 ## [Unreleased]
 
+### Added
+
+- **The inspector shows all stores side by side.** To see how the stores fared took a store at a time in the inspector, or a table of the app's own built from `store.stats()` and observers (Mageek had one). All stores, a place of its own beside the store picked, lists the live stores, each with its sessions, records, delta log, what it sent, what it decided since it was loaded (the reasons beside the counts) and what its history holds, with the registry's live and idle counts. A hundred at most, found by id and biggest first by sessions, records, what was sent, ops, lost, refused or history (`/api/everyStore?q=&sort=&limit=`), asked again every few seconds while shown, a number that changed lit for a moment, what was sent and the ops and writes told a minute; the sessions, history and refused counts go to the store's sessions, its activity and its last refusals; a column's header sorts by it, and the order is in the address. The store to look at is picked from a button that names it (or `/`), in a panel that lists the live stores whose id has what is typed, gone along with the arrow keys and to with Enter, where a list of every store was: a server of thousands of stores had them all sent to the page and put in one select. See [The inspector](docs/inspector.md)
+- **`store.stats()` counts what the store decided.** It told what a store holds and sent, but what it decided took an `op` and a `refused` observer of the app's own. It now has `ops` (the replicas' ops heard), `writes` (the server's own), `lost` (the changes that lost, by why) and `refused` (what was turned away, by code), since the store was loaded
+- **`store.refusals()`: the last ops a store turned away, and why.** `stats().refused` counted them by code; what was refused, whose it was and the message took a `refused` observer of the app's own. The store now keeps the last fifty, `{ at, replicaId, seq, user, code, message }`, newest first, from its sessions and from `store.apply` alike (which still throws to the app), and the inspector lists them from a store's Refused count
+- **`store.historySize()`: what a store's history holds.** `{ rows, bytes, oldest }`: the rows of its records' writes, the bytes of the records and changes they hold, and when the oldest landed; null with history off. It reads every row in SQLite, so it is for a look now and then; the inspector reads it every half minute. The memory and SQLite adapters answer it, and an adapter of one's own may (`historySize()`), else the rows alone are told
+
 ## [1.3.0] - 2026-11-15
 
 A store can be asked who its server's writes are for, and the

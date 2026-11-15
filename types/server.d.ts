@@ -71,6 +71,8 @@ export interface ServerStorage {
   activity?(query: { before?: number; after?: number; fromAt?: number; toAt?: number; user?: string; c?: string; deleted?: boolean; ascending?: boolean; cursor?: HistoryCursor; limit?: number }): Array<HistoryRow & { c: string; id: string | null }>;
   /** How many history rows it holds */
   historyCount?(): number;
+  /** Optional: what the history holds, for store.historySize (rows of records' writes, their bytes, the oldest `at`) */
+  historySize?(): HistorySize;
   /** Forget the rows that landed before that time, but for each record's last one before it (not kept when that is a deletion) */
   pruneHistory?(before: number): void;
 }
@@ -264,6 +266,31 @@ export interface StoreStats {
   records: number;
   log: number;
   sent: Record<string, { messages: number; bytes: number }>;
+  /** Replicas' ops heard since the store was loaded */
+  ops: number;
+  /** The server's own writes (patch, del, revert) since the store was loaded */
+  writes: number;
+  /** Changes that lost since it was loaded, by why: newer, stale, missing */
+  lost: Record<string, number>;
+  /** Ops and requests refused since it was loaded, by code: forbidden, invalid, expired, rate-limited… */
+  refused: Record<string, number>;
+}
+
+/** An op or request a store turned away: when (its clock), whose (a user's key), which op, and why */
+export interface Refusal {
+  at: number;
+  replicaId: string | null;
+  seq: number | null;
+  user: string | null;
+  code: string;
+  message: string;
+}
+
+/** What a store's history holds in its storage; `bytes` and `oldest` null from an adapter that tells only its rows */
+export interface HistorySize {
+  rows: number;
+  bytes: number | null;
+  oldest: number | null;
 }
 
 export interface StoreDocument extends StorageDocument {
@@ -315,6 +342,10 @@ export interface Store<S extends object = any> {
   /** Watch ops (once stored), refusals and sessions */
   observe<E extends keyof StoreEvents>(event: E, fn: (payload: StoreEvents[E]) => void): Unsubscribe;
   stats(): StoreStats;
+  /** What its history holds in storage, null with history off; it reads every row in SQLite, so not for every write */
+  historySize(): HistorySize | null;
+  /** The last 50 ops and requests it turned away, newest first, since it was loaded */
+  refusals(): Refusal[];
   /** Forget what the retention window no longer needs */
   compact(): { deletions: number; replicas: number };
   /** A record's history, newest first: `limit` entries (default 50); `since`, `until`, `user` and `path` narrow it, and `cursor`, the last entry of an answer, reads on after it */

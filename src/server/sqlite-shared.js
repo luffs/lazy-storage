@@ -309,6 +309,8 @@ export function sqliteStorageOn({ exec, prepare, transaction, close, db, driver 
         AND (?9 IS NULL OR v ${past} ?9 OR (v = ?9 AND n > ?10))
       ORDER BY v ${order}, n LIMIT ?11`)])),
     historyCount: prepare('SELECT count(*) AS n FROM history WHERE store = ?'),
+    // A row with no collection marks where the history is whole from, and is no record's write
+    historySize: prepare("SELECT count(*) AS rows, coalesce(sum(length(data)), 0) + coalesce(sum(length(changes)), 0) AS bytes, min(at) AS oldest FROM history WHERE store = ? AND collection <> ''"),
     // Each record's last row before the time stays: what the record was then. Unless it was deleted then: no
     // row says the same, and a record made and deleted would otherwise leave one for ever
     pruneHistory: prepare(`
@@ -508,6 +510,10 @@ export function sqliteStorageOn({ exec, prepare, transaction, close, db, driver 
           return rows.map(({ collection, id: rid, ...row }) => ({ c: collection, id: rid === '' ? null : rid, ...row }));
         },
         historyCount: () => q.historyCount.get(id).n,
+        historySize() {
+          const { rows, bytes, oldest } = q.historySize.get(id);
+          return { rows: Number(rows), bytes: Number(bytes), oldest: oldest === null ? null : Number(oldest) };
+        },
         pruneHistory(before) {
           prune(id, before);
         },

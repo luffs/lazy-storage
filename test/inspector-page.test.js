@@ -90,6 +90,10 @@ const click = async node => { node.click(); await settle(); };
 /** What the page is asking, laid out: its question and the changes it shows; and the answer given to it */
 const asking = () => (document.getElementById('ask').hidden ? null : { title: text('#ask h2'), body: text('#ask .box'), changes: changes(document.getElementById('ask')) });
 const answer = yes => click(document.querySelector(yes ? '#ask button.yes' : '#ask button.no'));
+/** The store picker opened, its offer answered; an offered store by its id */
+const openPicker = async () => { document.getElementById('pickStore').click(); await settle(); };
+const offered = id => [...document.querySelectorAll('#pickList [role="option"]')].find(li => li.firstChild.textContent === id);
+const picked = () => document.getElementById('pickedStore').textContent;
 const byText = (selector, label) => [...document.querySelectorAll(selector)].find(node => node.textContent.trim() === label);
 
 test('the page shows a store\'s records, a record with its history and what each write replaced, and puts it back as the one who is looking', async () => {
@@ -98,7 +102,7 @@ test('the page shows a store\'s records, a record with its history and what each
   page.store.apply({ replica: 'r1', seq: 1, ts: page.store.now(), changes: [{ c: 'tasks', id: 'k', path: ['title'], set: 'Oat milk' }] }, { user: { id: 'alice' } });
   await page.run();
 
-  assert.equal(document.getElementById('stores').value, 'team-1');
+  assert.equal(picked(), 'team-1');
   assert.match(text('#meta'), /version 2 · 3 records · 0 sessions · history on/);
   assert.deepEqual([...document.querySelectorAll('main section:first-child li')].map(li => li.textContent), ['tasks2', 'subtasks1', 'settingsone']);
   // What a client wrote is shown as it was written, and is no markup of the page's
@@ -162,7 +166,7 @@ test('the page opens where its address says, follows the activity as it lands, a
   history.pushState(null, '', `${BASE}#store=team-1&tab=activity`);
   dispatchEvent(new Event('popstate'));
   await settle();
-  assert.equal(document.querySelector('#tabs button[aria-pressed="true"]').textContent, 'Activity');
+  assert.equal(document.querySelector('#tabs [role="tab"][aria-selected="true"]').textContent, 'Activity');
   const feed = () => [...document.querySelectorAll('main .entry')].map(entry => entry.querySelector('header').textContent);
   assert.equal(feed().length, 3);
   assert.match(feed()[0], /v1 · the server.*tasks \/ k/);
@@ -462,16 +466,16 @@ test('a question that is open is taken back when the page goes elsewhere, and a 
   placeAgain();
   await settle();
   await click(document.querySelectorAll('main section:last-child .entry')[1].querySelector('button.danger'));
+  await openPicker();
   let release;
   page.wire.hold = new Promise(resolve => { release = resolve; });
   document.querySelector('#ask button.yes').click();
-  document.getElementById('stores').value = 'team-2';
-  document.getElementById('stores').dispatchEvent(new Event('change'));
+  offered('team-2').click();
   page.wire.hold = null;
   release();
   await settle();
   assert.deepEqual([page.store.state.settings.theme, other.state.settings.theme], ['dark', 'light'], 'team-1 is put back, and team-2 is left as it is');
-  assert.equal(document.getElementById('stores').value, 'team-2', 'and the page stays where it was taken');
+  assert.equal(picked(), 'team-2', 'and the page stays where it was taken');
 });
 
 test('what comes back for a store the page has left is not shown in the one it is on', async () => {
@@ -491,4 +495,135 @@ test('what comes back for a store the page has left is not shown in the one it i
   const told = [...document.querySelectorAll('main .entry header button:not(.danger)')].map(button => button.textContent);
   assert.ok(told.includes('tasks / two') && !told.includes('tasks / one'), JSON.stringify(told));
   assert.match(text('#meta'), new RegExp(`version ${other.version} `));
+});
+
+test('all stores side by side: a place of its own, sorted by a column\'s header, asked again, a number that changed lit', async () => {
+  const page = await open({ hash: '#tab=all' });
+  page.store.patch({ tasks: { k: { title: 'Milk' } } });
+  page.stores.get('team-2').patch({ tasks: { a: { title: 'A' }, b: { title: 'B' } } });
+  await page.run();
+
+  assert.equal(document.getElementById('all').getAttribute('aria-selected'), 'true');
+  assert.ok(document.getElementById('one').classList.contains('aside'), 'the store and its tabs set aside');
+  assert.equal(text('#meta'), '');
+  const ids = () => [...document.querySelectorAll('main tbody tr td:first-child')].map(td => td.textContent);
+  assert.deepEqual(ids(), ['team-1', 'team-2'], 'most sessions first, the id breaking ties');
+
+  await click(byText('main th button', 'Records'));
+  assert.deepEqual(ids(), ['team-2', 'team-1']);
+  assert.equal(location.hash, '#tab=all&sort=records', 'the order in the address');
+  assert.equal(document.querySelector('th[aria-sort]').textContent, 'Records');
+
+  // Asked again every other look; a number that changed since is lit
+  page.store.patch({ tasks: { j: { title: 'Eggs' }, m: { title: 'Oats' } } });
+  await page.tick();
+  await page.tick();
+  const row = [...document.querySelectorAll('main tbody tr')].find(tr => tr.firstChild.textContent === 'team-1');
+  assert.equal(row.children[2].textContent, '3');
+  assert.ok(row.children[2].classList.contains('changed'));
+  assert.ok(!row.children[1].classList.contains('changed'), 'what did not change is not lit');
+
+  // A store's id goes to its records, and the store picked is shown again
+  await click(byText('main td button', 'team-2'));
+  assert.equal(location.hash, '#store=team-2&tab=records');
+  assert.equal(picked(), 'team-2');
+  assert.ok(!document.getElementById('one').classList.contains('aside'));
+});
+
+test('the store picker: a button naming the store, a panel to find another in, the keys to go along it', async () => {
+  const page = await open({ hash: '#store=team-1&tab=records' });
+  page.stores.get('team-2');
+  page.stores.get('team-30');
+  await page.run();
+  const panel = document.getElementById('pickPanel');
+  assert.equal(picked(), 'team-1');
+  assert.ok(panel.hidden);
+
+  // Opened: the store shown first, marked, and the field to type in has the focus
+  await openPicker();
+  assert.ok(!panel.hidden);
+  assert.equal(document.getElementById('pickStore').getAttribute('aria-expanded'), 'true');
+  assert.equal(document.activeElement.id, 'pickFind');
+  const options = () => [...document.querySelectorAll('#pickList [role="option"]')].map(li => li.firstChild.textContent);
+  assert.equal(options()[0], 'team-1');
+  assert.ok(offered('team-1').classList.contains('current'));
+
+  // Typed: those that have it; down and Enter goes to the one marked
+  const find = document.getElementById('pickFind');
+  find.value = 'team-3';
+  find.dispatchEvent(new Event('input'));
+  await new Promise(resolve => setTimeout(resolve, 200));
+  await settle();
+  assert.deepEqual(options(), ['team-30']);
+  find.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+  await settle();
+  assert.equal(location.hash, '#store=team-30&tab=records');
+  assert.ok(panel.hidden);
+  assert.equal(picked(), 'team-30');
+
+  // Escape leaves it as it was; nothing is gone to until one is picked
+  await openPicker();
+  find.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+  assert.equal(document.querySelector('#pickList [aria-selected="true"]').firstChild.textContent, options()[1]);
+  find.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  await settle();
+  assert.ok(panel.hidden);
+  assert.equal(location.hash, '#store=team-30&tab=records');
+  assert.equal(document.activeElement.id, 'pickStore', 'the focus back on the button');
+
+  // / opens it from anywhere; Show all stores goes to All stores, found by what was typed
+  document.body.dispatchEvent(new KeyboardEvent('keydown', { key: '/', bubbles: true }));
+  await settle();
+  assert.ok(!panel.hidden);
+  find.value = 'team-2';
+  await click(document.getElementById('pickAll'));
+  assert.equal(location.hash, '#tab=all');
+  assert.equal(document.querySelector('main input[type="search"]').value, 'team-2');
+  assert.deepEqual([...document.querySelectorAll('main tbody tr td:first-child')].map(td => td.textContent), ['team-2']);
+});
+test('all stores: what grows is told a minute, and a number goes to what it counts', async () => {
+  await clocked(async later => {
+    const page = await open({ hash: '#tab=all' });
+    await page.run();
+    const row = () => [...document.querySelectorAll('main tbody tr')].find(tr => tr.firstChild.textContent === 'team-1');
+    assert.match(row().children[6].textContent, /^–/, 'no rate at the first look');
+    // Two writes of the server's in the half minute to the next look: four a minute
+    page.store.patch({ tasks: { a: { title: 'A' } } });
+    page.store.patch({ tasks: { b: { title: 'B' } } });
+    later(30_000);
+    await page.tick();
+    await page.tick();
+    assert.match(row().children[6].textContent, /^4\/min/);
+
+    // Refused: the store's last refusals, with why
+    assert.throws(() => page.store.apply({ replica: 'r1', seq: 1, ts: page.store.now(), changes: [{ c: 'tasks', id: 'k', path: [], put: 'x' }] }, { user: { id: 'u1' } }));
+    await page.tick();
+    await page.tick();
+    await click(row().children[8].querySelector('button'));
+    assert.match(text('main .refusals h2'), /Refused in team-1/);
+    assert.equal(document.querySelectorAll('main .refusals tbody tr').length, 1);
+    assert.match(text('main .refusals tbody tr'), /u1/);
+
+    // History goes to the store's activity
+    await click(row().children[9].querySelector('button'));
+    assert.equal(location.hash, '#store=team-1&tab=activity');
+  });
+});
+
+test('the header is a tab bar: one tab shown at a time, and the arrow keys go to the next', async () => {
+  const page = await open({ hash: '#store=team-1&tab=records' });
+  await page.run();
+  const selected = () => [...document.querySelectorAll('header [role="tab"][aria-selected="true"]')].map(tab => tab.textContent);
+  assert.deepEqual(selected(), ['Records']);
+  const records = byText('#tabs [role="tab"]', 'Records');
+  records.focus();
+  records.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+  await settle();
+  assert.deepEqual(selected(), ['Activity']);
+  assert.equal(document.activeElement.textContent, 'Activity', 'the focus goes with it');
+  document.activeElement.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }));
+  document.activeElement.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }));
+  await settle();
+  assert.deepEqual(selected(), ['All stores'], 'round to All stores');
+  assert.equal(location.hash, '#tab=all');
 });

@@ -610,3 +610,40 @@ test('a revert from the inspector whose authorize says no one is told as the sto
   assert.equal(response.status, 200);
   assert.deepEqual(store.historyOf('tasks', 'k', { limit: 1 }).map(e => [e.user, e.record]), [['from-the-request', { n: 1 }]]);
 });
+
+test('all stores are shown side by side, a hundred at most, found by id and biggest first in the order asked', async () => {
+  const { get, store, stores } = setup();
+  store.patch({ tasks: { k: { n: 1 } } });
+  stores.get('team-2').patch({ tasks: { j: { n: 1 }, i: { n: 2 } } });
+  stores.get('team-3');
+  store.flush();
+  const answer = (await get('/api/everyStore')).body;
+  assert.deepEqual([answer.listed, answer.total, answer.found, answer.sort], [true, 3, 3, 'sessions']);
+  assert.deepEqual(answer.registry, { stores: 3, idle: 3, sessions: 0 });
+  const one = answer.stores.find(s => s.id === 'team-1');
+  assert.deepEqual([one.records, one.writes, one.ops], [1, 1, 0]);
+  assert.ok(one.history.rows >= 1);
+  assert.equal(Object.hasOwn(one, 'store'), false, 'no store object in the answer');
+
+  assert.deepEqual((await get('/api/everyStore?sort=records')).body.stores.map(s => s.id), ['team-2', 'team-1', 'team-3'], 'most records first, the id breaking ties');
+  assert.deepEqual((await get('/api/everyStore?sort=id&limit=2')).body.stores.map(s => s.id), ['team-1', 'team-2']);
+  const found = (await get('/api/everyStore?q=TEAM-3')).body;
+  assert.deepEqual([found.found, found.total, found.stores.map(s => s.id)], [1, 3, ['team-3']]);
+  assert.equal((await get('/api/everyStore?sort=size')).status, 400);
+  for (let i = 4; i <= 10; i++) stores.get(`team-${i}`);
+  assert.deepEqual((await get('/api/everyStore?sort=id')).body.stores.map(s => s.id).slice(0, 3), ['team-1', 'team-2', 'team-3'], 'team-10 after team-9, as it is read');
+  assert.equal((await get('/api/everyStore?sort=id')).body.stores.at(-1).id, 'team-10');
+
+  const byResolver = createInspector({ stores: id => stores.get(id), authorize: () => true });
+  const unlisted = await byResolver.handle(new Request(`http://x${BASE}/api/everyStore`), BASE);
+  assert.deepEqual(await unlisted.json(), { listed: false, total: 0, found: 0, stores: [] });
+});
+
+test('a store\'s last refusals are shown with whose they were, by name', async () => {
+  const { get, store } = setup({ nameOf: key => ({ u1: 'Ann' })[key] });
+  assert.throws(() => store.apply({ replica: 'r1', seq: 1, ts: store.now(), changes: [{ c: 'tasks', id: 'k', path: [], put: 'not a record' }] }, { user: { id: 'u1' } }));
+  const { refusals } = (await get('/api/refusals?store=team-1')).body;
+  assert.equal(refusals.length, 1);
+  assert.deepEqual([refusals[0].user, refusals[0].name, refusals[0].replicaId, refusals[0].seq], ['u1', 'Ann', 'r1', 1]);
+  assert.equal((await get('/api/refusals?store=team-404')).status, 404);
+});

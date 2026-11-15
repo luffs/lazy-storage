@@ -43,6 +43,8 @@
 //                         user's writes, of one collection, or the deletions alone. `cursor`
 //                         ({ v, n }) is a row to read on after
 //   historyCount()        how many rows it holds
+//   historySize()         optional: { rows, bytes, oldest }, the rows of records' writes (not the marks of where
+//                         the history is whole from), the bytes of their data and changes, and the earliest `at`
 //   pruneHistory(before)  forget the rows that landed before that time, but for each record's last
 //                         one before it: what the record was then (not kept when that is a deletion,
 //                         which no row says as well)
@@ -103,6 +105,18 @@ export function memoryStorage() {
       return rows.slice(0, limit).map(row => ({ ...row }));
     },
     historyCount: () => history.length,
+    historySize() {
+      let rows = 0;
+      let bytes = 0;
+      let oldest = null;
+      for (const row of history) {
+        if (row.c === '') continue;
+        rows++;
+        bytes += (row.data?.length ?? 0) + (row.changes?.length ?? 0);
+        if (oldest === null || row.at < oldest) oldest = row.at;
+      }
+      return { rows, bytes, oldest };
+    },
     pruneHistory(before) {
       // Each record's last row before the time stays: what the record was then. Unless it was deleted then:
       // no row says the same, and a record made and deleted would otherwise leave one for ever

@@ -20,6 +20,8 @@
 //   GET  <base>                    the page
 //   GET  <base>/api/stores         the live stores, each with its counts
 //   GET  <base>/api/store          ?store=      a store: collections, sessions, counts
+//   GET  <base>/api/refusals       ?store=      the last ops and requests it turned away, and why
+//   GET  <base>/api/everyStore     the live stores: what each holds, sent and decided, its history's size (&q=, &sort=, &limit=)
 //   GET  <base>/api/records        ?store=&c=   a collection's records, a page at a time (&after=, &limit=, &q=)
 //   GET  <base>/api/record         ?store=&c=&id=   a record and its clock
 //   GET  <base>/api/history        ?store=&c=&id=   a record's history (&cursor=v.n, &limit=)
@@ -41,6 +43,22 @@ import { randomId } from '../core/ids.js';
 import { isStoreId } from './registry.js';
 
 const PAGE_MOST = 200;
+// The orders Every store lists the stores in, biggest first, the id breaking ties
+const sumOf = counts => Object.values(counts ?? {}).reduce((sum, n) => sum + n, 0);
+const STORE_SORTS = {
+  id: () => 0,
+  sessions: (x, y) => y.sessions - x.sessions,
+  records: (x, y) => y.records - x.records,
+  sent: (x, y) => y.sent - x.sent,
+  ops: (x, y) => (y.ops + y.writes) - (x.ops + x.writes),
+  lost: (x, y) => sumOf(y.lost) - sumOf(x.lost),
+  refused: (x, y) => sumOf(y.refused) - sumOf(x.refused),
+  history: (x, y) => (y.history?.bytes ?? y.history?.rows ?? -1) - (x.history?.bytes ?? x.history?.rows ?? -1)
+};
+
+/** How long a store's history size is kept before it is read again: reading it reads every row */
+const HISTORY_SIZE_KEPT = 30_000;
+
 /** The most sockets, or peers, one answer lists: the page narrows them to find one among more */
 const LIST_MOST = 100;
 /** The most records one request looks into for what is searched for; it says where it stopped, to be asked on from */
@@ -188,6 +206,28 @@ export function createInspector({ stores, authorize, sockets, disconnect, nameOf
     };
   }
 
+  // What a store's history holds, kept half a minute: to know it is to read every row (store.historySize)
+  const sizes = new WeakMap();
+  function historySizeOf(store) {
+    const kept = sizes.get(store);
+    if (kept && Date.now() - kept.at < HISTORY_SIZE_KEPT) return kept.size;
+    let size = null;
+    try {
+      size = store.historySize?.() ?? null;
+    } catch (err) {
+      onError(err);
+    }
+    sizes.set(store, { at: Date.now(), size });
+    return size;
+  }
+
+  // A store's row in Every store: its stats, the bytes it sent in all, and its history's size
+  function rowOf(id, store) {
+    const { sessions, replicas, records, log, sent, ops, writes, lost, refused } = store.stats();
+    const bytes = Object.values(sent ?? {}).reduce((sum, each) => sum + (each.bytes ?? 0), 0);
+    return { id, store, version: store.version, sessions, replicas, records, log, sent: bytes, ops, writes, lost, refused, history: historySizeOf(store) };
+  }
+
   /** How many of a list are asked for: a hundred or so unless it says, one at the least, `most` at the most */
   function limitOf(params, fallback, most = PAGE_MOST) {
     const limit = numberOf(params.get('limit'), 'limit');
@@ -208,6 +248,31 @@ export function createInspector({ stores, authorize, sockets, disconnect, nameOf
       };
     },
     store: params => overview(params.get('store'), storeOf(params)),
+    // The live stores, a row each of what it holds, what it sent and decided since it was loaded, and what its
+    // history holds; a hundred at most, found by id (`q`) and in the order `sort` names, biggest first; and the
+    // registry's sums, where it is one. To sort by anything but the id or the sessions is to count every store
+    // found (its records, its history: see historySizeOf), so only those found are, and only when asked to
+    everyStore(params) {
+      const ids = liveIds();
+      if (ids === null) return { listed: false, total: 0, found: 0, stores: [] };
+      const q = (params.get('q') ?? '').toLowerCase();
+      const sort = params.get('sort') || 'sessions';
+      if (!Object.hasOwn(STORE_SORTS, sort)) throw new TypeError(`sort is one of ${Object.keys(STORE_SORTS).join(', ')}`);
+      const limit = limitOf(params, LIST_MOST, LIST_MOST);
+      const found = ids.filter(id => !q || id.toLowerCase().includes(q)).map(id => ({ id, store: resolve(id) })).filter(({ store }) => store);
+      const cheap = sort === 'id' || sort === 'sessions';
+      const rows = cheap ? found.map(({ id, store }) => ({ id, store, sessions: store.sessions })) : found.map(({ id, store }) => rowOf(id, store));
+      // Ids in the order a person reads them: team-2 before team-10
+      rows.sort((x, y) => STORE_SORTS[sort](x, y) || x.id.localeCompare(y.id, undefined, { numeric: true }));
+      const page = rows.slice(0, limit).map(row => (cheap ? rowOf(row.id, row.store) : row)).map(({ store, ...row }) => row);
+      const sums = typeof stores.stats === 'function' ? stores.stats() : null;
+      return { listed: true, total: ids.length, found: found.length, sort, stores: page, registry: sums && { stores: sums.stores, idle: sums.idle, sessions: sums.sessions } };
+    },
+    // The last ops and requests a store turned away, newest first, each with whose (named) and why
+    async refusals(params) {
+      const store = storeOf(params);
+      return { refusals: await named(typeof store.refusals === 'function' ? store.refusals() : [], 'user') };
+    },
     // What the page asks every two seconds, to know whether anything has changed: nothing that is counted
     glance(params) {
       const store = storeOf(params);
@@ -457,14 +522,45 @@ const PAGE = `<!doctype html>
   @media (prefers-color-scheme: dark) { :root { --bg: #16161a; --fg: #e7e7ec; --dim: #9a9aa6; --line: #2e2e36; --soft: #1f1f25; --accent: #8fb0ff; --bad: #ff8a80; --good: #6fd39b; --num: #e0b062; --minus: #4a2523; --plus: #1e3d2c; } }
   * { box-sizing: border-box; }
   body { margin: 0; font: 14px/1.45 system-ui, sans-serif; background: var(--bg); color: var(--fg); }
-  header { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--line); }
+  /* The header: the name and where the store is at, then the tabs on a line of their own, the one shown
+     underlined. All stores first; then, past a rule, the store picked and its own tabs */
+  header { padding: 10px 16px 0; border-bottom: 1px solid var(--line); }
+  header .top { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 16px; margin-bottom: 4px; }
   header h1 { font-size: 15px; margin: 0; }
-  nav { display: flex; gap: 4px; }
+  .tabbar { display: flex; flex-wrap: wrap; align-items: center; gap: 0 12px; }
+  [role="tablist"] { display: flex; }
+  [role="tab"] { background: none; border: 0; border-bottom: 2px solid transparent; border-radius: 0; margin-bottom: -1px; padding: 8px 8px 7px; color: var(--dim); font-weight: 500; }
+  [role="tab"]:hover:not(:disabled) { color: var(--fg); }
+  [role="tab"][aria-selected="true"] { color: var(--fg); border-bottom-color: var(--accent); }
+  [role="tab"]:disabled { cursor: default; opacity: .45; }
+  [role="tab"]:focus-visible { outline: 2px solid var(--accent); outline-offset: -3px; border-radius: 5px; }
+  .one { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; padding-left: 12px; border-left: 1px solid var(--line); }
+  /* The store picker: a button naming the store, and under it a panel to find another in */
+  .one { position: relative; }
+  .picker { display: inline-flex; gap: 6px; align-items: baseline; padding: 3px 10px; }
+  .picker b { font-weight: 600; max-width: 18em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .panel { position: absolute; top: calc(100% + 4px); left: 12px; z-index: 20; width: min(340px, calc(100vw - 32px)); padding: 6px; background: var(--bg); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 10px 30px rgba(0, 0, 0, .25); }
+  .panel input { width: 100%; }
+  .panel ul { max-height: 320px; overflow: auto; margin: 6px 0; }
+  .panel li { display: flex; justify-content: space-between; gap: 12px; padding: 5px 8px; border-radius: 6px; cursor: pointer; }
+  .panel li span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 12.5px ui-monospace, monospace; }
+  .panel li span:last-child { color: var(--dim); font-size: 12px; white-space: nowrap; }
+  .panel li[aria-selected="true"] { background: var(--soft); }
+  .panel li.current span:first-child::before { content: '✓ '; }
+  .panel li.hint { cursor: default; color: var(--dim); }
+  .panel #pickAll { margin: 0 8px 4px; font-size: 13px; color: var(--accent); text-decoration: none; }
+  /* While All stores, which is of no one store, is shown, the store picked and its tabs step back */
+  .one.aside { opacity: .55; }
+  .one.aside:hover, .one.aside:focus-within { opacity: 1; }
+  /* All stores: a column header sorts by it */
+  th button { padding: 0; border: 0; background: none; color: inherit; font: inherit; }
+  th[aria-sort="descending"] button::after { content: ' ↓'; }
+  th[aria-sort="ascending"] button::after { content: ' ↑'; }
   button, select, input { font: inherit; color: inherit; background: var(--soft); border: 1px solid var(--line); border-radius: 6px; padding: 4px 9px; }
   button { cursor: pointer; }
   button[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--bg); }
   button.danger { color: var(--bad); }
-  main { display: grid; grid-template-columns: minmax(150px, 190px) minmax(180px, 260px) 1fr; min-height: calc(100vh - 52px); }
+  main { display: grid; grid-template-columns: minmax(150px, 190px) minmax(180px, 260px) 1fr; min-height: calc(100vh - 86px); }
   main > section { border-right: 1px solid var(--line); padding: 10px 12px; overflow: auto; min-width: 0; }
   main > section:last-child { border-right: 0; }
   main.wide { display: block; }
@@ -520,17 +616,32 @@ const PAGE = `<!doctype html>
   /* Numbers that change as they are watched keep their width: digits of one width, and room for the longest */
   .ago { color: var(--dim); font-weight: normal; display: inline-block; min-width: 5.5em; }
   .ago, .entry header strong, #meta, td, li.pick span:last-child { font-variant-numeric: tabular-nums; }
+  /* All stores: numbers to the right, why beneath them, and the table scrolled sideways where it is wider than the page */
+  .scroll { overflow-x: auto; }
+  th.num, td.num { text-align: right; padding-right: 16px; }
+  td .why { display: block; color: var(--dim); font-size: 12px; white-space: nowrap; }
+  /* A number that goes somewhere: to the store's sessions, its activity, what it refused */
+  button.link { padding: 0; border: 0; background: none; color: inherit; font: inherit; text-align: inherit; text-decoration: underline dotted; text-underline-offset: 3px; }
+  .refusals { margin-top: 16px; }
   @keyframes changed { from { box-shadow: 0 0 0 2px var(--accent); } to { box-shadow: 0 0 0 2px transparent; } }
   .changed { animation: changed 1.6s ease-out; }
 </style>
 </head>
 <body>
 <header>
-  <h1>lazy-storage inspector</h1>
-  <label>Store <select id="stores"></select></label>
-  <input id="storeId" placeholder="store id" size="14" hidden>
-  <nav id="tabs"></nav>
-  <span id="meta" class="dim"></span>
+  <div class="top"><h1>lazy-storage inspector</h1><span id="meta" class="dim"></span></div>
+  <nav class="tabbar" aria-label="What to look at">
+    <span role="tablist" aria-label="Every store"><button id="all" role="tab" aria-selected="false">All stores</button></span>
+    <div id="one" class="one">
+      <button id="pickStore" class="picker" aria-haspopup="listbox" aria-expanded="false" aria-controls="pickPanel" title="Pick a store (/)"><span class="dim">Store</span> <b id="pickedStore">none</b> <span aria-hidden="true">▾</span></button>
+      <div id="pickPanel" class="panel" hidden>
+        <input id="pickFind" type="search" placeholder="find a store" autocomplete="off" spellcheck="false" role="combobox" aria-controls="pickList" aria-expanded="true" aria-autocomplete="list" aria-label="Find a store">
+        <ul id="pickList" role="listbox" aria-label="Stores"></ul>
+        <button id="pickAll" class="link">Show all stores…</button>
+      </div>
+      <span id="tabs" role="tablist" aria-label="The store picked"></span>
+    </div>
+  </nav>
 </header>
 <div id="offline" class="bad" hidden></div>
 <div id="note" class="bad" hidden></div>
@@ -695,12 +806,13 @@ function differences(old, now, path = []) {
   return JSON.stringify(old) === JSON.stringify(now) ? [] : [{ path, old, now }];
 }
 
+// A store's tabs; All stores, the live stores side by side, is a place of its own ('all'), of no one store
 const TABS = [['records', 'Records'], ['activity', 'Activity'], ['sessions', 'Sessions']];
 
 // Where the page is, kept in its address: a record can be linked to, and the way back is the browser's
-const placed = () => '#' + new URLSearchParams(Object.entries({ store: state.store, tab: state.tab, c: state.tab === 'records' ? state.c : null, id: state.tab === 'records' ? state.id : null }).filter(([, value]) => value !== null && value !== undefined));
+const placed = () => (state.tab === 'all' ? '#tab=all' + (all.sort === 'sessions' ? '' : '&sort=' + all.sort) : '#' + new URLSearchParams(Object.entries({ store: state.store, tab: state.tab, c: state.tab === 'records' ? state.c : null, id: state.tab === 'records' ? state.id : null }).filter(([, value]) => value !== null && value !== undefined)));
 function place() {
-  if (location.hash === placed() || !state.store) return;
+  if (location.hash === placed() || (!state.store && state.tab !== 'all')) return;
   // The address the page was opened at (none, or half of one) is not a place to go back to: the first place
   // takes its place, and each after it is a step that back undoes
   if (placedOnce) history.pushState(null, '', placed());
@@ -712,21 +824,93 @@ function placeFrom() {
   const params = new URLSearchParams(location.hash.slice(1));
   const tab = params.get('tab');
   const changed = params.get('store') !== state.store;
-  Object.assign(state, { store: params.get('store') ?? state.store, tab: TABS.some(([name]) => name === tab) ? tab : 'records', c: params.get('c'), id: params.get('id') });
+  Object.assign(state, { store: params.get('store') ?? state.store, tab: tab === 'all' || TABS.some(([name]) => name === tab) ? tab : 'records', c: params.get('c'), id: params.get('id') });
   if (changed) Object.assign(state, { feed: [], feedAt: null });
+  if (state.tab === 'all') all.sort = ORDERS.some(([name]) => name === params.get('sort')) ? params.get('sort') : 'sessions';
   return params.has('store');
 }
 function tabs() {
-  $('tabs').replaceChildren(...TABS.map(([name, label]) => el('button', { 'aria-pressed': String(state.tab === name), on: { click: () => { state.tab = name; show(); } } }, label)));
+  $('all').setAttribute('aria-selected', String(state.tab === 'all'));
+  $('one').classList.toggle('aside', state.tab === 'all');
+  $('tabs').replaceChildren(...TABS.map(([name, label]) => el('button', { role: 'tab', 'aria-selected': String(state.tab === name), disabled: !state.store, on: { click: () => { state.tab = name; show(); } } }, label)));
+}
+
+// The store picker: a button naming the store shown, and a panel under it to find another in. The live stores
+// whose id has what is typed, the twenty with the most sessions, the one shown first (everyStore, as All stores
+// asks it); the arrow keys move along them, Enter goes to one, Escape leaves it be. Nothing is gone to until it
+// is picked. A server with no list of its stores offers none: a store is named by its id and Enter
+const picker = { open: false, offered: [], at: 0, listed: true, asked: 0 };
+function openPicker() {
+  if (picker.open) return;
+  picker.open = true;
+  $('pickPanel').hidden = false;
+  $('pickStore').setAttribute('aria-expanded', 'true');
+  $('pickFind').value = '';
+  offer();
+  $('pickFind').focus();
+}
+function closePicker({ back = true } = {}) {
+  if (!picker.open) return;
+  picker.open = false;
+  $('pickPanel').hidden = true;
+  $('pickStore').setAttribute('aria-expanded', 'false');
+  if (back) $('pickStore').focus();
+}
+function goTo(id) {
+  closePicker();
+  if (!id || (id === state.store && state.tab !== 'all')) return;
+  if (state.tab === 'all') state.tab = 'records';
+  pick(id);
+}
+const offer = tried(async () => {
+  const asked = ++picker.asked;
+  const q = $('pickFind').value.trim();
+  const answer = await ask('everyStore', { q, limit: 20 });
+  if (asked !== picker.asked || !picker.open) return;
+  picker.listed = answer.listed;
+  let offered = answer.stores;
+  // The store shown first, where it is one of those found
+  const current = offered.find(s => s.id === state.store);
+  if (current) offered = [current, ...offered.filter(s => s !== current)];
+  else if (state.store && !q && answer.listed) offered = [{ id: state.store }, ...offered.slice(0, 19)];
+  picker.offered = offered;
+  picker.at = 0;
+  drawOffer();
+});
+function drawOffer() {
+  const list = $('pickList');
+  if (!picker.listed) {
+    list.replaceChildren(el('li', { class: 'hint' }, "Type a store's id and press Enter."));
+    $('pickAll').hidden = true;
+    return;
+  }
+  $('pickAll').hidden = false;
+  list.replaceChildren(...(picker.offered.length
+    ? picker.offered.map((s, i) => el('li', {
+      id: 'pick-' + i,
+      role: 'option',
+      class: s.id === state.store ? 'current' : '',
+      'aria-selected': String(i === picker.at),
+      on: { click: () => goTo(s.id), mousemove: () => mark(i) }
+    }, el('span', {}, s.id), el('span', {}, s.sessions === undefined ? '' : s.sessions + ' sessions · ' + s.records + ' records')))
+    : [el('li', { class: 'hint' }, 'No live store has that in its id.')]));
+  mark(picker.at);
+}
+// The one Enter goes to, marked where it is: the list itself is not drawn again, or a click on it could be lost
+function mark(i) {
+  picker.at = i;
+  for (const li of $('pickList').querySelectorAll('[role="option"]')) li.setAttribute('aria-selected', String(li.id === 'pick-' + i));
+  $('pickFind').setAttribute('aria-activedescendant', picker.offered.length ? 'pick-' + i : '');
+  $('pick-' + i)?.scrollIntoView?.({ block: 'nearest' });
 }
 
 const loadStores = tried(async () => {
-  const { stores, listed } = await ask('stores');
-  $('storeId').hidden = listed;
-  $('stores').replaceChildren(...stores.map(s => el('option', { value: s.id, selected: s.id === state.store }, s.id)));
-  if (state.store) await show();
-  else if (stores.length) await pick(stores[0].id);
-  else if (!stores.length && listed) $('main').replaceChildren(el('section', {}, el('p', { class: 'dim' }, 'No store is live. One appears here when a client opens it.')));
+  if (state.store || state.tab === 'all') return show();
+  // Nothing asked for: the store with the most sessions
+  const { stores, listed } = await ask('everyStore', { limit: 1 });
+  if (stores.length) await pick(stores[0].id);
+  else if (listed) $('main').replaceChildren(el('section', {}, el('p', { class: 'dim' }, 'No store is live. One appears here when a client opens it.')));
+  else $('main').replaceChildren(el('section', {}, el('p', { class: 'dim' }, 'Name a store by its id, above.')));
 });
 
 const pick = tried(async id => {
@@ -743,9 +927,16 @@ function topLine() {
 const show = () => panel($('main'), async () => {
   note('');
   tabs();
+  if (state.tab === 'all') {
+    place();
+    $('meta').textContent = '';
+    $('main').className = 'wide';
+    await allStores();
+    return;
+  }
   if (!state.store) return;
   place();
-  if ($('stores').value !== state.store) $('stores').value = state.store;
+  $('pickedStore').textContent = state.store;
   state.overview = await ask('store', { store: state.store });
   counted = Date.now();
   uncounted = false;
@@ -1042,6 +1233,116 @@ async function sessions() {
     el('table', {}, el('thead', {}, el('tr', {}, ['Message', 'Count', 'Bytes'].map(h => el('th', {}, h)))), el('tbody', {}, Object.entries(people.sent).map(([type, { messages, bytes }]) => el('tr', {}, el('td', { class: 'mono' }, type), el('td', {}, String(messages)), el('td', {}, String(bytes))))))));
 }
 
+// --- All stores ----------------------------------------------------------------------------
+
+const size = n => (n === null || n === undefined ? '' : n < 1024 ? n + ' B' : n < 1048576 ? (n / 1024).toFixed(1) + ' KB' : (n / 1048576).toFixed(1) + ' MB');
+const tally = counts => Object.values(counts ?? {}).reduce((sum, n) => sum + n, 0);
+const reasons = counts => Object.entries(counts ?? {}).map(([why, n]) => why + ' ' + n).join(', ');
+// The columns, each with the order its header sorts by (as the server names it), or none
+const COLUMNS = [['Store', 'id'], ['Sessions', 'sessions'], ['Records', 'records'], ['Log', null], ['Sent', 'sent'], ['Ops', 'ops'], ['Writes', 'ops'], ['Lost', 'lost'], ['Refused', 'refused'], ['History', 'history']];
+const ORDERS = COLUMNS.filter(([, order]) => order).map(([label, order]) => [order, label]);
+
+// The live stores side by side, a hundred at most: found by id and biggest first by the column whose header was
+// clicked (in the address), asked again every few seconds while shown (allStoresAgain). What each sent and
+// decided is since it was loaded, and what its history holds is read every half minute. A number that has
+// changed since the last look is lit for a moment (all.was). A store's id goes to its records
+const all = { q: '', sort: 'sessions', into: null, asked: 0, was: new Map(), refusalsOf: null };
+async function allStores() {
+  let typing = null;
+  const find = el('input', { type: 'search', placeholder: 'find a store', value: all.q, on: { input: () => { clearTimeout(typing); typing = setTimeout(() => { all.q = find.value; fillAll(); }, 250); } } });
+  all.into = el('div', {});
+  all.was = new Map();
+  $('main').replaceChildren(el('section', {}, el('h2', {}, 'All stores'), el('div', { class: 'row' }, find), all.into));
+  await fillAll();
+}
+const sortBy = order => {
+  if (order === all.sort) return;
+  all.sort = order;
+  all.was = new Map();
+  place();
+  fillAll();
+};
+const fillAll = tried(async () => {
+  const asked = ++all.asked;
+  const into = all.into;
+  const answer = await ask('everyStore', { q: all.q, sort: all.sort });
+  const turnedAway = all.refusalsOf ? await ask('refusals', { store: all.refusalsOf }).catch(() => null) : null;
+  // A newer ask is on its way, or the page has gone elsewhere: this answer is not what is shown
+  if (asked !== all.asked || !into?.isConnected) return;
+  if (!answer.listed) {
+    into.replaceChildren(el('p', { class: 'dim' }, 'This server serves its stores by a resolver with no list of them: a store is asked for by its id.'));
+    return;
+  }
+  const { stores, total, found, registry } = answer;
+  const now = Date.now();
+  const go = (id, tab = 'records') => { Object.assign(state, { store: id, tab, c: null, id: null, feed: [], feedAt: null }); show(); };
+  // What each store's numbers were at the last look: one that differs now is lit, and what grew since, by how
+  // much a minute, is its rate. The first look has no rate to tell
+  const before = s => all.was.get(s.id);
+  const lit = (s, key, value) => (before(s) !== undefined && before(s)[key] !== value ? ' changed' : '');
+  const perMinute = (s, key, value) => {
+    const was = before(s);
+    if (!was || value < was[key] || now <= was.at) return null;
+    return (value - was[key]) / ((now - was.at) / 60000);
+  };
+  const rate = r => (r === null ? '–' : r < 10 ? String(Math.round(r * 10) / 10) : String(Math.round(r)));
+  // A count that grows: its rate a minute, the total since the store was loaded beneath it
+  const growing = (s, key, text, title, sized) => {
+    const r = perMinute(s, key, s[key] ?? 0);
+    // Nothing a minute is said quietly: most stores, most of the time
+    const quiet = r === null || r === 0;
+    return el('td', { class: 'num' + lit(s, key, s[key]), title }, el('span', { class: quiet ? 'dim' : '' }, r === null ? '–' : r === 0 ? '0' : sized ? size(Math.round(r)) + '/min' : rate(r) + '/min'), el('span', { class: 'why' }, text + ' in all'));
+  };
+  const counted = (s, key, counts, bad, open) => {
+    const n = tally(counts);
+    const body = [String(n), n ? el('span', { class: 'why' }, reasons(counts)) : null];
+    return el('td', { class: 'num' + (bad && n ? ' bad' : '') + lit(s, key, n) }, n && open ? el('button', { class: 'link', title: 'What was refused, and why', on: { click: open } }, ...body) : body);
+  };
+  const num = (s, key, text, title) => el('td', { class: 'num' + lit(s, key, s[key]), ...(title ? { title } : {}) }, text);
+  const showRefusals = id => { all.refusalsOf = all.refusalsOf === id ? null : id; fillAll(); };
+  const rows = stores.map(s => el('tr', {},
+    el('td', { class: 'mono' }, el('button', { title: 'Its records', on: { click: () => go(s.id) } }, s.id)),
+    el('td', { class: 'num' + lit(s, 'sessions', s.sessions) }, s.sessions ? el('button', { class: 'link', title: 'Who is connected', on: { click: () => go(s.id, 'sessions') } }, String(s.sessions)) : '0'),
+    num(s, 'records', String(s.records)),
+    num(s, 'log', String(s.log), 'The delta log a reconnecting client catches up from'),
+    growing(s, 'sent', size(s.sent), 'What it sent, a minute; beneath, since it was loaded', true),
+    growing(s, 'ops', String(s.ops ?? 0), "Replicas' ops a minute; beneath, since it was loaded"),
+    growing(s, 'writes', String(s.writes ?? 0), "The server's own writes a minute; beneath, since it was loaded"),
+    counted(s, 'lost', s.lost, false),
+    counted(s, 'refused', s.refused, true, () => showRefusals(s.id)),
+    el('td', { class: 'num' }, s.history
+      ? el('button', { class: 'link', title: 'Its activity', on: { click: () => go(s.id, 'activity') } }, size(s.history.bytes) || s.history.rows + ' rows', el('span', { class: 'why' }, (s.history.bytes === null ? '' : s.history.rows + ' rows') + (s.history.oldest ? (s.history.bytes === null ? '' : ', ') + 'since ' + when(s.history.oldest) : '')))
+      : el('span', { class: 'dim' }, 'off'))));
+  // "12 live", "100 of 2340 live", "3 that match, of 12 live", "100 of 340 that match, of 2340 live"
+  const some = stores.length === found ? String(found) : stores.length + ' of ' + found;
+  const shown = (found === total ? some + ' live' : some + ' that match, of ' + total + ' live') + (registry ? '; ' + registry.idle + ' with nobody, ' + registry.sessions + ' sessions in all' : '');
+  into.replaceChildren(
+    el('p', { class: 'dim' }, shown + '. What each sent and did is a minute, from the last two looks, and in all since it was loaded; the biggest first by it in all.'),
+    stores.length
+      ? el('div', { class: 'scroll' }, el('table', {}, el('thead', {}, el('tr', {}, COLUMNS.map(([label, order], i) => el('th', {
+        class: i ? 'num' : '',
+        ...(order === all.sort && label !== 'Writes' ? { 'aria-sort': order === 'id' ? 'ascending' : 'descending' } : {})
+      }, order ? el('button', { title: order === 'id' ? 'In order of id' : 'Biggest first', on: { click: () => sortBy(order) } }, label) : label)))), el('tbody', {}, rows)))
+      : el('p', { class: 'dim' }, total ? 'No live store matches.' : 'No store is live.'),
+    turnedAway && refusalsList(all.refusalsOf, turnedAway.refusals));
+  all.was = new Map(stores.map(s => [s.id, { at: now, sessions: s.sessions, records: s.records, log: s.log, sent: s.sent, ops: s.ops ?? 0, writes: s.writes ?? 0, lost: tally(s.lost), refused: tally(s.refused) }]));
+});
+
+// A store's last refusals, newest first: when, whose, its replica and op, and why
+function refusalsList(id, refusals) {
+  return el('section', { class: 'refusals' },
+    el('div', { class: 'row' }, el('h2', {}, 'Refused in ' + id), el('button', { on: { click: () => { all.refusalsOf = null; fillAll(); } } }, 'Close')),
+    refusals.length
+      ? el('div', { class: 'scroll' }, el('table', {}, el('thead', {}, el('tr', {}, ['When', 'Whose', 'Replica', 'Op', 'Code', 'Why'].map(h => el('th', {}, h)))), el('tbody', {}, refusals.map(r => el('tr', {},
+        el('td', {}, timed(r.at)),
+        el('td', { class: 'mono' }, r.user === null ? '' : r.name ? r.name + ' (' + r.user + ')' : r.user),
+        el('td', { class: 'mono' }, r.replicaId ?? ''),
+        el('td', {}, r.seq === null ? '' : String(r.seq)),
+        el('td', { class: 'bad' }, r.code),
+        el('td', {}, r.message))))))
+      : el('p', { class: 'dim' }, 'Nothing refused since it was loaded.'));
+}
+
 // The address changed under the page (back, forward, a link, a hash typed in): it goes where the address says.
 // A browser may say so twice, and says so of an address the page itself has just set: only one that is not where
 // the page is already is acted on
@@ -1054,15 +1355,62 @@ const moved = () => {
 addEventListener('hashchange', moved);
 addEventListener('popstate', moved);
 placeFrom();
-$('stores').addEventListener('change', () => pick($('stores').value));
-$('storeId').addEventListener('change', () => pick($('storeId').value.trim()));
+let typed = null;
+$('pickStore').addEventListener('click', () => (picker.open ? closePicker() : openPicker()));
+$('pickFind').addEventListener('input', () => { clearTimeout(typed); typed = setTimeout(offer, 150); });
+$('pickFind').addEventListener('keydown', event => {
+  const { key } = event;
+  if (key === 'Escape') {
+    event.preventDefault();
+    closePicker();
+  } else if (key === 'ArrowDown' || key === 'ArrowUp') {
+    event.preventDefault();
+    if (!picker.offered.length) return;
+    mark((picker.at + (key === 'ArrowDown' ? 1 : picker.offered.length - 1)) % picker.offered.length);
+  } else if (key === 'Enter') {
+    event.preventDefault();
+    goTo(picker.listed ? picker.offered[picker.at]?.id : $('pickFind').value.trim());
+  }
+});
+$('pickAll').addEventListener('click', () => {
+  all.q = $('pickFind').value.trim();
+  closePicker({ back: false });
+  state.tab = 'all';
+  show();
+});
+// A click elsewhere closes the panel, and / opens it from anywhere but a field being typed in
+document.addEventListener('pointerdown', event => { if (picker.open && !$('one').contains(event.target)) closePicker({ back: false }); });
+document.addEventListener('keydown', event => {
+  if (event.key !== '/' || event.ctrlKey || event.metaKey || event.altKey) return;
+  if (event.target.closest?.('input, textarea, select, [contenteditable]') || !$('ask').hidden) return;
+  event.preventDefault();
+  openPicker();
+});
+// All stores is asked again every other look, while it is shown and the page is in sight
+let allTicks = 0;
+const allStoresAgain = async () => {
+  if (++allTicks % 2 || document.hidden || !all.into?.isConnected) return;
+  await fillAll();
+};
+$('all').addEventListener('click', () => { state.tab = 'all'; show(); });
+// The tabs are gone along with the arrow keys, as a tab bar is: the next one, or the one before, is shown
+document.querySelector('header nav').addEventListener('keydown', event => {
+  if (!['ArrowLeft', 'ArrowRight'].includes(event.key) || event.target.getAttribute('role') !== 'tab') return;
+  const tabs = [...document.querySelectorAll('header [role="tab"]:not(:disabled)')];
+  const next = tabs[(tabs.indexOf(event.target) + (event.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length];
+  event.preventDefault();
+  next.click();
+  // The store's tabs are drawn again as one is shown: the focus goes to the one drawn now
+  [...document.querySelectorAll('header [role="tab"]')].find(tab => tab.textContent === next.textContent)?.focus();
+});
 // One look at a time: a server that takes longer than the two seconds to answer is not asked again meanwhile
 let lookingNow = false;
 setInterval(async () => {
   if (lookingNow || Date.now() < down.until) return;
   lookingNow = true;
   try {
-    if (await glance()) await follow();
+    if (state.tab === 'all') await allStoresAgain();
+    else if (await glance()) await follow();
   } finally {
     lookingNow = false;
   }

@@ -227,6 +227,18 @@ export function createStore({
   const observers = { op: new Set(), refused: new Set(), session: new Set() };
   const listeners = new Set();
   const sent = {};
+  // What the store has decided since it was loaded, for stats(): the replicas' ops it heard and the server's own
+  // writes, the changes that lost by why (newer, stale, missing), and the ops refused before the merge by code
+  const decided = { ops: 0, writes: 0, lost: {}, refused: {} };
+  // The last refusals, newest last, for store.refusals(): what was turned away, whose, and why
+  const REFUSALS_KEPT = 50;
+  const refusals = [];
+  function refused(op, code, message, user) {
+    decided.refused[code] = (decided.refused[code] ?? 0) + 1;
+    const plain = Utils.isPlainObject(op);
+    refusals.push({ at: clock.time, replicaId: plain && typeof op.replica === 'string' ? op.replica : null, seq: plain && Number.isInteger(op.seq) ? op.seq : null, user: ownerKey(user) ?? null, code, message: String(message ?? '').slice(0, 500) });
+    if (refusals.length > REFUSALS_KEPT) refusals.splice(0, refusals.length - REFUSALS_KEPT);
+  }
   let stateJSON = null;
   let stateBytes;
   let clocksJSON = null;
@@ -606,6 +618,9 @@ export function createStore({
 
   /** Changes that landed: into the log, to storage, to every session, to listeners */
   function landed(applied, ts, replicaId, replicaEntry, user, seq, lost = []) {
+    if (replicaId === 'server') decided.writes++;
+    else decided.ops++;
+    for (const l of lost) decided.lost[l.why] = (decided.lost[l.why] ?? 0) + 1;
     if (applied.length) {
       version++;
       stateJSON = null;
@@ -1150,6 +1165,7 @@ export function createStore({
       if (Utils.isPlainObject(op) && typeof op.replica === 'string') message.replica = op.replica;
     }
     if (err.code === 'rate-limited') message.retryAfter = err.retryAfter;
+    refused(op, message.code, message.message, user);
     if (!(err instanceof RefusedError)) onError(err);
     if (observers.refused.size) notify('refused', { replicaId: Utils.isPlainObject(op) ? op.replica : undefined, seq: message.seq, user, code: message.code, message: err.message });
     return message;
@@ -1580,8 +1596,19 @@ export function createStore({
     /** Decide a replica's op on trust, as if it came on a session of `user` */
     apply(op, { user } = {}) {
       alive('write to');
-      return apply(op, { user, speaksFor: null, heldUntil: null });
+      try {
+        return apply(op, { user, speaksFor: null, heldUntil: null });
+      } catch (err) {
+        // Thrown to the app that asked, and counted and kept as a session's refusal is
+        if (err instanceof RefusedError) refused(op, err.code, err.message, user);
+        throw err;
+      }
     },
+    /**
+     * The last 50 ops and requests the store turned away, newest first: `{ at, replicaId, seq, user, code,
+     * message }`, `user` the key of whose it was. Since the store was loaded, as stats().refused counts them
+     */
+    refusals: () => refusals.slice().reverse().map(r => ({ ...r })),
     closeSessions,
     snapshotJSON: () => {
       commitNow();
@@ -1618,7 +1645,21 @@ export function createStore({
       for (const c of shape.collections) records += Object.keys(doc.state[c]).length;
       const out = {};
       for (const [type, entry] of Object.entries(sent)) out[type] = { ...entry };
-      return { version, epoch, schema, sessions: sessions.size, replicas: replicas.size, records, log: log.length, sent: out };
+      return {
+        version, epoch, schema, sessions: sessions.size, replicas: replicas.size, records, log: log.length, sent: out,
+        ops: decided.ops, writes: decided.writes, lost: { ...decided.lost }, refused: { ...decided.refused }
+      };
+    },
+    /**
+     * What the store's history holds in its storage: `{ rows, bytes, oldest }`, the rows of the records' writes,
+     * the bytes of the records and changes they hold, and when the oldest landed; null with history off. It
+     * reads every row in SQLite, so it is for a look now and then, not every write. An adapter of one's own
+     * without `historySize()` answers the rows alone
+     */
+    historySize() {
+      if (!keeps) return null;
+      if (typeof storage.historySize === 'function') return storage.historySize();
+      return { rows: storage.historyCount(), bytes: null, oldest: null };
     },
     /**
      * A record's history, newest first: `[{ c, id?, v, ts, replicaId, user?, changes, record }]`, a write each,

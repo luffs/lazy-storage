@@ -987,3 +987,20 @@ test('the store\'s `by` is asked who a write of the server\'s is for when the wr
   assert.throws(() => store.patch({ tasks: { k: { n: 6 } } }), /by is a user's key/);
   assert.equal(store.state.tasks.k.n, undefined, 'nothing written');
 });
+
+for (const [kind, makeStorage] of Object.entries(storages)) {
+  test(`${kind}: historySize is the rows of the records' writes, the bytes they hold and the oldest; null with history off`, () => {
+    const now = fakeTime(1_000_000);
+    const store = createStore({ ...SHAPE, now, history: true, storage: makeStorage() });
+    const before = store.historySize();
+    store.patch({ tasks: { k: { title: 'Milk' } } });
+    now.advance(1000);
+    store.patch({ tasks: { k: { title: 'Oat milk' } } });
+    store.flush();
+    const after = store.historySize();
+    assert.equal(after.rows - before.rows, 2);
+    assert.ok(after.bytes > before.bytes + 'Oat milk'.length, 'the records and their changes');
+    assert.ok(after.oldest <= 1_000_000);
+    assert.equal(createStore({ ...SHAPE }).historySize(), null);
+  });
+}

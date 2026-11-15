@@ -153,7 +153,12 @@ come with `replicaId` 'server' and `seq` null),
 every client op turned away (`{ replicaId, seq, user, code,
 message }`), and sessions opening and closing, for logs, audits, and
 metrics; `store.stats()` counts version, epoch, schema, sessions,
-replicas, records, and the delta log, plus `sent`, what the store has sent by
+replicas, records, and the delta log; what it decided, `ops` (the
+replicas' ops it heard), `writes` (its server's own), `lost` (the
+changes that lost, by why: `newer`, `stale`, `missing`) and `refused`
+(the ops and requests turned away, by code; `store.refusals()` is the
+last fifty of them, each with when, whose, which op and the message);
+plus `sent`, what the store has sent by
 message type (`patch`, `ack`, `snapshot`, `delta`, `presence`,
 `http-snapshot`, …) as `{ messages, bytes }`: deliveries, a broadcast
 once per session it reached, and their size in UTF-8 bytes of JSON,

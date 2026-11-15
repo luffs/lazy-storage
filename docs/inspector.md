@@ -4,7 +4,10 @@ What a store holds is JSON in a process, and what it did is rows in its
 storage: to see either took a script. The inspector is a page the server
 serves of itself, for whoever runs it:
 
-- **Records**: the stores that are live, a store's collections, its
+- **Records**: the store to look at, picked from a button that names it
+  (or `/`): a panel to type in, the live stores whose id has what is typed
+  listed, those with most sessions first and the one shown at the top, gone
+  along with the arrow keys and to with Enter; its collections, its
   records (searched by id or by anything in them), and a record with
   the clock the merge decides it by. A record is a tree, coloured by
   kind, its objects and lists folded and unfolded, copied as JSON; and
@@ -22,6 +25,21 @@ serves of itself, for whoever runs it:
   how long it has been open and quiet and how much is unsent to it, and
   a button that closes a user's sockets, for its clients to authenticate
   afresh; and what the store has sent, by message.
+- **All stores**: the live stores side by side, each with its sessions,
+  records, delta log and what it sent, what it decided since it was
+  loaded (ops heard, its server's writes, changes lost and ops refused,
+  each with why), and what its history holds (its size, rows and since
+  when, read every half minute); with a registry, how many are live and
+  idle. A hundred at most, found by id, biggest first by the column whose
+  header is clicked (sessions unless asked; any other order counts every
+  store found), and asked again every few seconds while shown, a number
+  that changed lit for a moment. What it sent and its ops and writes are
+  told a minute, from the last two looks, with the total beneath. A
+  store's id goes to its records, its sessions to who is connected, its
+  history to its activity, and what it refused to the last fifty refusals,
+  each with when, whose, which op and why. It has
+  a place of its own beside the store picked and its tabs, at `#tab=all`
+  (`&sort=refused`, say).
 
 ```js
 import { serve } from 'lazy-storage/server/node';   // or 'lazy-storage/server/bun'
@@ -34,7 +52,7 @@ serve({
 
 It is then at `<path>/inspect`: `http://localhost:3200/ws/inspect` for a
 server on its defaults. `node examples/inspector/server.js` runs one with
-something to look at.
+something to look at, and `STORES=300` before it, with as many stores.
 
 A revert and a disconnect are asked about in the page before they are
 done, a revert with what it will write laid out, field by field. A part

@@ -190,6 +190,10 @@ const recent: string[] = store.activity({ after: 3, oldestFirst: true, until: Da
 void recent;
 const exported: StoreDocument = store.export();
 const records: number = store.stats().records;
+const decided: number = store.stats().ops + store.stats().writes + (store.stats().lost.newer ?? 0) + (store.stats().refused.forbidden ?? 0);
+const held: number | null | undefined = store.historySize()?.bytes;
+const why: string[] = store.refusals().map(r => `${r.code} ${r.user ?? ''} ${r.seq ?? ''} ${r.at}: ${r.message}`);
+void [decided, held, why];
 void [dup, recordClock, exported, records];
 // A record's form declared once: the schemas, and the state's type from them
 const declared = defineSchemas({
